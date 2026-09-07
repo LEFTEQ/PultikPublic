@@ -1,0 +1,11 @@
+.DS_Store
+*.xcodeproj
+*.xcworkspace
+Derived/
+DerivedData/
+.build/
+Tuist/.build/
+.worktrees/
+.vitrinka/
+dist/
+tools/pultik/pultik
