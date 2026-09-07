@@ -1,61 +1,65 @@
-# pultik — the release counter
+# pultik CLI
 
-`pultik ship` builds the app described by the repo's `release.yaml`, drafts
-release notes (via `claude -p` when available — always shown for approval),
-and puts the artifact + `release.json` on **downloads.example.invalid**, where the
-marketplace homepage picks it up.
+The optional Go companion for Pultík provides local notes, installation diagnosis,
+and a release publisher for a compatible external download service. The public
+source mirror includes neither that service nor a release installer.
 
-```bash
-# normal install from the repository root (CLI + app + Claude integration)
-./install.sh
+## Build manually
 
-# manual CLI-only fallback
+From the repository root, with Go 1.26.4 or newer:
+
+```sh
 mkdir -p ~/.local/bin
 (cd tools/pultik && go build -o ~/.local/bin/pultik .)
-
-# onboard a repo (AI drafts the manifest, you approve)
-pultik init
-
-# in an app repo with release.yaml
-pultik ship                 # build → notes → confirm → upload
-pultik ship --dry-run       # everything except upload
-pultik ship --skip-build --notes "hotfix: crash on launch" --yes
-pultik releases             # what's on the counter
-pultik note --help           # scratch notes shown by the panel
-                             # todos + reminders: vitrinka todo | vitrinka schedule
-pultik install --help        # install/repair app + CLI + Claude integration
-pultik doctor [--json]       # read-only local installation diagnosis
+(cd tools/pultik && go test ./... && go vet ./...)
+pultik note --help
+pultik doctor --json
 ```
 
-`pultik install` writes the Claude SessionStart hooks as `vitrinka
-hook-context todo|schedule` (binary resolved from `~/.local/bin`, PATH, then
-the usual manual-build dirs; `--dry-run` prints the lines). The `/todo*` and
-`/remind` skills ship through vitrinka's kit plugin, not this CLI; an old
-Obsidian vault moves over once with `vitrinka import pultik`.
+There is no `install.sh` in this mirror. Build the native app separately using
+the root README. `pultik install` remains in the source for existing deployments;
+its app-download operations require your own service. Review its `--dry-run`
+output before enabling hooks or Hammerspoon integration. The hook integration
+also needs the separately installed vitrinka CLI and its sign-in.
 
-## release.yaml
+## Publishing to your service
 
-The canonical contract lives at **downloads.example.invalid/docs/shipping**.
+The default server is a reserved placeholder. Set `PULTIK_BASE` to your compatible
+service and supply its upload credential through `PULTIK_TOKEN` or the existing
+local token file. Never commit credentials. This repository does not provide a
+hosted endpoint or access to the original operator's infrastructure.
+
+Create `release.yaml` in the app repository you intend to publish:
 
 ```yaml
-app: vitrinka          # [a-z0-9._-], marketplace id
-name: Vitrinka
-icon: "🖼️"             # emoji fallback until the first icon_file ships
-icon_file: apps/desktop/marketplace-icon.png   # square full-bleed PNG ≥256px
-description: Desktop shell for vitrinka boards.
-platform: macos        # macos | android | chrome | …
+app: example-desktop
+name: Example Desktop
+icon: "📦"
+description: Example desktop application.
+platform: macos
 channel: stable
-build: ./apps/desktop/dist.sh            # any shell command, repo-relative
-artifact: apps/…/bundle/dmg/*.dmg        # glob, newest match wins
-version_cmd: node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version"
-notes_paths: [apps/desktop]              # optional — scope AI notes in a monorepo
+build: ./build-release.sh
+artifact: dist/Example.zip
+version_cmd: cat VERSION
 ```
 
-Release notes draft from the commits **since the app's last shipped release**
-(server-known, falls back to the last 30); a `RELEASE_NOTES.md` beside the
-manifest wins over the AI draft when present.
+The build script, artifact and VERSION file above belong to that app repository;
+they are examples, not files supplied by this mirror. Run `pultik ship --dry-run`
+to build and preview notes before uploading. `pultik ship` asks for confirmation;
+`pultik releases` reads the configured service's index.
 
-Config: `PULTIK_TOKEN` (or `~/.config/pultik/token`) — the exampleapp-apps
-`DOWNLOADS_UPLOAD_TOKEN`; `PULTIK_BASE` overrides `https://downloads.example.invalid`.
+The client expects these service routes (see `main.go` for the exact JSON types):
 
-Server contract + marketplace: exampleapp-apps `docs/specs/2026-07-21-marketplace-cli-decisions.md`.
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/releases` | Release index |
+| GET | `/api/releases/{app}/latest` | Last release, used to scope release notes |
+| PUT | `/api/releases/{app}/{version}/artifact/{filename}` | Raw artifact or icon upload, bearer authenticated |
+| PUT | `/api/releases/{app}/{version}` | Release metadata JSON, bearer authenticated |
+| GET | `/get/{app}` | Stable download used by installation |
+
+The service must also serve artifact download paths and app pages generated by
+the client. `pultik init` uses an AI command to draft a manifest and expects your
+service's `/docs/shipping` documentation; writing the manifest manually avoids
+that dependency. The public mirror contains the client, not the server contract's
+implementation.
