@@ -1069,7 +1069,7 @@ struct DevboxSlot: Identifiable, Codable {
 struct DevboxProject: Identifiable, Codable {
     /// Internal tenant key ("booking-be").
     let name: String
-    /// GitHub owner/repo of the primary checkout, e.g. example-org/BookingBack.
+    /// GitHub owner/repo of the primary checkout, e.g. Booking/BookingBack.
     let repoOwner: String
     let repoName: String
     /// What to print. Derived from the repo name, overridable per tenant —

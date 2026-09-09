@@ -257,7 +257,7 @@ struct Preferences: Codable {
         ),
         ProjectSpec(
             key: "booking", title: "Booking",
-            repos: ["Booking/Booking", "example-org/BookingBack", "Booking/Integrations", "Booking/booking.web"],
+            repos: ["Booking/Booking", "Booking/BookingBack", "Booking/Integrations", "Booking/booking.web"],
             sentryProjects: ["booking-back", "booking", "booking-onboarding"],
             services: ["booking-prod"],
             links: [
@@ -282,7 +282,7 @@ struct Preferences: Codable {
         ),
         ProjectSpec(
             key: "example", title: "example",
-            repos: ["example-org/example", "example-org/example-infra", "example-org/example-devops-infra"],
+            repos: ["example-org/trading", "example-org/app-server-infra", "example-org/build-server-infra"],
             links: [
                 .init(title: "Trading", url: "https://trading.ops.example.invalid"),
                 .init(title: "Grafana", url: "https://grafana.ops.example.invalid"),
@@ -399,7 +399,67 @@ struct Preferences: Codable {
         let servers = migrateServerEstate()
         let services = migrateServiceEstate()
         let presets = migrateDisplayPresets()
-        return retired || servers || services || presets
+        let repos = migrateRepoSlugs()
+        return retired || servers || services || presets || repos
+    }
+
+    /// The 2026-09-08 org rename: the GitHub org `example-org` became
+    /// `example-org`, and three repos were themselves renamed along the way
+    /// (`example` → `trading`, `example-infra` → `app-server-infra`,
+    /// `example-devops-infra` → `build-server-infra`). A saved settings.json pins
+    /// both `pinnedRepos` and every `projects[].repos`, so `defaultProjects`
+    /// alone never reaches an existing install — rewrite the saved lists.
+    ///
+    /// An explicit slug map, NOT a blanket owner rewrite: the old owners still
+    /// hold repos that did not move, so renaming an owner wholesale would
+    /// invent dead slugs. GitHub still redirects the old names today;
+    /// this exists because a NEW empty `example-org` org now squats the
+    /// freed name, and any repo it creates would capture that redirect.
+    ///
+    /// Two old slugs can collapse onto one canonical repo (both infra pairs),
+    /// so each list is de-duplicated in place, keeping first-seen order.
+    static let renamedRepoSlugs = [
+        "example-org/example-devops-infra": "example-org/build-server-infra",
+        "example-org/example-infra": "example-org/app-server-infra",
+        "example-org/example-devops-infra": "example-org/build-server-infra",
+        "example-org/example-infra": "example-org/app-server-infra",
+        "example-org/example": "example-org/trading",
+        "example-org/ExampleApp": "example-org/ExampleApp",
+        "example-org/assistant-service": "example-org/assistant-service",
+        "example-org/vitrinka": "example-org/vitrinka",
+        // Not the org rename: the backend repo moved from a personal
+        // account into the Booking org, and both slugs were pinned.
+        "example-org/BookingBack": "Booking/BookingBack",
+    ]
+
+    /// Rewrite one saved slug list, reporting whether anything moved.
+    /// Internal rather than private so `Tests/` can exercise the collapse case.
+    static func migrateSlugList(_ slugs: inout [String]) -> Bool {
+        var seen = Set<String>()
+        var rewritten: [String] = []
+        var changed = false
+        for slug in slugs {
+            var canonical = renamedRepoSlugs[slug]
+            if canonical == nil, slug.hasPrefix("example-org/") {
+                canonical = "example-org/" + slug.dropFirst("example-org/".count)
+            }
+            if let canonical {
+                NSLog("pultik: repo '%@' re-orged — now '%@'", slug, canonical)
+                changed = true
+            }
+            let final = canonical ?? slug
+            if seen.insert(final).inserted { rewritten.append(final) } else { changed = true }
+        }
+        if changed { slugs = rewritten }
+        return changed
+    }
+
+    private mutating func migrateRepoSlugs() -> Bool {
+        var changed = Self.migrateSlugList(&pinnedRepos)
+        for index in projects.indices {
+            if Self.migrateSlugList(&projects[index].repos) { changed = true }
+        }
+        return changed
     }
 
     /// The 2026-09-06 display presets pass: a saved `dimBrightness` becomes
