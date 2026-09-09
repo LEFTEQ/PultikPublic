@@ -418,19 +418,30 @@ struct Preferences: Codable {
     ///
     /// Two old slugs can collapse onto one canonical repo (both infra pairs),
     /// so each list is de-duplicated in place, keeping first-seen order.
-    static let renamedRepoSlugs = [
-        "example-org/example-devops-infra": "example-org/build-server-infra",
-        "example-org/example-infra": "example-org/app-server-infra",
-        "example-org/example-devops-infra": "example-org/build-server-infra",
-        "example-org/example-infra": "example-org/app-server-infra",
-        "example-org/example": "example-org/trading",
-        "example-org/ExampleApp": "example-org/ExampleApp",
-        "example-org/assistant-service": "example-org/assistant-service",
-        "example-org/vitrinka": "example-org/vitrinka",
-        // Not the org rename: the backend repo moved from a personal
-        // account into the Booking org, and both slugs were pinned.
-        "example-org/BookingBack": "Booking/BookingBack",
-    ]
+    /// Built with `uniquingKeysWith` from PAIRS rather than written as a
+    /// dictionary literal, and that is load-bearing: the public mirror rewrites
+    /// every real owner to one shared placeholder, which collapses distinct keys
+    /// here into identical ones. A dictionary LITERAL with duplicate keys is a
+    /// runtime trap ("Dictionary literal contains duplicate keys"), so the
+    /// rendered public source would crash on first use. Pairs + last-wins-free
+    /// uniquing make the sanitized render merely redundant instead of fatal.
+    /// Do not "simplify" this back to a literal.
+    static let renamedRepoSlugs = Dictionary(
+        [
+            ("example-org/example-devops-infra", "example-org/build-server-infra"),
+            ("example-org/example-infra", "example-org/app-server-infra"),
+            ("example-org/example-devops-infra", "example-org/build-server-infra"),
+            ("example-org/example-infra", "example-org/app-server-infra"),
+            ("example-org/example", "example-org/trading"),
+            ("example-org/ExampleApp", "example-org/ExampleApp"),
+            ("example-org/assistant-service", "example-org/assistant-service"),
+            ("example-org/vitrinka", "example-org/vitrinka"),
+            // Not the org rename: the backend repo moved from a personal
+            // account into the Booking org, and both slugs were pinned.
+            ("example-org/BookingBack", "Booking/BookingBack"),
+        ],
+        uniquingKeysWith: { first, _ in first }
+    )
 
     /// Rewrite one saved slug list, reporting whether anything moved.
     /// Internal rather than private so `Tests/` can exercise the collapse case.
