@@ -131,189 +131,271 @@ struct ServiceTile: View {
     }
 }
 
-// MARK: - Right rail: runner grid (BuildServer CI fleet)
+// MARK: - Right rail: CI lanes (BuildServer JIT fleet)
 
-/// One cell per runner, sectioned by slot class — the fleet at a glance
-/// (spec 2026-08-27, superseding the 2026-07-25 slot bars). Hovering a cell
-/// opens a popover with runner facts and a lazily-resolved link to the run
-/// executing on it; the kicker keeps the Grafana escape hatch.
-struct RunnerGridRail: View {
-    // Explicit store, panel convention — this app never injects StatusStore
-    // into the SwiftUI environment, and an `@Environment(StatusStore.self)`
-    // read fatals at view update (crashed 2.3 on launch, 2026-08-27).
-    let store: StatusStore
-    let cells: [RunnerCell]
+/// One row per lane with something to say — running jobs as filled cells,
+/// a queue, or a controller that is down — sectioned by trust group (CI
+/// lanes, then deploy bastions). Idle lanes fold into one line per section.
+/// Hovering a row opens the jobs on it, each linked to its run
+/// (spec 2026-09-09, superseding the 2026-08-27 runner grid).
+struct LaneRail: View {
+    let board: CILaneBoard
 
-    private var sections: [(klass: String, cells: [RunnerCell])] {
-        // Cells arrive sorted class→lane→name (MetricsClient) — chunk into
-        // class sections without re-deciding the order here.
-        var out: [(String, [RunnerCell])] = []
-        for cell in cells {
-            if out.last?.0 == cell.klass {
-                out[out.count - 1].1.append(cell)
-            } else {
-                out.append((cell.klass, [cell]))
+    private struct Section: Identifiable {
+        let group: String
+        let title: String
+        let active: [CILane]
+        let idle: [CILane]
+        var id: String { group }
+    }
+
+    private var sections: [Section] {
+        let titles = ["firefly": "ci", "bastion": "deploy"]
+        var out: [Section] = []
+        for lane in board.lanes {
+            if out.last?.group != lane.trustGroup {
+                out.append(Section(group: lane.trustGroup,
+                                   title: titles[lane.trustGroup] ?? lane.trustGroup,
+                                   active: [], idle: []))
             }
+            var section = out.removeLast()
+            if lane.isActive {
+                section = Section(group: section.group, title: section.title,
+                                  active: section.active + [lane], idle: section.idle)
+            } else {
+                section = Section(group: section.group, title: section.title,
+                                  active: section.active, idle: section.idle + [lane])
+            }
+            out.append(section)
         }
         return out
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(sections, id: \.klass) { section in
-                HStack(alignment: .top, spacing: 6) {
-                    Text(section.klass.isEmpty ? "—" : section.klass)
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 40, alignment: .leading)
-                        .padding(.top, 1)
-                    RunnerCellGrid(store: store, cells: section.cells)
+            ForEach(sections) { section in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(section.title)
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        if section.active.isEmpty {
+                            Text("\(section.idle.count) idle")
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    ForEach(section.active) { lane in
+                        LaneRow(lane: lane)
+                    }
+                    if !section.active.isEmpty, !section.idle.isEmpty {
+                        Text("\(section.idle.count) idle")
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 12)
+                            .help(section.idle.map(\.name).joined(separator: ", "))
+                    }
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(.white.opacity(0.02), in: RoundedRectangle(cornerRadius: 8))
             }
-        }
-    }
-}
-
-/// The wrapped square grid for one class section.
-private struct RunnerCellGrid: View {
-    let store: StatusStore
-    let cells: [RunnerCell]
-
-    private let columns = [GridItem(.adaptive(minimum: 11, maximum: 11), spacing: 3)]
-
-    var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 3) {
-            ForEach(cells) { cell in
-                RunnerCellView(store: store, cell: cell)
+            if !board.elsewhere.isEmpty || board.elsewhereQueued > 0 {
+                ElsewhereRow(jobs: board.elsewhere, queued: board.elsewhereQueued)
+                    .padding(.horizontal, 8)
             }
         }
     }
 }
 
-/// One runner square: green = busy, dim = idle, red outline = offline.
-/// Hover briefly to open the detail popover.
-private struct RunnerCellView: View {
-    let store: StatusStore
-    let cell: RunnerCell
+/// A lane with activity: name, one cell per running job (up to the ceiling
+/// when known), the counts. Red when its controller is down.
+private struct LaneRow: View {
+    let lane: CILane
     @State private var hovering = false
     @State private var showPopover = false
 
-    private var fill: Color {
-        if !cell.online { return .clear }
-        return cell.busy ? .green.opacity(0.85) : .white.opacity(0.12)
+    private var tone: Color {
+        if !lane.up { return .red }
+        return lane.running > 0 ? .green : .secondary
     }
 
-    private var stateLabel: String {
-        if !cell.online { return "offline" }
-        return cell.busy ? "busy" : "idle"
+    private var counts: String {
+        var parts: [String] = []
+        if lane.running > 0 {
+            parts.append(lane.maxRunners.map { "\(lane.running)/\($0)" } ?? "\(lane.running)")
+        }
+        if lane.queued > 0 { parts.append("\(lane.queued) queued") }
+        if !lane.up { parts.append("down") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var accessibilityState: String {
+        var parts = ["\(lane.running) running"]
+        if let max = lane.maxRunners { parts[0] += " of \(max)" }
+        if lane.queued > 0 { parts.append("\(lane.queued) queued") }
+        if !lane.up { parts.append("controller down") }
+        return parts.joined(separator: ", ")
     }
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 2.5)
-            .fill(fill)
-            .overlay(
-                RoundedRectangle(cornerRadius: 2.5)
-                    .strokeBorder(
-                        !cell.online ? Color.red.opacity(0.55)
-                            : hovering ? Color.white.opacity(0.5) : .clear,
-                        lineWidth: 1
-                    )
-            )
-            .frame(width: 11, height: 11)
-            .onHover { inside in
-                hovering = inside
-                if inside {
-                    // Small delay so a sweep across the grid doesn't strobe
-                    // popovers; cancelled by the guard when the mouse moved on.
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(250))
-                        if hovering { showPopover = true }
-                    }
+        HStack(spacing: 6) {
+            Text(lane.name)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(lane.up ? Color.primary : Color.red)
+                .lineLimit(1)
+                .frame(minWidth: 0, alignment: .leading)
+            LaneCells(running: lane.running, ceiling: lane.maxRunners, tone: tone)
+            Spacer(minLength: 2)
+            Text(counts)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(lane.up ? Color.secondary : Color.red)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 1)
+        .padding(.horizontal, 4)
+        .background(hovering ? Color.white.opacity(0.05) : .clear,
+                    in: RoundedRectangle(cornerRadius: 4))
+        .contentShape(Rectangle())
+        .onHover { inside in
+            hovering = inside
+            if inside {
+                // Small delay so a sweep down the rail doesn't strobe
+                // popovers; cancelled by the guard when the mouse moved on.
+                Task {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    if hovering { showPopover = true }
                 }
             }
-            .popover(isPresented: $showPopover, arrowEdge: .bottom) {
-                RunnerPopover(store: store, cell: cell)
-            }
-            // The 11 px square is pointer-bait; VoiceOver gets the same
-            // information and the same detail popover as an action.
-            .accessibilityElement()
-            .accessibilityLabel("\(cell.name), \(stateLabel)")
-            .accessibilityHint("Runner in the \(cell.lane) lane")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { showPopover = true }
+        }
+        .popover(isPresented: $showPopover, arrowEdge: .leading) {
+            LanePopover(title: lane.name,
+                        subtitle: "\(lane.trustGroup) · \(lane.backend)\(lane.up ? "" : " · controller down")",
+                        jobs: lane.jobs, queued: lane.queued)
+        }
+        .accessibilityElement()
+        .accessibilityLabel("\(lane.name), \(accessibilityState)")
+        .accessibilityHint("Jobs running on this lane")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { showPopover = true }
     }
 }
 
-/// Popover body: instant Prometheus facts, then the run link once the lazy
-/// jobs-API scan answers. The scan only ever runs from here (spec 2026-08-27).
-private struct RunnerPopover: View {
-    let store: StatusStore
-    let cell: RunnerCell
-    @State private var job: RunnerJob?? // nil = loading, .some(nil) = no run found
+/// Filled squares for running jobs, hollow ones up to the ceiling. Without a
+/// ceiling only the filled ones draw; a very wide lane caps at 16 cells and
+/// lets the count carry the rest.
+private struct LaneCells: View {
+    let running: Int
+    let ceiling: Int?
+    let tone: Color
 
-    private var stateLabel: String {
-        if !cell.online { return "offline" }
-        return cell.busy ? "busy" : "idle"
+    private var total: Int { min(16, max(running, ceiling ?? running)) }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<total, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(index < running ? tone.opacity(0.85) : Color.white.opacity(0.1))
+                    .frame(width: 6, height: 6)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Jobs the collector saw on lanes that are not ours — GitHub-hosted or an
+/// unmapped label. One dim line so the queue on it is not a mystery.
+private struct ElsewhereRow: View {
+    let jobs: [CIJob]
+    let queued: Int
+    @State private var showPopover = false
+
+    private var summary: String {
+        var parts: [String] = []
+        if !jobs.isEmpty { parts.append("\(jobs.count) running") }
+        if queued > 0 { parts.append("\(queued) queued") }
+        return parts.joined(separator: " · ")
     }
 
     var body: some View {
+        HStack(spacing: 6) {
+            Text("elsewhere")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 2)
+            Text(summary)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .onHover { inside in if inside { showPopover = true } }
+        .popover(isPresented: $showPopover, arrowEdge: .leading) {
+            LanePopover(title: "elsewhere", subtitle: "github-hosted or unmapped lanes",
+                        jobs: jobs, queued: queued)
+        }
+        .accessibilityElement()
+        .accessibilityLabel("Jobs elsewhere, \(summary)")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { showPopover = true }
+    }
+}
+
+/// The jobs on a lane: `repo · workflow › job`, age, each a link to its run.
+private struct LanePopover: View {
+    let title: String
+    let subtitle: String
+    let jobs: [CIJob]
+    let queued: Int
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(!cell.online ? Color.red.opacity(0.8)
-                        : cell.busy ? Color.green.opacity(0.9) : Color.white.opacity(0.35))
-                    .frame(width: 6, height: 6)
-                Text(cell.name)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                Text(stateLabel)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            Text("\(cell.lane.isEmpty ? "?" : cell.lane) · \(cell.klass.isEmpty ? "?" : cell.klass)")
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            Text(subtitle)
                 .font(.system(size: 9.5, design: .monospaced))
                 .foregroundStyle(.secondary)
-
-            if cell.busy {
+            if !jobs.isEmpty {
                 Divider()
-                switch job {
-                case nil:
-                    HStack(spacing: 5) {
-                        ProgressView().controlSize(.small)
-                        Text("finding the run…")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
-                    }
-                case .some(nil):
-                    Text("run not found (job may have just finished)")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.tertiary)
-                case let .some(.some(job)):
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("\(job.repo.split(separator: "/").last.map(String.init) ?? job.repo) · \(job.workflowName ?? job.jobName)")
-                            .font(.system(size: 10))
-                            .lineLimit(1)
-                        if let url = job.htmlUrl.flatMap(URL.init(string:)) {
+                ForEach(jobs) { job in
+                    HStack(spacing: 6) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(job.repo) · \(job.workflow)")
+                                .font(.system(size: 10))
+                                .lineLimit(1)
+                            Text(job.jobName)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                        if let since = job.since {
+                            Text(since.shortAge)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        if let url = job.runURL {
                             Button {
                                 NSWorkspace.shared.open(url)
                             } label: {
-                                Label("Open run", systemImage: "arrow.up.forward.square")
+                                Image(systemName: "arrow.up.forward.square")
                                     .font(.system(size: 10))
                             }
                             .buttonStyle(.link)
+                            .help("Open run")
+                            .accessibilityLabel("Open run \(job.repo) \(job.workflow) \(job.jobName)")
                         }
                     }
                 }
             }
+            if queued > 0 {
+                Divider()
+                Text("\(queued) queued")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(10)
-        .frame(minWidth: 170, alignment: .leading)
-        .task {
-            guard cell.busy else { return }
-            job = .some(await store.runnerJob(for: cell))
-        }
+        .frame(minWidth: 220, maxWidth: 360, alignment: .leading)
     }
 }
 
@@ -615,9 +697,12 @@ struct DevboxRail: View {
 }
 
 /// One ws-v2 workspace, designed for the many-app worst case (spec
-/// 2026-09-01): the collapsed card is three fixed lines — name, identity,
-/// aggregate — and can never grow wider than the rail. Everything per-app
-/// (chips, units, containers, sources) lives behind the disclosure.
+/// 2026-09-01) and the many-workspace rail (spec 2026-09-09 decision 6):
+/// a parked card is ONE line (dot, name, parked age), a hot card two (name,
+/// activity), and neither can grow wider than the rail. Identity, the
+/// lifecycle verbs and everything per-app (chips, units, containers,
+/// sources) live behind the disclosure, each verb an icon with its name in
+/// the tooltip (decision 7).
 private struct DevboxWorkspaceCard: View {
     let workspace: DevboxWorkspace
     let store: StatusStore
@@ -651,11 +736,6 @@ private struct DevboxWorkspaceCard: View {
     /// them is live and the eye should skip to the hot ones.
     private var cardOpacity: Double {
         workspace.isParked ? 0.62 : 1
-    }
-
-    private var canExpand: Bool {
-        !workspace.apps.isEmpty || !workspace.unitApps.isEmpty
-            || !workspace.stats.isEmpty || !workspace.sources.isEmpty
     }
 
     /// The identity line below already names the project, so the title drops
@@ -693,80 +773,65 @@ private struct DevboxWorkspaceCard: View {
                         chip("hold", tone: .orange)
                             .help("devbox hold — exempt from the park sweep until unhold")
                     }
-                    if canExpand {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 7, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                    if workspace.isParked {
+                        chip(workspace.parkedLabel, tone: .secondary)
+                            .help("Stopped by the park sweep or `devbox park`; identity and ports kept. Expand for Revive (~16 s).")
                     }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("\(workspace.name), \(accessibilityState)")
-                .accessibilityAddTraits(canExpand ? .isButton : [])
-                .accessibilityValue(canExpand ? (expanded ? "expanded" : "collapsed") : "")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityValue(expanded ? "expanded" : "collapsed")
                 .accessibilityAction {
-                    guard canExpand else { return }
                     withAnimation(.easeOut(duration: 0.14)) { expanded.toggle() }
                 }
                 Spacer(minLength: 4)
-                if let source = workspace.sources.first {
-                    sourceActions(source.path)
-                        .opacity(hovering ? 1 : 0)
-                        .frame(height: 16)
+                if workspace.isParked {
+                    actionFeedback
                 }
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                guard canExpand else { return }
                 withAnimation(.easeOut(duration: 0.14)) { expanded.toggle() }
             }
 
-            Text(identityText)
-                .font(.system(size: 8.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.leading, 12)
-
-            // Aggregate line: state/units + footprint on the left, the
-            // lifecycle verbs on the right (hover-revealed, in place — the
-            // rail never jumps). Busy and failure feedback take that slot.
-            HStack(spacing: 6) {
-                if workspace.isParked {
-                    chip(workspace.parkedLabel, tone: .secondary)
-                        .help("Stopped by the park sweep or `devbox park`; identity and ports kept. Revive with ▶ (~16 s).")
+            // Hot cards carry one activity line at rest; parked cards say
+            // "parked · age" on the title row and stop there. Busy and
+            // failure feedback take the trailing slot of whichever line
+            // exists, so the rail never jumps while a verb runs.
+            if !workspace.isParked {
+                HStack(spacing: 6) {
+                    Text(summaryText)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(workspace.footprintHelp)
+                    Spacer(minLength: 4)
+                    actionFeedback
                 }
-                Text(summaryText)
+                .padding(.leading, 12)
+            }
+
+            if expanded {
+                Text(identityText)
                     .font(.system(size: 8.5, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
-                    .help(workspace.footprintHelp)
-                Spacer(minLength: 4)
-                ZStack(alignment: .trailing) {
-                    if let busyLabel {
-                        HStack(spacing: 4) {
-                            ProgressView().controlSize(.mini)
-                            Text(busyLabel)
-                                .font(.system(size: 8.5, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
-                    } else if lastActionFailed {
-                        Text("failed · see log")
-                            .font(.system(size: 8.5, design: .monospaced))
-                            .foregroundStyle(.red)
-                    } else {
-                        // Never fully hidden: a keyboard or VoiceOver user
-                        // does not hover, and a control at opacity 0 is one
-                        // they cannot see and may not be offered. Quiet at
-                        // rest, full on hover — same footprint either way.
-                        lifecycleActions.opacity(hovering ? 1 : 0.4)
-                    }
+                    .truncationMode(.middle)
+                    .padding(.leading, 12)
+                if workspace.isParked, let footprint = workspace.footprintLabel {
+                    Text(footprint)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 12)
+                        .help(workspace.footprintHelp)
                 }
-                .frame(height: 14)
-            }
-            .padding(.leading, 12)
-
-            if expanded {
+                verbRow
+                    .padding(.leading, 12)
                 if !workspace.apps.isEmpty, !workspace.isParked {
                     WorkspaceAppChipsRow(apps: workspace.apps)
                         .padding(.leading, 12)
@@ -804,23 +869,54 @@ private struct DevboxWorkspaceCard: View {
 
     // MARK: Lifecycle verbs
 
+    /// The trailing slot on the resting card: what a running verb is doing,
+    /// or that the last one failed. Nothing when idle — the verbs
+    /// themselves live in the expanded detail (decision 6).
+    @ViewBuilder
+    private var actionFeedback: some View {
+        if let busyLabel {
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text(busyLabel)
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(height: 14)
+        } else if lastActionFailed {
+            Text("failed · see log")
+                .font(.system(size: 8.5, design: .monospaced))
+                .foregroundStyle(.red)
+                .frame(height: 14)
+        }
+    }
+
+    /// Every verb on one wrapped row inside the disclosure: lifecycle first,
+    /// then the source actions — icons, named by their tooltips (decision 7).
+    private var verbRow: some View {
+        FlowRow(hSpacing: 8, vSpacing: 4) {
+            lifecycleActions
+            if let source = workspace.sources.first {
+                sourceActions(source.path)
+            }
+        }
+    }
+
     /// Hot: park (two-click) and hold/unhold. Parked: revive and hold/unhold.
     /// Never `down`, never `gc` — the reversible verbs only.
     @ViewBuilder
     private var lifecycleActions: some View {
-        HStack(spacing: 7) {
+        Group {
             if workspace.isParked {
                 if let macPath = workspace.macPath,
                    DevboxLauncher.localDirectory(macPath, quiet: true) != nil
                 {
-                    iconButton("play.circle", "Revive — devbox up from \(macPath)") {
+                    iconButton("play.circle", "Revive", "Revive — devbox up from \(macPath)") {
                         runAction("reviving") {
                             await DevboxClient.shared.up(workspace: workspace.name, macPath: macPath)
                         }
                     }
                 } else {
-                    Image(systemName: "play.circle")
-                        .font(.system(size: 10))
+                    verbGlyph("play.circle")
                         .foregroundStyle(.quaternary)
                         .help(workspace.macPath.map { "Cannot revive from here — \($0) is not on this Mac" }
                             ?? "Cannot revive from here — the box recorded no Mac path")
@@ -842,7 +938,7 @@ private struct DevboxWorkspaceCard: View {
                     .help("Click again to park (stops the stack, keeps identity and ports)")
                     .accessibilityLabel("Confirm park")
                 } else {
-                    iconButton("parkingsign.circle", "Park — stop, keep hot; up revives in ~16 s") {
+                    iconButton("parkingsign.circle", "Park", "Park — stop, keep hot; up revives in ~16 s") {
                         confirmingPark = true
                         Task {
                             try? await Task.sleep(for: .seconds(4))
@@ -852,13 +948,13 @@ private struct DevboxWorkspaceCard: View {
                 }
             }
             if workspace.hold {
-                iconButton("pin.slash", "Unhold — return to auto-parking") {
+                iconButton("pin.slash", "Unhold", "Unhold — return to auto-parking") {
                     runAction("unholding") {
                         await DevboxClient.shared.run(.unhold, workspace: workspace.name)
                     }
                 }
             } else {
-                iconButton("pin", "Hold — exempt from the park sweep") {
+                iconButton("pin", "Hold", "Hold — exempt from the park sweep") {
                     runAction("holding") {
                         await DevboxClient.shared.run(.hold, workspace: workspace.name)
                     }
@@ -1000,7 +1096,12 @@ private struct DevboxWorkspaceCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 2)
-                sourceActions(source.path)
+                // The verb row above already carries Warp / Finder / Cursor /
+                // Copy for the first source; extra sources get icon-only
+                // verbs here, and the words stay off this narrow line.
+                if source.path != workspace.sources.first?.path {
+                    sourceActions(source.path)
+                }
             }
             .padding(.leading, 12)
             .help("\(source.app): \(source.path)")
@@ -1009,31 +1110,38 @@ private struct DevboxWorkspaceCard: View {
 
     private func sourceActions(_ path: String) -> some View {
         HStack(spacing: 7) {
-            iconButton("terminal", "Open workspace in Warp") {
+            iconButton("terminal", "Warp", "Open workspace in Warp") {
                 DevboxLauncher.summonWorkspaceWarp(workspace.name)
             }
-            iconButton("folder", "Reveal in Finder") {
+            iconButton("folder", "Finder", "Reveal in Finder") {
                 DevboxLauncher.revealLocalPath(path)
             }
-            iconButton("chevron.left.forwardslash.chevron.right", "Open in Cursor") {
+            iconButton("chevron.left.forwardslash.chevron.right", "Cursor", "Open in Cursor") {
                 DevboxLauncher.openLocalCursor(path)
             }
-            iconButton("doc.on.doc", "Copy path") {
+            iconButton("doc.on.doc", "Copy path", "Copy the Mac path") {
                 DevboxLauncher.copyLocalPath(path)
             }
         }
     }
 
-    private func iconButton(_ symbol: String, _ help: String,
+    /// A verb is its glyph; the name lives in the tooltip and the
+    /// accessibility label (decision 7, revised during the hand test — hover
+    /// words wrapped inside the 280 pt rail).
+    private func verbGlyph(_ symbol: String) -> some View {
+        Image(systemName: symbol).font(.system(size: 10))
+    }
+
+    private func iconButton(_ symbol: String, _ word: String, _ help: String,
                             action: @escaping () -> Void) -> some View
     {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 10))
+            verbGlyph(symbol)
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help(help)
-        .accessibilityLabel(help)
+        .accessibilityLabel("\(word) — \(help)")
     }
 
     private func appTone(_ app: DevboxWorkspaceApp) -> Color {

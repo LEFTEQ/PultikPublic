@@ -106,7 +106,7 @@ extension ProbeIntegration {
             blurb: "Annotation-board listeners and the todo engine (open todos, ripe reminders) — read with the CLI's sign-in.",
             target: .vitrinka
         ) {
-            if case .failed(let failure) = await VitrinkaClient.shared.listening() {
+            if case .failed(let failure) = await VitrinkaClient.shared.tray() {
                 return failure
             }
             return nil

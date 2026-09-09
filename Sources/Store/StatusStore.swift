@@ -26,8 +26,9 @@ final class StatusStore {
     var eveSessions: [EveSession] = []
     var serverMetrics: [ServerMetrics] = []
     var serviceStatuses: [ServiceStatus] = []
-    var runnerCells: [RunnerCell] = []
+    var laneBoard = CILaneBoard()
     var vitrinkaListening: [VitrinkaListening] = []
+    var vitrinkaBoards: [VitrinkaBoard] = []
     var eveAlerts: [EveAlert] = []
     /// ws-v2 workspaces are the primary Devbox surface. The remaining project
     /// list carries only slot-0 shared stacks and SampleStack's v2 stack slots.
@@ -805,33 +806,17 @@ final class StatusStore {
             if !servers.isEmpty || !services.isEmpty,
                serverMetrics.isEmpty, serviceStatuses.isEmpty
             {
-                runnerCells = []
+                laneBoard = CILaneBoard()
                 return .unreachable("no answer from Prometheus")
             }
 
             if isSectionVisible("runners") {
-                runnerCells = await MetricsClient.shared.runnerGrid()
+                laneBoard = await MetricsClient.shared.laneBoard()
             } else {
-                runnerCells = []
+                laneBoard = CILaneBoard()
             }
             return nil
         }
-    }
-
-    /// The run currently executing on a runner — called when a grid popover
-    /// opens, never from the poll loop (lazy per spec 2026-08-27; the client
-    /// caches one scan briefly so a hover sweep costs one 9-repo pass).
-    ///
-    /// Same breaker as the poll loop: a held GitHub gate means a scan would
-    /// deepen exactly the hole ProbeGate is backing out of, and the half-open
-    /// trial belongs to `refresh()`'s cheap probe — never to this fan-out.
-    func runnerJob(for cell: RunnerCell) async -> RunnerJob? {
-        guard case .go = gate.verdict(.github) else { return nil }
-        let result = await client.runnerJobs(repos: searchableRepos)
-        if let failure = result.failure {
-            gate.failed(.github, failure)
-        }
-        return result.jobs[cell.fullName]
     }
 
     // MARK: - Vitrinka listeners (own host, own breaker)
@@ -843,7 +828,7 @@ final class StatusStore {
     /// todos'.
     private func refreshVitrinka() async {
         let wantListeners = isSectionVisible("vitrinka")
-        if !wantListeners { vitrinkaListening = [] }
+        if !wantListeners { vitrinkaListening = []; vitrinkaBoards = [] }
         // A half-open trial spends ONE request (`probe`) before the fan-out
         // is allowed back — without it the default probe reports success,
         // clears the strike ladder, and a still-dead host restarts at the
@@ -853,22 +838,25 @@ final class StatusStore {
             // BOTH halves answered, and any failure folds both — one hide,
             // one breaker, never a listener rail showing a stale success
             // beside a hidden todo rail.
-            var listening: [VitrinkaListening] = []
+            var tray = VitrinkaTray()
             if wantListeners {
-                switch await VitrinkaClient.shared.listening() {
+                switch await VitrinkaClient.shared.tray() {
                 case let .failed(failure):
                     vitrinkaListening = []
+                    vitrinkaBoards = []
                     TodoStore.shared.markUnreachable()
                     return failure
                 case let .value(value):
-                    listening = value
+                    tray = value
                 }
             }
             if let failure = await TodoStore.shared.refresh(using: VitrinkaClient.shared) {
                 vitrinkaListening = []
+                vitrinkaBoards = []
                 return failure
             }
-            vitrinkaListening = listening
+            vitrinkaListening = tray.listeners
+            vitrinkaBoards = tray.boards
             return nil
         }
     }
@@ -987,6 +975,19 @@ final class StatusStore {
 
     /// Right-rail collapse state (decision D11). Persisted, so a folded rail
     /// stays folded across relaunches.
+    /// Share of the left column the Vitrinka rail owns (spec 2026-09-09
+    /// decision 8): 40 % unless the drag handle wrote something else.
+    var leftRailSplit: Double {
+        min(0.8, max(0.2, preferences.leftRailSplit ?? 0.4))
+    }
+
+    func setLeftRailSplit(_ value: Double) {
+        let clamped = min(0.8, max(0.2, value))
+        guard abs((preferences.leftRailSplit ?? 0.4) - clamped) >= 0.005 else { return }
+        preferences.leftRailSplit = clamped
+        preferences.save()
+    }
+
     func isRailCollapsed(_ key: String) -> Bool {
         preferences.collapsedRails.contains(key)
     }

@@ -264,6 +264,52 @@ struct VitrinkaAllView: View {
     }
 }
 
+// MARK: - .b mode — recent boards
+
+struct BoardsAllView: View {
+    let boards: [VitrinkaBoard]
+    let isSelected: (String) -> Bool
+    let onBack: () -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Button(action: onBack) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Back (Esc)")
+                    Text("Boards")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("most recently updated first")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+
+                if boards.isEmpty {
+                    Text("no board matches")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
+                }
+                ForEach(boards) { board in
+                    VitrinkaBoardRow(board: board, selected: isSelected("board:\(board.slug)"))
+                        .id("board:\(board.slug)")
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
+        }
+    }
+}
+
 // MARK: - .organize mode — workspace layouts
 
 struct OrganizePageView: View {

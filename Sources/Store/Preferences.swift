@@ -125,6 +125,11 @@ struct Preferences: Codable {
     /// dock is deliberately not collapsible and never appears here.
     var collapsedRails: [String] = []
 
+    /// Share of the left column the Vitrinka rail takes above the Devbox
+    /// rail (0.2–0.8); the drag handle between them writes it
+    /// (spec 2026-09-09 decision 8). nil = the 40 % default.
+    var leftRailSplit: Double?
+
     /// Workspace layouts for the Hammerspoon `.organize` engine
     /// (hammerspoon/organize.lua; docs/specs/2026-09-01-organize-workspaces-
     /// decisions.md). Modeled here even though the app only lists layout
@@ -336,6 +341,7 @@ struct Preferences: Codable {
         vaultPath = try container.decodeIfPresent(String.self, forKey: .vaultPath)
         todoProject = try container.decodeIfPresent(String.self, forKey: .todoProject)
         collapsedRails = try container.decodeIfPresent([String].self, forKey: .collapsedRails) ?? []
+        leftRailSplit = try container.decodeIfPresent(Double.self, forKey: .leftRailSplit)
         workspaces = try container.decodeIfPresent(WorkspacesConfig.self, forKey: .workspaces)
         displayPresets = try container.decodeIfPresent([DisplayPreset].self, forKey: .displayPresets)
         dimBrightness = try container.decodeIfPresent(Double.self, forKey: .dimBrightness)

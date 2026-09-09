@@ -25,18 +25,6 @@ struct WorkflowRun: Decodable, Identifiable {
     }
 }
 
-struct WorkflowJobsResponse: Decodable {
-    let jobs: [WorkflowJob]
-}
-
-struct WorkflowJob: Decodable {
-    let name: String
-    let status: String // queued | in_progress | completed
-    let runnerName: String? // set once the job lands on a runner
-    let htmlUrl: String?
-    let startedAt: Date?
-}
-
 struct Deployment: Decodable, Identifiable {
     let id: Int
     let environment: String
@@ -421,32 +409,51 @@ struct ServiceStatus: Identifiable {
     }
 }
 
-/// One runner in the BuildServer fleet grid (`github_runner_online`/`_busy`
-/// series, watchdog exporter inside firefly-vm — spec 2026-08-27).
-struct RunnerCell: Identifiable {
-    let fullName: String // "build-vps-vitrinka-ci-2" — matches jobs-API runner_name
-    let lane: String // "vitrinka-ci"
-    let klass: String // slot class: "build" | "small" | "e2e"
-    var busy: Bool
-    var online: Bool
-    var id: String {
-        fullName
-    }
+/// One JIT lane in the BuildServer fleet — a `ci-kvm-controller@<lane>`
+/// instance (`ci_kvm_controller_up`). Runners are per-job, ephemeral and
+/// nameless since 2026-08-30, so the lane is the stable unit and its running
+/// jobs are the occupancy (spec 2026-09-09).
+struct CILane: Identifiable {
+    let name: String // "exampleapp-ci"
+    let backend: String // "docker" | "kvm"
+    let trustGroup: String // "firefly" (CI) | "bastion" (deploys)
+    let up: Bool // controller unit active
+    let maxRunners: Int? // `ci_lane_info`; nil until the infra side exports it
+    let queued: Int
+    let jobs: [CIJob]
 
-    /// Display name, host prefix stripped — the grid is BuildServer-only.
-    var name: String {
-        fullName.replacingOccurrences(of: "build-vps-", with: "")
+    var id: String { name }
+    var running: Int { jobs.count }
+    /// Worth a row of its own: busy, backed up, or broken. Everything else
+    /// folds into the section's "N idle" line.
+    var isActive: Bool { !jobs.isEmpty || queued > 0 || !up }
+}
+
+/// A job executing on the fleet right now (`ci_runner_job_info`, one series
+/// per running job, link included — no GitHub lookup needed).
+struct CIJob: Identifiable {
+    let org: String
+    let repo: String // "ExampleApp"
+    let lane: String
+    let workflow: String
+    let jobName: String
+    let runURL: URL?
+    let since: Date?
+
+    var id: String {
+        runURL?.absoluteString ?? "\(org)/\(repo)/\(workflow)/\(jobName)/\(since?.timeIntervalSince1970 ?? 0)"
     }
 }
 
-/// The job currently executing on a runner, resolved lazily from the GitHub
-/// jobs API (there is no runner→run endpoint; the per-repo scan is the path).
-struct RunnerJob {
-    let repo: String
-    let workflowName: String?
-    let jobName: String
-    let htmlUrl: String?
-    let startedAt: Date?
+/// The whole CI picture for one poll: every enabled lane plus the jobs the
+/// collector saw on lanes that are not ours (`github-hosted`, `unknown`).
+struct CILaneBoard {
+    var lanes: [CILane] = []
+    var elsewhere: [CIJob] = []
+    var elsewhereQueued: Int = 0
+
+    var isEmpty: Bool { lanes.isEmpty }
+    var running: Int { lanes.reduce(0) { $0 + $1.running } }
 }
 
 // MARK: - Project registry (the on-call layer)
