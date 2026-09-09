@@ -53,7 +53,7 @@ actor MetricsClient {
 
 
     /// Full label sets for an instant query — for series whose identity spans
-    /// several labels (bk_slot_held carries class/slot/label).
+    /// several labels (`ci_runner_job_info` carries lane/repo/workflow/job).
     private func instantSeries(_ query: String) async throws -> [(labels: [String: String], value: Double)] {
         var components = URLComponents(
             url: base.appending(path: "api/v1/query"), resolvingAgainstBaseURL: false
@@ -79,36 +79,76 @@ actor MetricsClient {
         return series
     }
 
-    /// BuildServer runner fleet for the grid: one cell per runner. The watchdog
-    /// exporter only labels `{repo, runner}`, so lane/class ride in via a
-    /// PromQL join against `ci_runner_lane_info` — the manifest-derived
-    /// inventory metric. The join also scopes the grid to the hot fleet:
-    /// ephemeral `ci-jit-*` bastion runners have no inventory row and drop
-    /// out here, as decided. The bk-lock slot series are no longer rendered —
-    /// the grid supersedes the slot bars (spec 2026-08-27).
-    func runnerGrid() async -> [RunnerCell] {
-        async let onlineQuery = try? instantSeries(
-            "github_runner_online * on(runner) group_left(lane, class) ci_runner_lane_info")
-        async let busyQuery = try? instantSeries("github_runner_busy == 1")
-        let (online, busy) = await (onlineQuery, busyQuery)
-        guard let online, !online.isEmpty else { return [] }
+    /// The BuildServer JIT fleet, lane by lane. Runners are per-job and
+    /// nameless since 2026-08-30, so the stable unit is the controller
+    /// instance (`ci_kvm_controller_up`), its occupancy the collector's
+    /// per-job series (`ci_runner_job_info`, link included) and its backlog
+    /// `ci_jobs_queued`. Ceilings ride in on `ci_lane_info` when the infra
+    /// side exports it; until then `maxRunners` is nil and rows show counts
+    /// only (spec 2026-09-09). Jobs on lanes that are not ours
+    /// (`github-hosted`, `unknown`) are kept aside as `elsewhere`.
+    func laneBoard() async -> CILaneBoard {
+        async let controllersQuery = try? instantSeries("ci_kvm_controller_up")
+        async let infoQuery = try? instantSeries("ci_lane_info")
+        async let jobsQuery = try? instantSeries("ci_runner_job_info == 1")
+        async let queuedQuery = try? instantSeries("sum by (lane) (ci_jobs_queued)")
+        let (controllers, info, jobs, queued) = await (controllersQuery, infoQuery, jobsQuery, queuedQuery)
+        guard let controllers, !controllers.isEmpty else { return CILaneBoard() }
 
-        let busyRunners = Set((busy ?? []).compactMap { $0.labels["runner"] })
-        let classOrder = ["build", "small", "e2e"]
-        return online.compactMap { series -> RunnerCell? in
-            guard let runner = series.labels["runner"] else { return nil }
-            return RunnerCell(
-                fullName: runner,
-                lane: series.labels["lane"] ?? "",
-                klass: series.labels["class"] ?? "",
-                busy: busyRunners.contains(runner),
-                online: series.value > 0)
+        var ceilings: [String: Int] = [:]
+        for series in info ?? [] {
+            if let lane = series.labels["lane"], let max = series.labels["max_runners"].flatMap(Int.init) {
+                ceilings[lane] = max
+            }
         }
-        .sorted {
-            let left = (classOrder.firstIndex(of: $0.klass) ?? classOrder.count, $0.lane, $0.name)
-            let right = (classOrder.firstIndex(of: $1.klass) ?? classOrder.count, $1.lane, $1.name)
+        var queuedByLane: [String: Int] = [:]
+        for series in queued ?? [] {
+            if let lane = series.labels["lane"] { queuedByLane[lane] = Int(series.value) }
+        }
+        var jobsByLane: [String: [CIJob]] = [:]
+        for series in jobs ?? [] {
+            let labels = series.labels
+            guard let lane = labels["lane"] else { continue }
+            let job = CIJob(
+                org: labels["org"] ?? "",
+                repo: labels["repo"] ?? "?",
+                lane: lane,
+                workflow: labels["workflow"] ?? "",
+                jobName: labels["job_name"] ?? "",
+                runURL: labels["run_url"].flatMap(URL.init(string:)),
+                since: labels["since"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
+            jobsByLane[lane, default: []].append(job)
+        }
+
+        let groupOrder = ["firefly", "bastion"]
+        var board = CILaneBoard()
+        var known = Set<String>()
+        for series in controllers {
+            // The exporter labels the lane `instance`; Prometheus keeps the
+            // scrape target's own `instance` and moves the lane to
+            // `exported_instance` on the way in.
+            guard let name = series.labels["exported_instance"] ?? series.labels["instance"] else { continue }
+            known.insert(name)
+            board.lanes.append(CILane(
+                name: name,
+                backend: series.labels["backend"] ?? "",
+                trustGroup: series.labels["trust_group"] ?? "",
+                up: series.value > 0,
+                maxRunners: ceilings[name],
+                queued: queuedByLane[name] ?? 0,
+                jobs: (jobsByLane[name] ?? []).sorted { ($0.since ?? .distantPast) < ($1.since ?? .distantPast) }))
+        }
+        board.lanes.sort {
+            let left = (groupOrder.firstIndex(of: $0.trustGroup) ?? groupOrder.count, $0.name)
+            let right = (groupOrder.firstIndex(of: $1.trustGroup) ?? groupOrder.count, $1.name)
             return left < right
         }
+        for (lane, laneJobs) in jobsByLane where !known.contains(lane) {
+            board.elsewhere.append(contentsOf: laneJobs)
+        }
+        board.elsewhere.sort { ($0.since ?? .distantPast) < ($1.since ?? .distantPast) }
+        board.elsewhereQueued = queuedByLane.filter { !known.contains($0.key) }.values.reduce(0, +)
+        return board
     }
 
     func serverMetrics(servers: [(name: String, instance: String)]) async -> [ServerMetrics] {
