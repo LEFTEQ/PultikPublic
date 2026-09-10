@@ -15,8 +15,8 @@ let project = Project(
             infoPlist: .extendingDefault(with: [
                 "LSUIElement": true,
                 "CFBundleDisplayName": "Pultík",
-                "CFBundleShortVersionString": "2.6",
-                "CFBundleVersion": "10",
+                "CFBundleShortVersionString": "2.7",
+                "CFBundleVersion": "11",
                 // EventKit read grant (Integrations → Calendar access).
                 "NSCalendarsFullAccessUsageDescription":
                     "Pultík shows today's events beside the schedule agenda. Read-only.",

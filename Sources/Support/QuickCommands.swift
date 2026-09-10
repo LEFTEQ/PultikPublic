@@ -44,7 +44,31 @@ struct QuickCommand: Identifiable {
 
     @MainActor
     private static var fixed: [QuickCommand] {
-        [
+        let awake = AwakeStore.shared
+        return [
+            // Never Sleep (spec 2026-09-10 decision 4): one command that
+            // toggles; the title says which way. "sleep" is a keyword so
+            // typing what you want to allow again also finds it.
+            QuickCommand(
+                id: "awake",
+                title: awake.isAwake ? "Never Sleep: off" : "Never Sleep: on",
+                subtitle: awake.isAwake
+                    ? "let the Mac sleep and lock again"
+                    : "keep this Mac running and unlocked (lid close still sleeps)",
+                systemImage: awake.isAwake ? "cup.and.saucer.fill" : "cup.and.saucer",
+                keywords: ["awake", "never sleep", "caffeine", "sleep", "amphetamine", "lock"],
+                run: { awake.toggle() }
+            ),
+            // Screens off (decision 2): brightness 0 everywhere, never display
+            // sleep — that is what starts the lock timer.
+            QuickCommand(
+                id: "screens-off",
+                title: "Screens off",
+                subtitle: "every display and the keyboard to 0% — mouse or ⌥Space wakes",
+                systemImage: "display.trianglebadge.exclamationmark",
+                keywords: ["screens off", "off", "dark", "black", "blackout", "displays off", "screen off"],
+                run: { BrightnessStore.shared.blackout() }
+            ),
             QuickCommand(
                 id: "vitrinka",
                 title: "Open Vitrinka",

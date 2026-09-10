@@ -9,7 +9,7 @@ struct MenuBarIconView: View {
 
     @MainActor
     static func render(_ state: AggregateState, todoCount: Int = 0,
-                       alertCount: Int = 0, alertCritical: Bool = false) -> NSImage {
+                       alertCount: Int = 0, alertCritical: Bool = false, awake: Bool = false) -> NSImage {
         let symbol: String
         let color: Color
         let count: Int
@@ -58,6 +58,15 @@ struct MenuBarIconView: View {
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(alertCritical ? AnyShapeStyle(Color.red)
                         : state == .allClear ? AnyShapeStyle(color) : AnyShapeStyle(.primary))
+            }
+            // Never Sleep: a cup after everything else, monochrome and
+            // countless — the lowest-precedence state on the icon
+            // (spec 2026-09-10 decision 6).
+            if awake {
+                Image(systemName: "cup.and.saucer.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(state == .allClear ? color : .primary)
+                    .padding(.leading, 2)
             }
         }
         .foregroundStyle(color)

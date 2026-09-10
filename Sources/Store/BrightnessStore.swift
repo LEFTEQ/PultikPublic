@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import Observation
@@ -72,10 +73,17 @@ final class BrightnessStore {
         guard presets.indices.contains(index) else { return }
         let preset = presets[index]
         activeID = preset.id
+        // A preset applied while dark is the way back too: the display levels
+        // it writes replace the remembered ones. The keyboard is only replaced
+        // when the preset sets it; a "keep" preset would otherwise leave the
+        // keys at the blackout's 0, so those come back from the snapshot.
+        let keyboardsToRestore = preset.keyboardLevel == nil ? (snapshot?.keyboards ?? []) : []
+        endBlackout()
         guard !isApplying else { pending = preset; return }
         isApplying = true
         Task.detached(priority: .userInitiated) {
             Self.push(preset)
+            for (keyboard, level) in keyboardsToRestore { KeyboardBacklight.setBrightness(level, of: keyboard) }
             await MainActor.run { self.finishPass() }
         }
     }
@@ -101,6 +109,97 @@ final class BrightnessStore {
         for display in DDCDisplays.displays() {
             DDCDisplays.setBrightness(preset.level, of: display)
         }
+        if let keys = preset.keyboardLevel {
+            for keyboard in KeyboardBacklight.keyboards() {
+                KeyboardBacklight.setBrightness(keys, of: keyboard)
+            }
+        }
+    }
+
+    // MARK: Screens off (spec 2026-09-10 decisions 2 and 7)
+
+    /// Every level the blackout will put back. Keyed the way the bridges
+    /// key their displays; a DDC monitor is `DDCDisplays.Display`.
+    private struct Snapshot: @unchecked Sendable {
+        var apple: [(CGDirectDisplayID, Double)] = []
+        var ddc: [(DDCDisplays.Display, Double)] = []
+        var keyboards: [(UInt64, Double)] = []
+    }
+
+    private var snapshot: Snapshot?
+    private var wakeMonitor: Any?
+
+    /// True while the screens are blacked out and a mouse move will wake them.
+    var isBlackedOut: Bool { snapshot != nil }
+
+    /// Brightness 0 on every display and keyboard without ever sleeping a
+    /// display — display sleep is what starts the lock timer. Levels are
+    /// remembered and `wake()` puts them back; a mouse move or the ⌥Space
+    /// summon calls it. A preset applied while dark also ends the blackout.
+    func blackout() {
+        guard snapshot == nil, !isApplying else { return }
+        isApplying = true
+        Task.detached(priority: .userInitiated) {
+            let taken = Self.takeSnapshot()
+            Self.pushDark(taken)
+            await MainActor.run {
+                self.snapshot = taken
+                self.installWakeMonitor()
+                self.finishPass()
+            }
+        }
+    }
+
+    /// Restores every remembered level. Safe to call when not blacked out.
+    func wake() {
+        guard let taken = snapshot else { return }
+        endBlackout()
+        Task.detached(priority: .userInitiated) {
+            Self.restore(taken)
+        }
+    }
+
+    private func endBlackout() {
+        snapshot = nil
+        if let wakeMonitor { NSEvent.removeMonitor(wakeMonitor) }
+        wakeMonitor = nil
+    }
+
+    /// A mouse monitor needs no permission; a key monitor would need
+    /// Accessibility, so the keyboard's way back is the ⌥Space summon.
+    private func installWakeMonitor() {
+        guard wakeMonitor == nil else { return }
+        wakeMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDown, .rightMouseDown, .scrollWheel]
+        ) { [weak self] _ in
+            Task { @MainActor in self?.wake() }
+        }
+    }
+
+    private nonisolated static func takeSnapshot() -> Snapshot {
+        var taken = Snapshot()
+        for display in DisplayServices.controllableDisplays() {
+            if let level = DisplayServices.brightness(of: display) { taken.apple.append((display, level)) }
+        }
+        for display in DDCDisplays.displays() {
+            taken.ddc.append((display, display.brightness))
+        }
+        for keyboard in KeyboardBacklight.keyboards() {
+            if let level = KeyboardBacklight.brightness(of: keyboard) { taken.keyboards.append((keyboard, level)) }
+        }
+        return taken
+    }
+
+    private nonisolated static func pushDark(_ taken: Snapshot) {
+        for (display, _) in taken.apple { DisplayServices.setBrightness(0, of: display) }
+        for (display, _) in taken.ddc { DDCDisplays.setBrightness(0, of: display) }
+        for (keyboard, _) in taken.keyboards { KeyboardBacklight.setBrightness(0, of: keyboard) }
+    }
+
+    private nonisolated static func restore(_ taken: Snapshot) {
+        for (display, level) in taken.apple { DisplayServices.setBrightness(level, of: display) }
+        for (display, level) in taken.ddc { DDCDisplays.setBrightness(level, of: display) }
+        for (keyboard, level) in taken.keyboards { KeyboardBacklight.setBrightness(level, of: keyboard) }
     }
 
     // MARK: Editing (Settings ▸ Displays)
