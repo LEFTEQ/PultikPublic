@@ -119,6 +119,10 @@ struct Preferences: Codable {
     /// RETIRED 2026-09-06 by `displayPresets`; migrated into the Dim preset
     /// by `migrateDisplayPresets()` and then dropped from the file.
     var dimBrightness: Double?
+    /// Never Sleep (docs/specs/2026-09-10-never-sleep-decisions.md): true
+    /// while the Mac is held awake and unlocked; re-armed at launch. Absent
+    /// (never false) when off, so an untouched file stays untouched.
+    var neverSleep: Bool?
 
     /// Right-rail sections the user has folded shut. Collapse is a preference,
     /// not session state — the rail reopens the way you left it. The vitals
@@ -178,12 +182,17 @@ struct Preferences: Codable {
         var name: String
         var brightness: Int
         var nightShift: NightShift
+        /// Keyboard backlight percent (spec 2026-09-10 decision 3); nil = keep
+        /// whatever it is, which is what every pre-existing preset decodes to.
+        var keyboard: Int?
 
-        init(id: String = UUID().uuidString, name: String, brightness: Int, nightShift: NightShift) {
+        init(id: String = UUID().uuidString, name: String, brightness: Int, nightShift: NightShift,
+             keyboard: Int? = nil) {
             self.id = id
             self.name = name
             self.brightness = brightness
             self.nightShift = nightShift
+            self.keyboard = keyboard
         }
 
         init(from decoder: Decoder) throws {
@@ -192,9 +201,12 @@ struct Preferences: Codable {
             name = try c.decode(String.self, forKey: .name)
             brightness = try c.decode(Int.self, forKey: .brightness)
             nightShift = try c.decodeIfPresent(NightShift.self, forKey: .nightShift) ?? .keep
+            keyboard = try c.decodeIfPresent(Int.self, forKey: .keyboard)
         }
 
         var level: Double { Double(min(max(brightness, 0), 100)) / 100 }
+
+        var keyboardLevel: Double? { keyboard.map { Double(min(max($0, 0), 100)) / 100 } }
 
         static let defaults: [DisplayPreset] = [
             DisplayPreset(name: "Dim", brightness: 15, nightShift: .on),
@@ -345,6 +357,7 @@ struct Preferences: Codable {
         workspaces = try container.decodeIfPresent(WorkspacesConfig.self, forKey: .workspaces)
         displayPresets = try container.decodeIfPresent([DisplayPreset].self, forKey: .displayPresets)
         dimBrightness = try container.decodeIfPresent(Double.self, forKey: .dimBrightness)
+        neverSleep = try container.decodeIfPresent(Bool.self, forKey: .neverSleep)
     }
 
     /// The shape for `id`: the user's edit if there is one, otherwise the

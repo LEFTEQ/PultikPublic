@@ -137,8 +137,43 @@ struct DisplaysPane: View {
                 Button("Apply") { store.apply(index: index) }
                     .disabled(store.isApplying)
             }
+            keyboardRow(index)
         }
         .padding(.vertical, 2)
+    }
+
+    /// The keyboard backlight column (spec 2026-09-10 decision 3): Keep, or
+    /// an absolute percent. Disabled without a backlit keyboard.
+    @ViewBuilder
+    private func keyboardRow(_ index: Int) -> some View {
+        HStack {
+            Image(systemName: "keyboard")
+                .foregroundStyle(.secondary)
+                .help("Keyboard backlight")
+            Toggle("Set keyboard backlight", isOn: Binding(
+                get: { presets[index].keyboard != nil },
+                set: { on in presets[index].keyboard = on ? 0 : nil; commit() }
+            ))
+            .toggleStyle(.checkbox)
+            .accessibilityLabel("\(presets[index].name) sets the keyboard backlight")
+            if let keys = presets[index].keyboard {
+                Slider(value: Binding(
+                    get: { Double(keys) },
+                    set: { presets[index].keyboard = Int($0.rounded()); commit() }
+                ), in: 0...100, step: 1)
+                .accessibilityLabel("\(presets[index].name) keyboard backlight")
+                .accessibilityValue("\(keys) percent")
+                Text("\(keys)%")
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            } else {
+                Text("kept as it is")
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .disabled(!KeyboardBacklight.isAvailable)
     }
 
     /// Names are the palette keywords, so two presets never share one.

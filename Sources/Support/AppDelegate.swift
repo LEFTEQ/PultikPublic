@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static private(set) var shared: AppDelegate?
 
     private var statusItem: NSStatusItem?
-    private var lastIconState: (AggregateState, Int, Int, Bool, String)?
+    private var lastIconState: (AggregateState, Int, Int, Bool, Bool, String)?
     /// Warm between quick summons, released after 30 seconds hidden.
     private var panel: StatusPanel?
     private let panelSession = PanelSession()
@@ -35,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         TodoStore.shared.onChange = { [weak self] in self?.updateIcon() }
+        // Touching the singleton re-arms a persisted Never Sleep at launch.
+        AwakeStore.shared.onChange = { [weak self] in self?.updateIcon() }
         #if DEBUG
         // A capture launch primes Devbox first so the workspace rail is
         // deterministic; normal Debug and every Release launch are unchanged.
@@ -55,7 +57,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // happened to wake it. Touching it here runs its flush-or-arm.
         _ = FocusGate.shared
 
-        HotKey.onPress = { AppDelegate.shared?.togglePanel(nil) }
+        HotKey.onPress = {
+            // The keyboard's way out of a blackout (spec 2026-09-10
+            // decision 7): the summon wakes the screens, then opens as usual.
+            BrightnessStore.shared.wake()
+            AppDelegate.shared?.togglePanel(nil)
+        }
         HotKey.register(spec: Preferences.load().hotkey)
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -100,21 +107,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateIcon() {
         guard let button = statusItem?.button else { return }
+        let awake = AwakeStore.shared.isAwake
         let iconState = (store.aggregate, TodoStore.shared.openTodos.count,
-                         store.unreadAlertCount, store.unreadCriticalAlert,
+                         store.unreadAlertCount, store.unreadCriticalAlert, awake,
                          button.effectiveAppearance.name.rawValue)
         if lastIconState.map({ $0 != iconState }) ?? true {
             button.image = MenuBarIconView.render(iconState.0, todoCount: iconState.1,
-                                                  alertCount: iconState.2, alertCritical: iconState.3)
+                                                  alertCount: iconState.2, alertCritical: iconState.3,
+                                                  awake: iconState.4)
             lastIconState = iconState
         }
         // The icon draws the unread count and critical state; the tooltip and
         // a11y label are the only places a VoiceOver user can reach them.
         let unread = store.unreadAlertCount
-        let description = unread == 0
+        let description = (unread == 0
             ? "Pultík — command center (⌥Space)"
             : "Pultík — \(unread) unread alert\(unread == 1 ? "" : "s")"
-                + "\(store.unreadCriticalAlert ? ", critical" : "") (⌥Space)"
+                + "\(store.unreadCriticalAlert ? ", critical" : "") (⌥Space)")
+            + (awake ? " — Never Sleep on" : "")
         button.toolTip = description
         button.setAccessibilityLabel(description)
         statusItem?.isVisible = true

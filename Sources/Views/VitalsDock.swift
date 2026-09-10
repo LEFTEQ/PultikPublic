@@ -61,12 +61,14 @@ struct VitalsDock: View {
 private struct MacTier: View {
     let fanStore: FanStore
     private let brightness = BrightnessStore.shared
+    private let awake = AwakeStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
                 Kicker(text: "This Mac")
                 Spacer(minLength: 0)
+                AwakeToggle(awake: awake)
                 if brightness.isAvailable {
                     DimToggle(brightness: brightness)
                 }
@@ -282,6 +284,37 @@ private struct Vital: View {
 }
 
 // MARK: - Display preset cycle
+
+/// Never Sleep (docs/specs/2026-09-10-never-sleep-decisions.md, decisions 4
+/// and 6): the cup is the visible "this Mac is being held awake" indicator
+/// and, since a glyph is a button at no extra cost, the toggle too. Same
+/// `AwakeStore` the `awake` quick command flips.
+private struct AwakeToggle: View {
+    let awake: AwakeStore
+
+    var body: some View {
+        Button {
+            awake.toggle()
+        } label: {
+            Image(systemName: awake.isAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                .font(.system(size: 9.5))
+                .foregroundStyle(awake.isAwake ? Color.orange : Color.secondary)
+                .frame(width: 14, height: 14)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(awake.isAwake ? "Turn Never Sleep off" : "Turn Never Sleep on")
+    }
+
+    private var help: String {
+        if let since = awake.since {
+            return "Never Sleep on since \(since.formatted(date: .omitted, time: .shortened)) — "
+                + "the Mac stays running and unlocked (lid close still sleeps); click to allow sleep"
+        }
+        return "Never Sleep off — click to keep this Mac running and unlocked; also “awake” in the palette"
+    }
+}
 
 /// The display-presets button (docs/specs/2026-09-06-display-presets-decisions.md).
 /// Each click applies the next preset in Settings ▸ Displays order; the glyph
