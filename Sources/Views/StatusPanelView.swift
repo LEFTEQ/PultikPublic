@@ -71,13 +71,6 @@ private struct RightRailsHeightKey: PreferenceKey {
     }
 }
 
-private struct VitrinkaRailHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 /// Everything in the centre column that sits OUTSIDE the capped list — the
 /// palette, its hairline, and the pinned prod/links strips. Summed, not maxed:
 /// these are stacked siblings, and the cap has to leave room for all of them.
@@ -107,7 +100,11 @@ private extension View {
 /// measured and the scroller given a DEFINITE height: its content's, capped at
 /// `maxHeight`. Short rails still size to their content — only a rail that
 /// would overrun the screen becomes a scroller.
-private struct ScrollColumn<Content: View>: View {
+///
+/// Internal, not fileprivate: every full-height left-column tab has to obey the
+/// same rule, and `VitrinkaDailyRail` lives in its own file. A second copy would
+/// drift into the rigid `.frame(height:)` this replaced.
+struct ScrollColumn<Content: View>: View {
     let maxHeight: CGFloat
     @ViewBuilder var content: Content
     @State private var measured: CGFloat = 0
@@ -131,53 +128,6 @@ private struct ScrollColumn<Content: View>: View {
         // stay unconstrained for that one pass rather than flashing a 1pt
         // column. The window's own clamp keeps even that frame on-screen.
         .frame(height: measured > 0 ? min(measured, maxHeight) : nil)
-    }
-}
-
-/// The draggable hairline between the Vitrinka and Devbox rails. Drag
-/// writes the split as a fraction of the column budget; it persists in
-/// `settings.json` (`leftRailSplit`).
-private struct LeftSplitHandle: View {
-    let budget: CGFloat
-    let split: Double
-    let onChange: (Double) -> Void
-    @State private var hovering = false
-    @State private var dragStart: Double?
-
-    var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(hovering || dragStart != nil ? Theme.accent.opacity(0.6) : Color.primary.opacity(0.08))
-                .frame(height: 1)
-            Capsule()
-                .fill(Color.primary.opacity(hovering || dragStart != nil ? 0.35 : 0.15))
-                .frame(width: 28, height: 3)
-        }
-        .frame(height: 9)
-        .contentShape(Rectangle())
-        .onHover { inside in
-            hovering = inside
-            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 1)
-                .onChanged { value in
-                    if dragStart == nil { dragStart = split }
-                    guard let dragStart, budget > 0 else { return }
-                    onChange(dragStart + Double(value.translation.height / budget))
-                }
-                .onEnded { _ in dragStart = nil }
-        )
-        .help("Drag to resize — Vitrinka above, Devbox below")
-        .accessibilityLabel("Rail split")
-        .accessibilityValue("\(Int((split * 100).rounded())) percent Vitrinka")
-        .accessibilityAdjustableAction { direction in
-            switch direction {
-            case .increment: onChange(split + 0.05)
-            case .decrement: onChange(split - 0.05)
-            @unknown default: break
-            }
-        }
     }
 }
 
@@ -412,7 +362,7 @@ struct StatusPanelView: View {
 
     private var showDevbox: Bool {
         store.isSectionVisible("devbox")
-            && !(store.devboxWorkspaces.isEmpty && store.devboxProjects.isEmpty)
+            && (store.devboxSummary != nil || !(store.devboxWorkspaces.isEmpty && store.devboxProjects.isEmpty))
     }
 
     /// The left rail is devbox only since the VPS meters moved to the bottom
@@ -431,7 +381,7 @@ struct StatusPanelView: View {
 
     private var showVitrinkaRail: Bool {
         store.isSectionVisible("vitrinka")
-            && !(store.vitrinkaListening.isEmpty && store.vitrinkaBoards.isEmpty)
+            && store.vitrinkaWorkspaces.contains(where: { !$0.unavailable })
     }
 
     /// Todos worth interrupting for — overdue, inside their lead window, or
@@ -495,7 +445,6 @@ struct StatusPanelView: View {
     /// are measured on the scrollers, not the stretched HStack cells.
     @State private var leftColumnHeight: CGFloat = 0
     @State private var rightRailsHeight: CGFloat = 0
-    @State private var vitrinkaRailHeight: CGFloat = 0
     /// The centre list keeps its 560pt design cap on a roomy screen and gives
     /// it up only when the screen is shorter than that — or when a side rail
     /// has already made the panel taller: the panel's height is set by its
@@ -504,37 +453,31 @@ struct StatusPanelView: View {
     /// The screen budget still wins over both. The palette and the pinned
     /// strips are stacked outside this frame, so every bound subtracts them
     /// first or the column would overrun the cap it is supposed to obey.
-    /// The left column: the Vitrinka rail on top with its own scroller at
-    /// `leftRailSplit` of the budget, a drag handle, then the Devbox rail in
-    /// the rest. Either rail alone takes the whole column.
+    /// Full-height integration tabs share the left column.
     @ViewBuilder
     private var leftColumn: some View {
-        let both = showVitrinkaRail && showDevbox
         VStack(spacing: 0) {
-            if showVitrinkaRail {
-                // The split is a CEILING for Vitrinka: a short rail stops at
-                // its content and Devbox takes the rest (measured below).
-                ScrollColumn(maxHeight: both ? max(80, (columnBudget * store.leftRailSplit).rounded()) : columnBudget) {
-                    RailSection(key: "vitrinka", title: "🧷 Vitrinka",
-                                count: store.vitrinkaListening.count)
-                    {
-                        VitrinkaRail(listening: store.vitrinkaListening,
-                                     boards: store.vitrinkaBoards,
-                                     onAllBoards: { enterMode(.boards) })
-                    }
+            if showVitrinkaRail && showDevbox {
+                Picker("Left rail", selection: Binding(get: { store.leftRailTab }, set: { store.setLeftRailTab($0) })) {
+                    Text("Vitrinka").tag("vitrinka")
+                    Text("Devbox").tag("devbox")
                 }
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: VitrinkaRailHeightKey.self,
-                                               value: proxy.size.height)
-                    }
-                )
+                .pickerStyle(.segmented)
+                .padding(8)
             }
-            if both {
-                LeftSplitHandle(budget: columnBudget, split: store.leftRailSplit) { store.setLeftRailSplit($0) }
-            }
-            if showDevbox {
-                ScrollColumn(maxHeight: both ? max(80, columnBudget - vitrinkaRailHeight - 9) : columnBudget) {
+            if showVitrinkaRail && (store.leftRailTab == "vitrinka" || !showDevbox) {
+                VitrinkaDailyRail(store: store, snapshots: store.vitrinkaWorkspaces,
+                                  maxHeight: max(80, columnBudget - 42))
+            } else if showDevbox {
+                if let summary = store.devboxSummary {
+                    MachineVitals(name: "Devbox VM", cpuCount: summary.cpus, cpuPercent: summary.cpuUsagePercent,
+                                  memoryUsed: summary.memoryTotalBytes - summary.memoryAvailableBytes,
+                                  memoryTotal: summary.memoryTotalBytes,
+                                  diskUsed: summary.diskUsedBytes, diskTotal: summary.diskTotalBytes)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                ScrollColumn(maxHeight: max(80, columnBudget - 96)) {
                     DevboxRail(store: store,
                                workspaces: store.devboxWorkspaces,
                                projects: store.devboxProjects,
@@ -636,10 +579,6 @@ struct StatusPanelView: View {
         .onPreferenceChange(LeftColumnHeightKey.self) { value in
             let rounded = value.rounded()
             if abs(rounded - leftColumnHeight) >= 1 { leftColumnHeight = rounded }
-        }
-        .onPreferenceChange(VitrinkaRailHeightKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - vitrinkaRailHeight) >= 1 { vitrinkaRailHeight = rounded }
         }
         .onPreferenceChange(RightRailsHeightKey.self) { value in
             let rounded = value.rounded()
@@ -1566,6 +1505,12 @@ struct StatusPanelView: View {
         // The monitor is app-wide; Settings and other windows keep their keys.
         // A PanelDriver event is addressed to this panel by construction.
         guard synthetic || NSApp.keyWindow is StatusPanel else { return event }
+        // The workspace search (and note editors) own their editing keys — but
+        // never Esc. It peels one panel layer (case 53), and a note edit has to
+        // stay cancellable with the key that opened it; case 53 returns the
+        // event when there is no layer to peel, so a field keeps its own Esc.
+        guard synthetic || paletteFocused || event.keyCode == 53
+            || !(NSApp.keyWindow?.firstResponder is NSTextView) else { return event }
         let items = paletteItems
         switch event.keyCode {
         case 125: // ↓

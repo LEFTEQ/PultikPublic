@@ -29,9 +29,7 @@ final class AwakeStore {
     func setAwake(_ on: Bool) {
         guard on != isAwake else { return }
         if on { arm() } else { disarm() }
-        var prefs = Preferences.load()
-        prefs.neverSleep = on ? true : nil
-        prefs.save()
+        Preferences.update { $0.neverSleep = on ? true : nil }
         onChange?()
     }
 

@@ -28,9 +28,14 @@ final class PaletteKeyRouter {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             MainActor.assumeIsolated {
-                PaletteKeyRouter.shared.handler?(event) ?? event
+                PaletteKeyRouter.shared.route(event)
             }
         }
+    }
+
+    func route(_ event: NSEvent) -> NSEvent? {
+        guard let handler else { return event }
+        return handler(event)
     }
 
     /// Release only if still the owner — a disappearing view must not clear the

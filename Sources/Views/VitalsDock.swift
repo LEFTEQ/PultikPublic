@@ -115,17 +115,6 @@ private struct MacTier: View {
                           text: "\(fastest.currentRPM)×\(fanStore.fans.count)",
                           tone: fanTone(fastest), help: allFansHelp)
                 }
-                if let load = fanStore.cpuLoad {
-                    Vital(symbol: "cpu", text: "\(Int((load * 100).rounded()))%",
-                          tone: percentTone(load * 100), help: "CPU load, all cores")
-                }
-                if let mem = fanStore.memUsedFraction {
-                    // memTone, not percentTone: used-% over-alarms on a healthy
-                    // Mac where inactive pages keep "used" high while kernel
-                    // pressure is nominal.
-                    Vital(symbol: "memorychip", text: "\(Int((mem * 100).rounded()))%",
-                          tone: memTone(fanStore, percent: mem * 100), help: memHelp)
-                }
                 Spacer(minLength: 0)
             }
             .lineLimit(1)
@@ -136,6 +125,12 @@ private struct MacTier: View {
             // to hang it on, and that is exactly a machine whose thermal
             // pressure you would want to know about.
             .help(thermalHelp)
+            MachineVitals(cpuCount: ProcessInfo.processInfo.activeProcessorCount,
+                          cpuPercent: fanStore.cpuLoad.map { $0 * 100 },
+                          memoryUsed: fanStore.memUsedBytes, memoryTotal: fanStore.memTotalBytes,
+                          diskUsed: fanStore.diskTotalBytes.flatMap { total in fanStore.diskFreeBytes.map { Double(total - $0) } },
+                          diskTotal: fanStore.diskTotalBytes.map(Double.init))
+                .padding(.horizontal, 2)
         }
     }
 
@@ -155,11 +150,6 @@ private struct MacTier: View {
         fanStore.fans.map(fanHelp).joined(separator: " · ")
     }
 
-    private var memHelp: String {
-        guard let used = fanStore.memUsedBytes else { return "Memory used" }
-        return String(format: "Memory %.1f / %.0f GB", used / 1e9, fanStore.memTotalBytes / 1e9)
-    }
-
     /// The OS thermal state used to have its own cell ("warm"/"hot"). The
     /// numbers already say it and the row must stay one line, so it lives on
     /// the tier's tooltip now (2026-08-29).
@@ -175,17 +165,10 @@ private struct MacTier: View {
 
 // MARK: - Tier 2: the estate
 
-/// One row per box: name, then cpu / ram / disk. Column widths are fixed and
-/// sized to the widest value each can hold — "AppServer", "100%",
-/// "147/251 GB" — because ragged numeric columns are unreadable at 9.5pt.
+/// One row per box, through the same `MachineVitals` grammar the Mac and the
+/// Devbox guest use — so cpu / ram / disk read identically on every machine.
 private struct EstateTier: View {
     let metrics: [ServerMetrics]
-
-    private enum Column {
-        static let name: CGFloat = 60
-        static let percent: CGFloat = 26
-        static let size: CGFloat = 58
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -193,77 +176,27 @@ private struct EstateTier: View {
                 .padding(.horizontal, 2)
                 .padding(.bottom, 1)
             ForEach(metrics) { server in
-                HStack(spacing: 6) {
-                    Text(server.name)
-                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .frame(width: Column.name, alignment: .leading)
-                    Vital(symbol: "cpu", percent: server.cpu,
-                          text: percentText(server.cpu), width: Column.percent)
-                    Vital(symbol: "memorychip", percent: server.ram,
-                          text: sizeText(used: server.ramUsedBytes, total: server.ramTotalBytes)
-                              ?? percentText(server.ram),
-                          width: Column.size)
-                    Vital(symbol: "internaldrive", percent: server.disk,
-                          text: percentText(server.disk), width: Column.percent)
-                }
+                MachineVitals(name: server.name, cpuCount: server.cpuCount, cpuPercent: server.cpu,
+                              memoryUsed: server.ramUsedBytes, memoryTotal: server.ramTotalBytes,
+                              diskUsed: server.diskUsedBytes, diskTotal: server.diskTotalBytes)
                 .padding(.horizontal, 2)
-                .help(diskHelp(server))
+                .padding(.vertical, 3)
             }
         }
-    }
-
-    private func percentText(_ value: Double?) -> String {
-        value.map { "\(Int($0.rounded()))%" } ?? "—"
-    }
-
-    private func sizeText(used: Double?, total: Double?) -> String? {
-        guard let used, let total, total > 0 else { return nil }
-        return formatSize(used: used, total: total)
-    }
-
-    /// The disk cell shows a percentage to stay narrow; the absolute figure is
-    /// a hover away rather than lost.
-    private func diskHelp(_ server: ServerMetrics) -> String {
-        guard let used = server.diskUsedBytes, let total = server.diskTotalBytes, total > 0 else {
-            return server.name
-        }
-        return "\(server.name) — disk \(formatSize(used: used, total: total))"
     }
 }
 
 // MARK: - Shared vital cell
 
-/// Icon + number, tinted by load. Two initialisers because the two tiers know
-/// different things: the Mac tier has already chosen a tone (a fan's tone comes
-/// from its own min/max, not a percentage), the estate tier has a percentage
-/// and wants the shared tiering applied to it.
+/// Icon + number, tinted by a tone the caller has already chosen — a fan's tone
+/// comes from its own min/max, not from a percentage. The estate tier's
+/// percentage-tiered variant retired with its fixed columns; `MachineVitals`
+/// owns that row now, and `percentTone` owns the scale.
 private struct Vital: View {
     let symbol: String
     let text: String
     let tone: Color
-    var width: CGFloat?
     var help: String?
-
-    init(symbol: String, text: String, tone: Color, help: String? = nil) {
-        self.symbol = symbol
-        self.text = text
-        self.tone = tone
-        self.help = help
-    }
-
-    init(symbol: String, percent: Double?, text: String, width: CGFloat) {
-        self.symbol = symbol
-        self.text = text
-        self.width = width
-        guard let percent else { self.tone = .secondary; return }
-        switch LoadTier(percent: percent) {
-        case .calm: self.tone = .secondary
-        case .warm: self.tone = .orange
-        case .hot: self.tone = .red
-        }
-    }
 
     var body: some View {
         HStack(spacing: 3) {
@@ -276,7 +209,6 @@ private struct Vital: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: width, alignment: width == nil ? .leading : .trailing)
         }
         .foregroundStyle(tone)
         .help(help ?? "")

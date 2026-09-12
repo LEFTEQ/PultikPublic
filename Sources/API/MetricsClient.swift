@@ -90,12 +90,23 @@ actor MetricsClient {
     func laneBoard() async -> CILaneBoard {
         async let controllersQuery = try? instantSeries("ci_kvm_controller_up")
         async let infoQuery = try? instantSeries("ci_lane_info")
+        async let runnerCPUQuery = try? instantSeries("100 * rate(ci_runner_cpu_seconds_total[2m]) and on(runner) (time() - ci_runner_observed_timestamp_seconds < 90)")
+        async let runnerMemoryQuery = try? instantSeries("ci_runner_memory_bytes and on(runner) (time() - ci_runner_observed_timestamp_seconds < 90)")
         async let jobsQuery = try? instantSeries("ci_runner_job_info == 1")
         async let queuedQuery = try? instantSeries("sum by (lane) (ci_jobs_queued)")
         let (controllers, info, jobs, queued) = await (controllersQuery, infoQuery, jobsQuery, queuedQuery)
+        let (runnerCPU, runnerMemory) = await (runnerCPUQuery, runnerMemoryQuery)
         guard let controllers, !controllers.isEmpty else { return CILaneBoard() }
 
         var ceilings: [String: Int] = [:]
+        func byRunner(_ samples: [(labels: [String: String], value: Double)]?) -> [String: Double] {
+            Dictionary((samples ?? []).compactMap { sample in
+                guard let runner = sample.labels["runner"], sample.value.isFinite, sample.value >= 0 else { return nil }
+                return (runner, sample.value)
+            }, uniquingKeysWith: { first, _ in first })
+        }
+        let cpuByRunner = byRunner(runnerCPU)
+        let memoryByRunner = byRunner(runnerMemory)
         for series in info ?? [] {
             if let lane = series.labels["lane"], let max = series.labels["max_runners"].flatMap(Int.init) {
                 ceilings[lane] = max
@@ -116,7 +127,9 @@ actor MetricsClient {
                 workflow: labels["workflow"] ?? "",
                 jobName: labels["job_name"] ?? "",
                 runURL: labels["run_url"].flatMap(URL.init(string:)),
-                since: labels["since"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
+                since: labels["since"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)),
+                cpuPercent: labels["runner"].flatMap { cpuByRunner[$0] },
+                memoryBytes: labels["runner"].flatMap { memoryByRunner[$0] })
             jobsByLane[lane, default: []].append(job)
         }
 
@@ -152,6 +165,7 @@ actor MetricsClient {
     }
 
     func serverMetrics(servers: [(name: String, instance: String)]) async -> [ServerMetrics] {
+        async let cores = try? instantByInstance(#"count by (instance) (node_cpu_seconds_total{mode="idle"})"#)
         async let cpu = try? instantByInstance(
             #"100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))"#
         )
@@ -174,6 +188,7 @@ actor MetricsClient {
             #"node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}"#
         )
         let (cpuMap, ramMap, diskMap) = await (cpu, ram, disk)
+        let coreMap = await cores
         let (ramUsedMap, ramTotalMap, diskUsedMap, diskTotalMap) =
             await (ramUsed, ramTotal, diskUsed, diskTotal)
         guard cpuMap != nil || ramMap != nil || diskMap != nil else { return [] }
@@ -187,7 +202,8 @@ actor MetricsClient {
                 ramUsedBytes: ramUsedMap?[server.instance],
                 ramTotalBytes: ramTotalMap?[server.instance],
                 diskUsedBytes: diskUsedMap?[server.instance],
-                diskTotalBytes: diskTotalMap?[server.instance]
+                diskTotalBytes: diskTotalMap?[server.instance],
+                cpuCount: coreMap?[server.instance].map(Int.init)
             )
         }
     }

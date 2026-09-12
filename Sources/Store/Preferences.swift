@@ -129,10 +129,8 @@ struct Preferences: Codable {
     /// dock is deliberately not collapsible and never appears here.
     var collapsedRails: [String] = []
 
-    /// Share of the left column the Vitrinka rail takes above the Devbox
-    /// rail (0.2–0.8); the drag handle between them writes it
-    /// (spec 2026-09-09 decision 8). nil = the 40 % default.
-    var leftRailSplit: Double?
+    var leftRailTab: String?
+    var vitrinkaWorkspace: String?
 
     /// Workspace layouts for the Hammerspoon `.organize` engine
     /// (hammerspoon/organize.lua; docs/specs/2026-09-01-organize-workspaces-
@@ -353,7 +351,8 @@ struct Preferences: Codable {
         vaultPath = try container.decodeIfPresent(String.self, forKey: .vaultPath)
         todoProject = try container.decodeIfPresent(String.self, forKey: .todoProject)
         collapsedRails = try container.decodeIfPresent([String].self, forKey: .collapsedRails) ?? []
-        leftRailSplit = try container.decodeIfPresent(Double.self, forKey: .leftRailSplit)
+        leftRailTab = try container.decodeIfPresent(String.self, forKey: .leftRailTab)
+        vitrinkaWorkspace = try container.decodeIfPresent(String.self, forKey: .vitrinkaWorkspace)
         workspaces = try container.decodeIfPresent(WorkspacesConfig.self, forKey: .workspaces)
         displayPresets = try container.decodeIfPresent([DisplayPreset].self, forKey: .displayPresets)
         dimBrightness = try container.decodeIfPresent(Double.self, forKey: .dimBrightness)
@@ -463,17 +462,29 @@ struct Preferences: Codable {
     )
 
     /// Rewrite one saved slug list, reporting whether anything moved.
-    /// Internal rather than private so `Tests/` can exercise the collapse case.
-    static func migrateSlugList(_ slugs: inout [String]) -> Bool {
+    /// Internal rather than private so `Tests/` can exercise the collapse case;
+    /// `map` is injectable for the same reason — the identity-mapping guard
+    /// below is only reachable with a map the shipped one cannot contain.
+    static func migrateSlugList(
+        _ slugs: inout [String],
+        using map: [String: String] = renamedRepoSlugs
+    ) -> Bool {
         var seen = Set<String>()
         var rewritten: [String] = []
         var changed = false
         for slug in slugs {
-            var canonical = renamedRepoSlugs[slug]
+            var canonical = map[slug]
             if canonical == nil, slug.hasPrefix("example-org/") {
                 canonical = "example-org/" + slug.dropFirst("example-org/".count)
             }
-            if let canonical {
+            // `canonical != slug` is load-bearing, not defensive. The public
+            // mirror rewrites every real owner to one shared placeholder, which
+            // turns pairs above into identity mappings; without this guard such
+            // an entry makes `applyMigrations()` return true forever, so every
+            // single `load()` re-encodes and re-writes the file and logs a
+            // rename that did not happen. That shipped for 42 minutes on
+            // 2026-09-09 (0616569 → 81f4d83) and cost a write per settings read.
+            if let canonical, canonical != slug {
                 NSLog("pultik: repo '%@' re-orged — now '%@'", slug, canonical)
                 changed = true
             }
@@ -504,6 +515,10 @@ struct Preferences: Codable {
             displayPresets = presets
         }
         dimBrightness = nil
+        // Logged like its four siblings: this is the only migration that can
+        // rewrite the file with no trail, and a migration that silently returns
+        // true on every load is a write amplifier nobody would think to look for.
+        NSLog("pultik: dimBrightness %.0f%% migrated into the Dim preset", level * 100)
         return true
     }
 
@@ -588,6 +603,20 @@ struct Preferences: Codable {
             NSLog("pultik: server 'WebServer' added to the saved estate")
         }
         return changed
+    }
+
+    /// The ONE way to change a saved key: re-read the file, mutate, write back.
+    ///
+    /// Every writer must go through here. A caller that keeps its own decoded
+    /// `Preferences` and saves that wholesale writes back a snapshot of the
+    /// file as it looked when the caller took it, silently discarding every
+    /// key any other store has written since — `StatusStore` held exactly such
+    /// a launch-time snapshot until 2026-09-10, so a pinned-repo change could
+    /// undo a brightness or fan-curve edit made minutes earlier.
+    static func update(_ mutate: (inout Preferences) -> Void) {
+        var prefs = load()
+        mutate(&prefs)
+        prefs.save()
     }
 
     func save() {

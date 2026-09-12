@@ -14,8 +14,10 @@ import Observation
 /// Two display families: Apple panels (built-in, Studio Display, Pro Display
 /// XDR) through `DisplayServices`, third-party monitors through `DDCDisplays`;
 /// Night Shift through `NightShift`. Every write runs off the main actor —
-/// DDC is I2C with sleeps in it — and a click during a pass is dropped, not
-/// queued.
+/// DDC is I2C with sleeps in it — and a request arriving mid-pass is coalesced
+/// into a single `pending` slot and run when the pass ends, so the last value
+/// always lands. (This said "dropped, not queued" until 2026-09-10; the code
+/// has queued since the feature shipped.)
 ///
 /// Failures are silent by law: a display that refuses a write is skipped,
 /// and with nothing controllable the store reports `isAvailable == false`
@@ -42,6 +44,9 @@ final class BrightnessStore {
     /// A preset asked for during a pass (a slider still moving while DDC is
     /// mid-write). Applied when the pass ends, so the last value always lands.
     private var pending: Preset?
+
+    /// Trailing write for a drag that never sends a drop — see `previewPresets`.
+    private var persistDebounce: Task<Void, Never>?
 
     private init() {
         presets = Preferences.load().displayPresets ?? Preset.defaults
@@ -72,14 +77,26 @@ final class BrightnessStore {
     func apply(index: Int) {
         guard presets.indices.contains(index) else { return }
         let preset = presets[index]
-        activeID = preset.id
         // A preset applied while dark is the way back too: the display levels
         // it writes replace the remembered ones. The keyboard is only replaced
         // when the preset sets it; a "keep" preset would otherwise leave the
         // keys at the blackout's 0, so those come back from the snapshot.
+        //
+        // Deliberately BEFORE the coalescing guard: a request that arrives
+        // mid-pass must still disarm the blackout now, or the wake monitor
+        // survives and the next mouse move restores the snapshot on top of the
+        // preset that is about to land.
         let keyboardsToRestore = preset.keyboardLevel == nil ? (snapshot?.keyboards ?? []) : []
         endBlackout()
+        // Coalesce first, publish second. Writing `activeID` before this guard
+        // moved "active" for a request that had not run yet, so the dock
+        // button's next-preset glyph could name a preset the displays were not
+        // at.
         guard !isApplying else { pending = preset; return }
+        // @Observable has no equality guard: an unconditional write dirties
+        // every view reading `activeID` even when nothing moved, and during a
+        // drag that is one redundant invalidation of the whole pane per frame.
+        if activeID != preset.id { activeID = preset.id }
         isApplying = true
         Task.detached(priority: .userInitiated) {
             Self.push(preset)
@@ -182,7 +199,12 @@ final class BrightnessStore {
             if let level = DisplayServices.brightness(of: display) { taken.apple.append((display, level)) }
         }
         for display in DDCDisplays.displays() {
-            taken.ddc.append((display, display.brightness))
+            // A live read, NOT `display.brightness`: discovery caches its probe
+            // so that an apply pass costs 0.32 ms instead of 176 ms, which
+            // leaves `current` frozen at whatever it was when the monitor was
+            // first seen. The blackout is the one caller that must know where
+            // the monitor is right now, because it is about to put it back.
+            taken.ddc.append((display, DDCDisplays.currentBrightness(of: display) ?? display.brightness))
         }
         for keyboard in KeyboardBacklight.keyboards() {
             if let level = KeyboardBacklight.brightness(of: keyboard) { taken.keyboards.append((keyboard, level)) }
@@ -204,21 +226,56 @@ final class BrightnessStore {
 
     // MARK: Editing (Settings ▸ Displays)
 
-    /// Replaces the whole list; the pane edits a copy and pushes it here.
-    /// Re-applies the active preset at once when its values moved, so a
-    /// slider drag is live feedback rather than a promise for next time.
-    func setPresets(_ new: [Preset]) {
+    /// Adopts a new list in memory and re-applies the active preset when its
+    /// values moved, so an edit is live on the monitors rather than a promise
+    /// for next time. Persistence is the caller's business — see
+    /// `previewPresets` versus `setPresets`.
+    private func adopt(_ new: [Preset]) {
         let previous = active
         presets = new
-        var prefs = Preferences.load()
-        prefs.displayPresets = new
-        prefs.save()
         guard let previous else { return }
         guard let index = new.firstIndex(where: { $0.id == previous.id }) else {
             activeID = nil
             return
         }
         if new[index] != previous { apply(index: index) }
+    }
+
+    /// A drag in progress: the list moves in memory and the monitors follow,
+    /// but nothing touches the disk. The drop calls `setPresets` exactly once.
+    ///
+    /// This split is the whole point of the 2026-09-10 pass. `setPresets` per
+    /// slider frame meant a decode + 5 migrations + a pretty-printed encode +
+    /// an atomic file replace on the main actor for every pixel of the drag —
+    /// ~1.1 ms of blocking filesystem work at whatever rate AppKit could
+    /// deliver mouse events, which is to say "as fast as the main thread can
+    /// finish the last one".
+    func previewPresets(_ new: [Preset]) {
+        adopt(new)
+        // Safety net, not the main path: a keyboard or VoiceOver adjustment of
+        // a Slider does not reliably bracket with `onEditingChanged`, so a
+        // preview that never gets its commit must still land. One write after
+        // the value settles, and the drop cancels it by committing first.
+        persistDebounce?.cancel()
+        persistDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            self.persist()
+        }
+    }
+
+    /// Replaces the whole list and persists it: add, remove, reorder, rename,
+    /// Night Shift, and the end of a slider drag.
+    func setPresets(_ new: [Preset]) {
+        persistDebounce?.cancel()
+        persistDebounce = nil
+        adopt(new)
+        persist()
+    }
+
+    private func persist() {
+        let snapshot = presets
+        Preferences.update { $0.displayPresets = snapshot }
     }
 
     func resetToDefaults() {

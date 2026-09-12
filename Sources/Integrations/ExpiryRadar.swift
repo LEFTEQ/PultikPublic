@@ -79,9 +79,7 @@ final class ExpiryRadarStore {
     }
 
     private func persistWatchlist() {
-        var prefs = Preferences.load()
-        prefs.expiryWatch = items
-        prefs.save()
+        Preferences.update { $0.expiryWatch = self.items }
     }
 
     private func saveStates() {

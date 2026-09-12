@@ -9,7 +9,7 @@ struct VitrinkaRail: View {
     let boards: [VitrinkaBoard]
     let onAllBoards: () -> Void
 
-    static let recentCount = 4
+    static let recentCount = 100
 
     private var recent: [VitrinkaBoard] {
         let listened = Set(listening.map(\.scope))
@@ -41,12 +41,12 @@ struct VitrinkaRail: View {
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 0)
                     Button(action: onAllBoards) {
-                        Text(".b all")
+                        Text("open library ↗")
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundStyle(.tertiary)
                     }
                     .buttonStyle(.plain)
-                    .help("Every recent board — .b in the palette")
+                    .help("Open this workspace’s board library")
                 }
                 .padding(.horizontal, 8)
                 .padding(.top, 3)

@@ -40,6 +40,8 @@ final class NoteStore {
 
     private var watcher: DispatchSourceFileSystemObject?
     private var reloadDebounce: Task<Void, Never>?
+    /// notes.json's mtime + size as of the last event that got through.
+    private var lastSeenStamp: (Date, Int)?
 
     private init() {
         load()
@@ -155,7 +157,19 @@ final class NoteStore {
         scheduleReload()
     }
 
+    /// Directory-level events also fire for settings.json and links.json (see
+    /// `startWatching`). Cheap `stat` first: only notes.json actually moving is
+    /// worth a Task, so an unrelated settings write costs one syscall instead
+    /// of a cancel-and-respawn on the main actor.
     private func scheduleReload() {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: Self.fileURL.path)
+        let stamp = (attributes?[.modificationDate] as? Date).flatMap { modified in
+            (attributes?[.size] as? Int).map { (modified, $0) }
+        }
+        // An unreadable file always falls through: the catch-up call at the end
+        // of `startWatching` runs before notes.json necessarily exists.
+        if let stamp, let last = lastSeenStamp, stamp == last { return }
+        lastSeenStamp = stamp
         reloadDebounce?.cancel()
         reloadDebounce = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))

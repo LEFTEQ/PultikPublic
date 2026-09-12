@@ -254,10 +254,12 @@ struct FanDeckView: View {
                         tone: percentTone(load * 100))
             }
             if let mem = fanStore.memUsedFraction, let used = fanStore.memUsedBytes {
+                // formatSize, not a local decimal format: the vitals dock shows
+                // this same Mac's memory through it, and one machine must not
+                // read 24.0 GB here and 25.8 GB there.
                 statRow(symbol: "memorychip", label: "Memory",
-                        value: String(format: "%.1f / %.0f GB · %d%%",
-                                      used / 1e9, fanStore.memTotalBytes / 1e9,
-                                      Int((mem * 100).rounded())),
+                        value: "\(formatSize(used: used, total: fanStore.memTotalBytes))"
+                            + " · \(Int((mem * 100).rounded()))%",
                         tone: memTone(fanStore, percent: mem * 100))
             }
             if let free = fanStore.diskFreeBytes {

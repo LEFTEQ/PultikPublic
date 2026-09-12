@@ -185,15 +185,8 @@ struct LaneRail: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
-                    ForEach(section.active) { lane in
-                        LaneRow(lane: lane)
-                    }
-                    if !section.active.isEmpty, !section.idle.isEmpty {
-                        Text("\(section.idle.count) idle")
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 12)
-                            .help(section.idle.map(\.name).joined(separator: ", "))
+                    ForEach((section.active + section.idle).sorted { $0.name < $1.name }) { lane in
+                        CILaneGrid(lane: lane)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -208,102 +201,7 @@ struct LaneRail: View {
     }
 }
 
-/// A lane with activity: name, one cell per running job (up to the ceiling
-/// when known), the counts. Red when its controller is down.
-private struct LaneRow: View {
-    let lane: CILane
-    @State private var hovering = false
-    @State private var showPopover = false
-
-    private var tone: Color {
-        if !lane.up { return .red }
-        return lane.running > 0 ? .green : .secondary
-    }
-
-    private var counts: String {
-        var parts: [String] = []
-        if lane.running > 0 {
-            parts.append(lane.maxRunners.map { "\(lane.running)/\($0)" } ?? "\(lane.running)")
-        }
-        if lane.queued > 0 { parts.append("\(lane.queued) queued") }
-        if !lane.up { parts.append("down") }
-        return parts.joined(separator: " · ")
-    }
-
-    private var accessibilityState: String {
-        var parts = ["\(lane.running) running"]
-        if let max = lane.maxRunners { parts[0] += " of \(max)" }
-        if lane.queued > 0 { parts.append("\(lane.queued) queued") }
-        if !lane.up { parts.append("controller down") }
-        return parts.joined(separator: ", ")
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(lane.name)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(lane.up ? Color.primary : Color.red)
-                .lineLimit(1)
-                .frame(minWidth: 0, alignment: .leading)
-            LaneCells(running: lane.running, ceiling: lane.maxRunners, tone: tone)
-            Spacer(minLength: 2)
-            Text(counts)
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(lane.up ? Color.secondary : Color.red)
-                .lineLimit(1)
-        }
-        .padding(.vertical, 1)
-        .padding(.horizontal, 4)
-        .background(hovering ? Color.white.opacity(0.05) : .clear,
-                    in: RoundedRectangle(cornerRadius: 4))
-        .contentShape(Rectangle())
-        .onHover { inside in
-            hovering = inside
-            if inside {
-                // Small delay so a sweep down the rail doesn't strobe
-                // popovers; cancelled by the guard when the mouse moved on.
-                Task {
-                    try? await Task.sleep(for: .milliseconds(250))
-                    if hovering { showPopover = true }
-                }
-            }
-        }
-        .popover(isPresented: $showPopover, arrowEdge: .leading) {
-            LanePopover(title: lane.name,
-                        subtitle: "\(lane.trustGroup) · \(lane.backend)\(lane.up ? "" : " · controller down")",
-                        jobs: lane.jobs, queued: lane.queued)
-        }
-        .accessibilityElement()
-        .accessibilityLabel("\(lane.name), \(accessibilityState)")
-        .accessibilityHint("Jobs running on this lane")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { showPopover = true }
-    }
-}
-
-/// Filled squares for running jobs, hollow ones up to the ceiling. Without a
-/// ceiling only the filled ones draw; a very wide lane caps at 16 cells and
-/// lets the count carry the rest.
-private struct LaneCells: View {
-    let running: Int
-    let ceiling: Int?
-    let tone: Color
-
-    private var total: Int { min(16, max(running, ceiling ?? running)) }
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<total, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(index < running ? tone.opacity(0.85) : Color.white.opacity(0.1))
-                    .frame(width: 6, height: 6)
-            }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-/// Jobs the collector saw on lanes that are not ours — GitHub-hosted or an
+ /// Jobs the collector saw on lanes that are not ours — GitHub-hosted or an
 /// unmapped label. One dim line so the queue on it is not a mystery.
 private struct ElsewhereRow: View {
     let jobs: [CIJob]

@@ -55,7 +55,55 @@ enum DDCDisplays {
     private static let hostAddress: UInt8 = 0x51
     private static let brightnessVCP: UInt8 = 0x10
 
+    /// What a VCP brightness probe concluded about one external service, and
+    /// when. `maxValue` is the display's own range, which does not drift.
+    private struct Verdict {
+        let speaksDDC: Bool
+        let maxValue: Int
+        let current: Int
+        let probedAt: Date
+    }
+
+    /// Probing costs ~59 ms per external service (a VCP request, a 50 ms
+    /// settle, a read) and the answer almost never changes: a Studio Display
+    /// or Pro Display XDR is on the same bus but will never speak DDC, and a
+    /// monitor's `maxValue` is fixed. Re-probing all of them on every apply
+    /// pass was 176 of the 191 ms an apply cost, 118 ms of it spent proving
+    /// again that two Apple panels are not DDC targets
+    /// (docs/specs/2026-09-10-display-preset-drag-decisions.md).
+    ///
+    /// Keyed by IORegistry entry id, which is fresh after any replug, so
+    /// hotplug re-probes on its own. `nonisolated(unsafe)` + a lock rather
+    /// than an actor: the only caller is `BrightnessStore.push`, which is
+    /// synchronous and already off the main actor.
+    private nonisolated(unsafe) static var verdicts: [UInt64: Verdict] = [:]
+    private static let verdictLock = NSLock()
+
+    /// How long a "does not speak DDC" verdict stands. Positive verdicts never
+    /// expire; a negative one can be wrong for a monitor that was asleep or
+    /// switched to another input when it was asked, and replugging is not the
+    /// only way that clears.
+    private static let negativeVerdictTTL: TimeInterval = 300
+
+    private static func verdict(for id: UInt64) -> Verdict? {
+        verdictLock.lock()
+        defer { verdictLock.unlock() }
+        guard let known = verdicts[id] else { return nil }
+        guard !known.speaksDDC, Date().timeIntervalSince(known.probedAt) > negativeVerdictTTL
+        else { return known }
+        verdicts[id] = nil
+        return nil
+    }
+
+    private static func record(_ verdict: Verdict, for id: UInt64) {
+        verdictLock.lock()
+        verdicts[id] = verdict
+        verdictLock.unlock()
+    }
+
     /// Every external monitor that answered a brightness read, with its level.
+    /// The IORegistry walk runs every time (it is sub-millisecond); only the
+    /// I2C probe behind it is remembered.
     static func displays() -> [Display] {
         guard let bridge else { return [] }
         var iterator: io_iterator_t = 0
@@ -65,6 +113,7 @@ enum DDCDisplays {
         defer { IOObjectRelease(iterator) }
 
         var found: [Display] = []
+        var live: Set<UInt64> = []
         var service = IOIteratorNext(iterator)
         while service != 0 {
             defer { service = IOIteratorNext(iterator) }
@@ -76,11 +125,48 @@ enum DDCDisplays {
             var entryID: UInt64 = 0
             IORegistryEntryGetRegistryEntryID(service, &entryID)
             IOObjectRelease(service)
-            if let (current, max) = readBrightness(av, bridge) {
+            live.insert(entryID)
+
+            if let known = verdict(for: entryID) {
+                guard known.speaksDDC else { continue }
+                // `current` is the level at probe time and is deliberately not
+                // refreshed — `setBrightness` writes absolutely and reads only
+                // `maxValue`, so a read here would buy nothing for 59 ms.
+                found.append(Display(id: entryID, service: av,
+                                     maxValue: known.maxValue, current: known.current))
+                continue
+            }
+
+            let reading = readBrightness(av, bridge)
+            record(Verdict(speaksDDC: reading != nil,
+                           maxValue: reading?.max ?? 0,
+                           current: reading?.current ?? 0,
+                           probedAt: Date()),
+                   for: entryID)
+            if let (current, max) = reading {
                 found.append(Display(id: entryID, service: av, maxValue: max, current: current))
             }
         }
+        // Unplugged displays must not pin their verdict forever; entry ids are
+        // not reused, so this is the only thing keeping the map bounded.
+        verdictLock.lock()
+        verdicts = verdicts.filter { live.contains($0.key) }
+        verdictLock.unlock()
         return found
+    }
+
+    /// A LIVE VCP read of one monitor's level, 0…1 — nil when it refuses.
+    ///
+    /// `displays()` remembers its probe, so `Display.current` is the level at
+    /// discovery time and does NOT track the monitor. That is fine for writes
+    /// (they are absolute and use only `maxValue`), but anything that must
+    /// remember where a monitor actually is right now — the screens-off
+    /// snapshot, whose whole job is putting that level back — has to ask
+    /// again and pay the ~59 ms.
+    static func currentBrightness(of display: Display) -> Double? {
+        guard let bridge, let reading = readBrightness(display.service, bridge), reading.max > 0
+        else { return nil }
+        return Double(reading.current) / Double(reading.max)
     }
 
     /// 0…1 of the display's own range. False when the monitor refuses.

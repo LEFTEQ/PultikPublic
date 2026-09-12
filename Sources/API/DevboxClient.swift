@@ -383,6 +383,9 @@ actor DevboxClient {
     private struct OverviewResourcesPayload: Codable {
         let cpus: Int
         let load1: Double
+        let cpuUsagePercent: Double?
+        let diskTotalBytes: Double?
+        let diskUsedBytes: Double?
         let memoryTotalBytes: Double
         let memoryAvailableBytes: Double
         let swapTotalBytes: Double
@@ -564,6 +567,9 @@ actor DevboxClient {
                     pressureSome: capacity.pressureSome ?? 0,
                     pressureFull: capacity.pressureFull ?? 0,
                     cpus: resources.cpus, load1: resources.load1,
+                    cpuUsagePercent: resources.cpuUsagePercent,
+                    diskTotalBytes: resources.diskTotalBytes,
+                    diskUsedBytes: resources.diskUsedBytes,
                     memoryTotalBytes: resources.memoryTotalBytes,
                     memoryAvailableBytes: resources.memoryAvailableBytes,
                     swapTotalBytes: resources.swapTotalBytes,

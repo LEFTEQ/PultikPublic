@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Settings ▸ Displays (docs/specs/2026-09-06-display-presets-decisions.md):
+/// Settings ▸ Displays (docs/specs/2026-09-06-display-presets-decisions.md,
+/// drag semantics in docs/specs/2026-09-10-display-preset-drag-decisions.md):
 /// the named brightness presets the palette and the vitals-dock button apply.
-/// Edits a copy and pushes every change straight into `BrightnessStore`, so
-/// dragging the active preset's slider is live on the monitors.
+///
+/// Edits a copy. A slider drag `preview`s — in memory, live on the monitors —
+/// and only the drop `commit`s to disk; every discrete edit commits directly.
 struct DisplaysPane: View {
     private typealias Preset = Preferences.DisplayPreset
 
@@ -14,7 +16,11 @@ struct DisplaysPane: View {
     var body: some View {
         Form {
             Section {
-                ForEach(presets.indices, id: \.self) { index in
+                // Keyed on the preset's stable id, not its offset: rows carry
+                // escaping bindings that close over `index`, and positional
+                // identity means a delete re-identifies every row below it
+                // while those bindings are still live.
+                ForEach(Array(presets.enumerated()), id: \.element.id) { index, _ in
                     row(index)
                 }
                 HStack {
@@ -112,10 +118,16 @@ struct DisplaysPane: View {
                 .accessibilityLabel("Remove \(presets[index].name)")
             }
             HStack {
+                // The drag itself never persists: `preview` moves the list in
+                // memory and lets the monitors follow, and the drop commits
+                // once. Same shape as the fan-curve chart, which has always
+                // written on `.onEnded` only (FanCurveChart.dragGesture).
                 Slider(value: Binding(
                     get: { Double(presets[index].brightness) },
-                    set: { presets[index].brightness = Int($0.rounded()); commit() }
-                ), in: 0...100, step: 1)
+                    set: { presets[index].brightness = Int($0.rounded()); preview() }
+                ), in: 0...100, step: 1, onEditingChanged: { editing in
+                    if !editing { commit() }
+                })
                 .accessibilityLabel("\(presets[index].name) brightness")
                 .accessibilityValue("\(presets[index].brightness) percent")
                 Text("\(presets[index].brightness)%")
@@ -157,10 +169,14 @@ struct DisplaysPane: View {
             .toggleStyle(.checkbox)
             .accessibilityLabel("\(presets[index].name) sets the keyboard backlight")
             if let keys = presets[index].keyboard {
+                // Previews during the drag and commits on the drop, exactly
+                // like the brightness slider above it — same defect, same cure.
                 Slider(value: Binding(
                     get: { Double(keys) },
-                    set: { presets[index].keyboard = Int($0.rounded()); commit() }
-                ), in: 0...100, step: 1)
+                    set: { presets[index].keyboard = Int($0.rounded()); preview() }
+                ), in: 0...100, step: 1, onEditingChanged: { editing in
+                    if !editing { commit() }
+                })
                 .accessibilityLabel("\(presets[index].name) keyboard backlight")
                 .accessibilityValue("\(keys) percent")
                 Text("\(keys)%")
@@ -185,6 +201,12 @@ struct DisplaysPane: View {
             n += 1
         }
         return name
+    }
+
+    /// Mid-drag: in-memory only, so the monitors track the slider without a
+    /// settings write per frame.
+    private func preview() {
+        store.previewPresets(presets)
     }
 
     private func commit() {
