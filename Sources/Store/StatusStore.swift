@@ -59,6 +59,8 @@ final class StatusStore {
     /// the floor `refreshIfStale` enforces on panel opens.
     private var lastRefreshAttempt: Date?
     private var lastSentryRefresh: Date?
+    private var githubPollCursor = 0
+    private var githubPolledAt: [String: Date] = [:]
     var isRefreshing = false
     var globalError: String?
 
@@ -521,14 +523,26 @@ final class StatusStore {
             return
         }
 
-        // The widest fan-out in the app: each repo costs up to 17 requests
-        // (runs, deployments + their statuses, PRs + per-PR checks and
-        // reviews), so seven pinned repos are ~120 requests per refresh. ETags
-        // make that nearly free while GitHub is answering — and a token that
-        // stops working turns every one of them into a counted 401.
+        // Load missing repos first, then rotate one repo per tick. A single
+        // active workflow must not trigger a full-estate refresh every 30s.
+        // Small estates also get a five-minute floor per repository.
         await gated(.github, probe: { [client] in await client.probeHealth() }) {
+            let known = Set(repos.map(\.slug))
+            var selected = slugs.filter { !known.contains($0) }
+            if selected.isEmpty {
+                for _ in slugs.indices {
+                    let slug = slugs[githubPollCursor % slugs.count]
+                    githubPollCursor = (githubPollCursor + 1) % slugs.count
+                    if Date().timeIntervalSince(githubPolledAt[slug] ?? .distantPast) >= 300 {
+                        selected = [slug]
+                        break
+                    }
+                }
+            }
+            guard !selected.isEmpty else { return nil }
+            for slug in selected { githubPolledAt[slug] = Date() }
             let statuses = await withTaskGroup(of: (status: RepoStatus, failure: ProbeFailure?).self) { group in
-                var remaining = slugs.makeIterator()
+                var remaining = selected.makeIterator()
                 // Bound simultaneous response decoding across a large estate.
                 // Preserve pinned order below while keeping four repos moving.
                 for _ in 0..<4 {
@@ -546,27 +560,41 @@ final class StatusStore {
                         }
                     }
                 }
-                return slugs.compactMap { collected[$0] } // keep pinned order
+                return selected.compactMap { collected[$0] }
             }
 
             for result in statuses where result.status.error != nil {
                 NSLog("pultik: %@ error: %@", result.status.slug, result.status.error ?? "")
             }
             let fetched = statuses.map(\.status)
-            notifyTransitions(fetched)
-            repos = fetched
+            var merged = Dictionary(uniqueKeysWithValues: repos.map { ($0.slug, $0) })
+            for status in fetched {
+                if let previous = merged[status.slug], status.error != nil {
+                    var retained = previous
+                    retained.error = status.error
+                    merged[status.slug] = retained
+                } else {
+                    merged[status.slug] = status
+                }
+            }
+            repos = slugs.compactMap { merged[$0] }
+            notifyTransitions(repos)
             // Stamped HERE, not once per poll: while GitHub is paused the
             // inbox is not refreshing, and a footer reading "just now" over
             // half-hour-old runs would be a lie the pause badge can't undo.
-            lastRefresh = Date()
+            if fetched.contains(where: { $0.error == nil }) { lastRefresh = Date() }
             onChange?()
             globalError = fetched.allSatisfy { $0.error != nil } && !fetched.isEmpty
                 ? fetched.first?.error
                 : nil
 
-            // One repo erroring is a repo problem (renamed, revoked, deleted)
-            // and must not silence the other six. All of them failing is
-            // GitHub, the token, or the network — that is worth backing off.
+            // A missing repository does not pause the whole estate. A 403
+            // must retain its rejected classification and open the breaker.
+            if selected.count == 1,
+               let error = fetched.first?.error,
+               error.hasPrefix("GitHub API 404 ") {
+                return nil
+            }
             guard fetched.allSatisfy({ $0.error != nil }) else { return nil }
             return statuses.compactMap(\.failure).first ?? .unreachable("no answer from GitHub")
         }

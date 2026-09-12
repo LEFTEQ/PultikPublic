@@ -74,9 +74,15 @@ extension ProbeFailure {
             default: return .unreachable(url.localizedDescription)
             }
         }
-        if let github = error as? GitHubError, case .http(let status, _) = github {
-            // -1 is GitHubClient's "that wasn't even an HTTP response".
-            return status < 0 ? .unreachable("no response") : classify(HTTPStatusError(status: status))
+        if let github = error as? GitHubError {
+            switch github {
+            case .http(let status, _):
+                return status < 0 ? .unreachable("no response") : classify(HTTPStatusError(status: status))
+            case .deferred:
+                // The client owns the exact deadline; do not turn a local
+                // budget pause into a 30-minute credential rejection.
+                return .unreachable(github.localizedDescription)
+            }
         }
         // A missing or broken `gh` login: every request would fail the same
         // way, and each one re-spawns the CLI to ask again.
