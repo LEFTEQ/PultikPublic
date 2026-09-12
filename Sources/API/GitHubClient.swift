@@ -2,11 +2,14 @@ import Foundation
 
 enum GitHubError: LocalizedError {
     case http(Int, String)
+    case deferred(Date)
 
     var errorDescription: String? {
         switch self {
         case .http(let code, let path):
             return "GitHub API \(code) on \(path)"
+        case .deferred(let until):
+            return "GitHub polling paused to protect quota; retry after \(until.formatted(date: .omitted, time: .shortened))"
         }
     }
 }
@@ -65,10 +68,15 @@ actor GitHubClient {
     // ETag cache: GitHub returns 304 Not Modified for unchanged resources,
     // and 304s do NOT count against the rate limit — poll cheaply.
     private var etagCache = GitHubResponseCache()
+    private var budget = GitHubRequestBudget()
 
     /// `cache: false` keeps one-off paths (every distinct search query is one)
     /// out of the bounded ETag cache.
     private func request(_ path: String, method: String = "GET", cache: Bool = true) async throws -> Data {
+        let resource = path.hasPrefix("/search/") ? "search" : "core"
+        if let until = budget.admit(resource: resource, polling: method == "GET" && cache, now: Date()) {
+            throw GitHubError.deferred(until)
+        }
         var req = URLRequest(url: URL(string: "https://api.github.com" + path)!)
         req.httpMethod = method
         req.setValue("Bearer \(try tokenValue())", forHTTPHeaderField: "Authorization")
@@ -85,6 +93,21 @@ actor GitHubClient {
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw GitHubError.http(-1, path)
+        }
+        let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining").flatMap(Int.init)
+        let reset = http.value(forHTTPHeaderField: "X-RateLimit-Reset")
+            .flatMap(TimeInterval.init).map { Date(timeIntervalSince1970: $0) }
+        let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+        let limited = http.statusCode == 403 && String(decoding: data, as: UTF8.self)
+            .localizedCaseInsensitiveContains("rate limit")
+        budget.observe(status: http.statusCode,
+                       resource: http.value(forHTTPHeaderField: "X-RateLimit-Resource") ?? resource,
+                       remaining: remaining, reset: reset, retryAfter: retryAfter,
+                       rateLimited: limited, now: Date())
+        if http.statusCode == 429 || limited {
+            if let until = budget.admit(resource: resource, polling: false, now: Date()) {
+                throw GitHubError.deferred(until)
+            }
         }
         if http.statusCode == 304, let cached {
             return cached.data
@@ -105,14 +128,12 @@ actor GitHubClient {
 
     // MARK: - Reads
 
-    /// The half-open trial's single cheap request: GET /rate_limit proves
-    /// DNS, TLS and the token without counting against quota — the ~120-
-    /// request repo fan-out waits for this to say the host is answering.
-    /// Returns the classified failure (nil = healthy) so a 401/403 on the
-    /// trial re-arms the breaker as `.rejected`, not `.unreachable`.
+    /// Use a real authenticated endpoint: /rate_limit can report a full
+    /// budget even while ordinary requests are rejected. Admission still
+    /// honors a known server deadline before this one-request trial.
     func probeHealth() async -> ProbeFailure? {
         do {
-            _ = try await request("/rate_limit", cache: false)
+            _ = try await request("/user", cache: false)
             return nil
         } catch {
             return .classify(error)
