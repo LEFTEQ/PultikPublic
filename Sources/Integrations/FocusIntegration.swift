@@ -36,9 +36,7 @@ final class FocusGate {
     private static let queueURL = Preferences.directory.appending(path: "focus-queue.json")
     var holdEnabled: Bool {
         didSet {
-            var prefs = Preferences.load()
-            prefs.focusHoldsNotifications = holdEnabled
-            prefs.save()
+            Preferences.update { $0.focusHoldsNotifications = holdEnabled }
             if !holdEnabled { flush() }
         }
     }

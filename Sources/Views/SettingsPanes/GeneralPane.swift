@@ -9,6 +9,10 @@ struct GeneralPane: View {
     @State private var loginItemError: String?
     @State private var todoProjectField = StatusStore.shared.todoProject ?? ""
     @State private var editorChoice = StatusStore.shared.codeEditor ?? ""
+    /// Read once, not per body evaluation: `Preferences.load()` is a file read,
+    /// a full JSON decode and every migration, and a SwiftUI body can run many
+    /// times a second. The hotkey only applies after a relaunch anyway.
+    @State private var hotkey = Preferences.load().hotkey
 
     var body: some View {
         Form {
@@ -31,7 +35,7 @@ struct GeneralPane: View {
 
             Section {
                 LabeledContent("Summon") {
-                    Text(Preferences.load().hotkey)
+                    Text(hotkey)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }

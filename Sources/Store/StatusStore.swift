@@ -12,23 +12,39 @@ final class StatusStore {
 
     var repos: [RepoStatus] = []
     var pinned: [String] {
-        didSet {
-            var prefs = preferences
-            prefs.pinnedRepos = pinned
-            preferences = prefs
-            prefs.save()
-        }
+        didSet { mutate { $0.pinnedRepos = pinned } }
     }
 
+    /// Read cache for the ~30 settings this store surfaces. It is a snapshot
+    /// taken at launch, so it must never be written back wholesale — see
+    /// `mutate`.
     private var preferences: Preferences
+
+    /// The only way this store changes a setting: apply the change to the
+    /// read cache AND to a freshly loaded file, never `preferences.save()`.
+    ///
+    /// Saving the cache wholesale wrote back the file as it looked at launch,
+    /// silently discarding every key another store had written since — pinning
+    /// a repo could undo a brightness preset or a fan-curve edit made minutes
+    /// earlier, and the bigger this snapshot grew the more it could eat
+    /// (docs/specs/2026-09-10-display-preset-drag-decisions.md).
+    private func mutate(_ change: (inout Preferences) -> Void) {
+        change(&preferences)
+        Preferences.update(change)
+    }
     var suggestions: [String] = []
     var prodIssues: [ProdIssue] = []
     var eveSessions: [EveSession] = []
     var serverMetrics: [ServerMetrics] = []
     var serviceStatuses: [ServiceStatus] = []
     var laneBoard = CILaneBoard()
-    var vitrinkaListening: [VitrinkaListening] = []
-    var vitrinkaBoards: [VitrinkaBoard] = []
+    var vitrinkaListening: [VitrinkaListening] { selectedVitrinkaWorkspace?.tray.listeners ?? [] }
+    var vitrinkaBoards: [VitrinkaBoard] { selectedVitrinkaWorkspace?.tray.boards ?? [] }
+    var vitrinkaWorkspaces: [VitrinkaWorkspaceSnapshot] = []
+    var selectedVitrinkaWorkspace: VitrinkaWorkspaceSnapshot? {
+        VitrinkaWorkspaceSnapshot.selected(in: vitrinkaWorkspaces, preferring: vitrinkaWorkspace,
+                                           defaultWorkspace: VitrinkaClient.shared.workspace)
+    }
     var eveAlerts: [EveAlert] = []
     /// ws-v2 workspaces are the primary Devbox surface. The remaining project
     /// list carries only slot-0 shared stacks and SampleStack's v2 stack slots.
@@ -624,8 +640,7 @@ final class StatusStore {
         let bundleId = Bundle.main.bundleIdentifier ?? "pultik"
         guard preferences.loginItemConfiguredFor != bundleId else { return }
         LoginItem.setEnabled(true)
-        preferences.loginItemConfiguredFor = bundleId
-        preferences.save()
+        mutate { $0.loginItemConfiguredFor = bundleId }
     }
 
     // MARK: - Sentry (prod issues)
@@ -828,7 +843,7 @@ final class StatusStore {
     /// todos'.
     private func refreshVitrinka() async {
         let wantListeners = isSectionVisible("vitrinka")
-        if !wantListeners { vitrinkaListening = []; vitrinkaBoards = [] }
+        if !wantListeners { vitrinkaWorkspaces = [] }
         // A half-open trial spends ONE request (`probe`) before the fan-out
         // is allowed back — without it the default probe reports success,
         // clears the strike ladder, and a still-dead host restarts at the
@@ -838,25 +853,27 @@ final class StatusStore {
             // BOTH halves answered, and any failure folds both — one hide,
             // one breaker, never a listener rail showing a stale success
             // beside a hidden todo rail.
-            var tray = VitrinkaTray()
+            var workspaces: [VitrinkaWorkspaceSnapshot] = []
             if wantListeners {
-                switch await VitrinkaClient.shared.tray() {
+                switch await VitrinkaClient.shared.dailyWorkspaces(preferring: vitrinkaWorkspace) {
                 case let .failed(failure):
-                    vitrinkaListening = []
-                    vitrinkaBoards = []
+                    vitrinkaWorkspaces = []
                     TodoStore.shared.markUnreachable()
                     return failure
                 case let .value(value):
-                    tray = value
+                    workspaces = value.snapshots
+                    if let rejection = value.rejection {
+                        vitrinkaWorkspaces = workspaces
+                        TodoStore.shared.markUnreachable()
+                        return rejection
+                    }
                 }
             }
             if let failure = await TodoStore.shared.refresh(using: VitrinkaClient.shared) {
-                vitrinkaListening = []
-                vitrinkaBoards = []
+                vitrinkaWorkspaces = []
                 return failure
             }
-            vitrinkaListening = tray.listeners
-            vitrinkaBoards = tray.boards
+            vitrinkaWorkspaces = workspaces
             return nil
         }
     }
@@ -973,29 +990,29 @@ final class StatusStore {
         preferences.servers.map(\.name)
     }
 
+    /// Which left-column tab is up. Normalised to the two tags the segmented
+    /// picker offers: settings.json is documented as hand-editable, and an
+    /// unknown value would draw the picker with no segment selected.
+    var leftRailTab: String { preferences.leftRailTab == "devbox" ? "devbox" : "vitrinka" }
+    func setLeftRailTab(_ value: String) { mutate { $0.leftRailTab = value } }
+    var vitrinkaWorkspace: String { preferences.vitrinkaWorkspace ?? VitrinkaClient.shared.workspace ?? "" }
+    /// Rail and palette derive their data from this pick, including when a
+    /// refresh finishes after a switch or the picked workspace is unavailable.
+    func setVitrinkaWorkspace(_ value: String) {
+        mutate { $0.vitrinkaWorkspace = value }
+    }
+
     /// Right-rail collapse state (decision D11). Persisted, so a folded rail
     /// stays folded across relaunches.
-    /// Share of the left column the Vitrinka rail owns (spec 2026-09-09
-    /// decision 8): 40 % unless the drag handle wrote something else.
-    var leftRailSplit: Double {
-        min(0.8, max(0.2, preferences.leftRailSplit ?? 0.4))
-    }
-
-    func setLeftRailSplit(_ value: Double) {
-        let clamped = min(0.8, max(0.2, value))
-        guard abs((preferences.leftRailSplit ?? 0.4) - clamped) >= 0.005 else { return }
-        preferences.leftRailSplit = clamped
-        preferences.save()
-    }
-
     func isRailCollapsed(_ key: String) -> Bool {
         preferences.collapsedRails.contains(key)
     }
 
     func setRail(_ key: String, collapsed: Bool) {
-        preferences.collapsedRails.removeAll { $0 == key }
-        if collapsed { preferences.collapsedRails.append(key) }
-        preferences.save()
+        mutate {
+            $0.collapsedRails.removeAll { $0 == key }
+            if collapsed { $0.collapsedRails.append(key) }
+        }
     }
 
     /// The vitrinka project the panel's own writers file into (a promoted
@@ -1006,8 +1023,7 @@ final class StatusStore {
 
     /// Settings ▸ General ▸ Todos.
     func setTodoProject(_ slug: String?) {
-        preferences.todoProject = slug
-        preferences.save()
+        mutate { $0.todoProject = slug }
     }
 
     var codeEditor: String? {
@@ -1016,14 +1032,14 @@ final class StatusStore {
 
     /// `/editor <name>` and the Settings picker; nil = autodetect.
     func setCodeEditor(_ id: String?) {
-        preferences.codeEditor = id
-        preferences.save()
+        mutate { $0.codeEditor = id }
     }
 
     func setSection(_ key: String, visible: Bool) {
-        preferences.hiddenSections.removeAll { $0 == key }
-        if !visible { preferences.hiddenSections.append(key) }
-        preferences.save()
+        mutate {
+            $0.hiddenSections.removeAll { $0 == key }
+            if !visible { $0.hiddenSections.append(key) }
+        }
     }
 
     func isAlertLaneVisible(_ lane: String) -> Bool {
@@ -1031,9 +1047,10 @@ final class StatusStore {
     }
 
     func setAlertLane(_ lane: String, visible: Bool) {
-        preferences.visibleAlertLanes.removeAll { $0 == lane }
-        if visible { preferences.visibleAlertLanes.append(lane) }
-        preferences.save()
+        mutate {
+            $0.visibleAlertLanes.removeAll { $0 == lane }
+            if visible { $0.visibleAlertLanes.append(lane) }
+        }
         onChange?()
     }
 
@@ -1061,8 +1078,7 @@ final class StatusStore {
             NSLog("pultik: sentry token migration failed (%@) — keeping settings.json copy", failure)
             return legacy
         }
-        preferences.sentryToken = nil
-        preferences.save()
+        mutate { $0.sentryToken = nil }
         NSLog("pultik: sentry token migrated from settings.json to the keychain")
         return legacy
     }
@@ -1093,8 +1109,7 @@ final class StatusStore {
         } else if preferences.sentryToken != nil {
             // Only once the keychain really holds the truth may the legacy
             // copy go — it must not linger to shadow the keychain value.
-            preferences.sentryToken = nil
-            preferences.save()
+            mutate { $0.sentryToken = nil }
         }
         lastSentryRefresh = nil
         Task { await refresh() }
@@ -1112,8 +1127,7 @@ final class StatusStore {
     @discardableResult
     func setEveToken(_ token: String?) -> String? {
         let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        preferences.eveToken = (trimmed?.isEmpty ?? true) ? nil : trimmed
-        preferences.save()
+        mutate { $0.eveToken = (trimmed?.isEmpty ?? true) ? nil : trimmed }
         Task { await refresh() }
         return nil
     }

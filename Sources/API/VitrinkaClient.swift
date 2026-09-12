@@ -162,9 +162,20 @@ actor VitrinkaClient {
             .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
             return value
         }
-        if let value = Keychain.read(service: "vitrinka", account: origin)?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
-            return value
+        // Match the CLI's one-way host migration aliases without sending
+        // requests to the retired hosts (their redirect drops Authorization).
+        let credentialOrigins = origin == "https://boards.example.invalid"
+            ? [origin, "https://boards.example.invalid", "https://boards.example.invalid"] : [origin]
+        for candidate in credentialOrigins {
+            do {
+                if let value = try Keychain.lookup(service: "vitrinka", account: candidate)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                    return value
+                }
+            } catch {
+                NSLog("pultik: Vitrinka credential store unavailable (%ld)", (error as NSError).code)
+                return nil
+            }
         }
         if let servers = cliConfig()?["servers"] as? [String: Any],
            let server = servers[origin] as? [String: Any],
@@ -321,10 +332,10 @@ actor VitrinkaClient {
     /// alone: a host that isn't answering costs one request per refresh,
     /// and its verdict is what `ProbeGate` backs off on. The listening call
     /// is decoration and its failure only costs the activity text.
-    func tray() async -> ProbeResult<VitrinkaTray> {
+    func tray(workspace scope: String? = nil) async -> ProbeResult<VitrinkaTray> {
         guard let token else { return .failed(.rejected("no vitrinka token")) }
         let trayData: Data
-        switch await get("/api/v1/tray", token: token) {
+        switch await get("/api/v1/tray", token: token, workspace: scope) {
         case .failed(let failure): return .failed(failure)
         case .value(let data): trayData = data
         }
@@ -334,7 +345,7 @@ actor VitrinkaClient {
 
         var detail: [Int64: ListeningResponse.Listener] = [:]
         if !payload.listeners.isEmpty,
-           let listening = await get("/api/v1/listening", token: token).value
+           let listening = await get("/api/v1/listening", token: token, workspace: scope).value
                .flatMap({ try? JSONDecoder().decode(ListeningResponse.self, from: $0) }) {
             for lease in listening.listeners { detail[lease.id] = lease }
         }
@@ -392,13 +403,145 @@ actor VitrinkaClient {
             boards: boards))
     }
 
-    private func get(_ path: String, token: String) async -> ProbeResult<Data> {
+    private var knownWorkspaces: [VitrinkaWorkspace] = []
+    private var workspaceDiscoveryAt: Date?
+
+    /// A token can see more workspaces than the rail can show, and each one
+    /// costs round-trips: poll a bounded head of them, four at a time — the
+    /// same ceiling the GitHub repo fan-out keeps.
+    private static let workspaceLimit = 8
+    private static let workspaceConcurrency = 4
+
+    /// All scopes use the same authenticated client and the store's breaker.
+    /// `pick` is the rail's selected workspace: the cap below may drop a
+    /// workspace, but never the one the operator is looking at.
+    func dailyWorkspaces(preferring pick: String?) async -> ProbeResult<VitrinkaDailyPoll> {
+        guard let token else { return .failed(.rejected("no vitrinka credential")) }
+        if knownWorkspaces.isEmpty || Date().timeIntervalSince(workspaceDiscoveryAt ?? .distantPast) > 300 {
+            struct Me: Decodable { let workspaces: [VitrinkaWorkspace]? }
+            switch await get("/api/v1/me", token: token) {
+            case .value(let data):
+                do {
+                    knownWorkspaces = try JSONDecoder().decode(Me.self, from: data).workspaces ?? []
+                    workspaceDiscoveryAt = .now
+                } catch { return .failed(.unreachable("unreadable workspace payload")) }
+            case .failed(let failure):
+                // Workspace-pinned tokens and self-hosted servers may not expose /me.
+                if knownWorkspaces.isEmpty, let workspace {
+                    knownWorkspaces = [VitrinkaWorkspace(slug: workspace, name: workspace)]
+                    workspaceDiscoveryAt = .now
+                } else { return .failed(failure) }
+            }
+        }
+        var scopes = Array(knownWorkspaces.prefix(Self.workspaceLimit))
+        if let pick, !pick.isEmpty, !scopes.contains(where: { $0.slug == pick }),
+           let wanted = knownWorkspaces.first(where: { $0.slug == pick }) {
+            scopes = Array(([wanted] + scopes).prefix(Self.workspaceLimit))
+        }
+        if knownWorkspaces.count > scopes.count {
+            NSLog("pultik: vitrinka daily work polls %d of %d visible workspaces",
+                  scopes.count, knownWorkspaces.count)
+        }
+        // Serially this was four round-trips per workspace on every poll, each
+        // leg carrying its own 5 s timeout — one unreachable scope stalled the
+        // whole refresh. Keep four workspaces moving; restore order below.
+        let polledResults = await withTaskGroup(
+            of: (index: Int, result: (snapshot: VitrinkaWorkspaceSnapshot, failure: ProbeFailure?)).self
+        ) { group in
+            var remaining = scopes.indices.makeIterator()
+            for _ in 0..<Self.workspaceConcurrency {
+                guard let index = remaining.next() else { break }
+                group.addTask { (index, await self.snapshot(of: scopes[index], token: token)) }
+            }
+            var collected: [Int: (snapshot: VitrinkaWorkspaceSnapshot, failure: ProbeFailure?)] = [:]
+            for await result in group {
+                collected[result.index] = result.result
+                if let index = remaining.next() {
+                    group.addTask { (index, await self.snapshot(of: scopes[index], token: token)) }
+                }
+            }
+            return scopes.indices.compactMap { collected[$0] } // keep discovery order
+        }
+        let snapshots = polledResults.map(\.snapshot)
+        guard snapshots.contains(where: { !$0.unavailable }) else {
+            // Nothing usable came back: hand the breaker the REAL class. A
+            // revoked token refuses every leg, and calling that "unreachable"
+            // puts the retry ladder at its gentle end against a backend that
+            // is actively counting our refusals.
+            let failures = polledResults.compactMap(\.failure)
+            if let rejection = failures.first(where: { if case .rejected = $0 { return true } else { return false } }) {
+                return .failed(rejection)
+            }
+            return .failed(failures.first ?? .unreachable("no workspace is reachable"))
+        }
+        // Keep usable data, but carry refusals to the store's host-wide gate.
+        // EVERY discovered workspace reaches the picker, even one the cap did
+        // not poll — otherwise a ninth workspace could never be selected, and
+        // so could never become the `pick` that brings it inside the cap. An
+        // unpolled row reads as unavailable for exactly one cycle: selecting
+        // it makes it the pick, and the next poll fills it in.
+        let polled = Dictionary(
+            snapshots.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return .value(VitrinkaDailyPoll(snapshots: knownWorkspaces.map {
+            polled[$0.slug] ?? VitrinkaWorkspaceSnapshot(workspace: $0, unavailable: true)
+        }, failures: polledResults.compactMap(\.failure)))
+    }
+
+    /// One workspace's snapshot, carried with the failure that spoiled it —
+    /// a refusal must stay a refusal all the way to the breaker, or the gate
+    /// retries a 401 on the gentle unreachable ladder until fail2ban notices.
+    /// The two personal-work reads are independent of each other, so they cost
+    /// one round-trip together, not two.
+    private func snapshot(
+        of scope: VitrinkaWorkspace, token: String
+    ) async -> (snapshot: VitrinkaWorkspaceSnapshot, failure: ProbeFailure?) {
+        let trayResult = await tray(workspace: scope.slug)
+        guard case .value(let tray) = trayResult else {
+            guard case .failed(let why) = trayResult else {
+                return (VitrinkaWorkspaceSnapshot(workspace: scope, unavailable: true), nil)
+            }
+            return (VitrinkaWorkspaceSnapshot(workspace: scope, unavailable: true), why)
+        }
+        var snapshot = VitrinkaWorkspaceSnapshot(workspace: scope, tray: tray)
+        var failure: ProbeFailure?
+        async let workRead = get("/api/v1/me/work", token: token, workspace: scope.slug)
+        async let ripeRead = get("/api/v1/me/ripe", token: token, workspace: scope.slug)
+
+        switch await workRead {
+        case .failed(let why): snapshot.workUnavailable = true; failure = why
+        case .value(let data):
+            do { snapshot.work = try JSONDecoder().decode(VitrinkaMyWork.self, from: data) }
+            catch {
+                NSLog("pultik: cannot decode daily work for %@: %@", scope.slug, error.localizedDescription)
+                snapshot.workUnavailable = true
+            }
+        }
+        struct Ripe: Decodable {
+            struct Entry: Decodable { let task: VitrinkaWorkTask }
+            let ripe: [Entry]?
+        }
+        switch await ripeRead {
+        case .failed(let why):
+            snapshot.workUnavailable = true
+            if case .rejected = why { failure = why }
+            else { failure = failure ?? why }
+        case .value(let data):
+            do { snapshot.ripe = try JSONDecoder().decode(Ripe.self, from: data).ripe?.map(\.task) ?? [] }
+            catch {
+                NSLog("pultik: cannot decode ripe work for %@: %@", scope.slug, error.localizedDescription)
+                snapshot.workUnavailable = true
+            }
+        }
+        return (snapshot, failure)
+    }
+
+    private func get(_ path: String, token: String, workspace scope: String? = nil) async -> ProbeResult<Data> {
         guard let url = URL(string: path, relativeTo: base) else {
             return .failed(.rejected("bad path \(path)"))
         }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        if let workspace { request.setValue(workspace, forHTTPHeaderField: "X-Vitrinka-Workspace") }
+        if let workspace = scope ?? workspace { request.setValue(workspace, forHTTPHeaderField: "X-Vitrinka-Workspace") }
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {

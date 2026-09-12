@@ -351,6 +351,7 @@ struct ServerMetrics: Identifiable {
     var ramTotalBytes: Double?
     var diskUsedBytes: Double?
     var diskTotalBytes: Double?
+    var cpuCount: Int?
     var id: String {
         instance
     }
@@ -439,9 +440,11 @@ struct CIJob: Identifiable {
     let jobName: String
     let runURL: URL?
     let since: Date?
+    var cpuPercent: Double?
+    var memoryBytes: Double?
 
     var id: String {
-        runURL?.absoluteString ?? "\(org)/\(repo)/\(workflow)/\(jobName)/\(since?.timeIntervalSince1970 ?? 0)"
+        "\(runURL?.absoluteString ?? "\(org)/\(repo)")/\(workflow)/\(jobName)/\(since?.timeIntervalSince1970 ?? 0)"
     }
 }
 
@@ -966,6 +969,9 @@ struct DevboxOverviewSummary {
     let pressureFull: Double
     let cpus: Int
     let load1: Double
+    var cpuUsagePercent: Double? = nil
+    var diskTotalBytes: Double? = nil
+    var diskUsedBytes: Double? = nil
     let memoryTotalBytes: Double
     let memoryAvailableBytes: Double
     let swapTotalBytes: Double

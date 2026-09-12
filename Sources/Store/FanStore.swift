@@ -41,6 +41,7 @@ final class FanStore {
     /// D5's "RAM pressure". The used-% is the number; this drives the tone.
     private(set) var memPressureLevel: Int32?
     private(set) var diskFreeBytes: Int64?
+    private(set) var diskTotalBytes: Int64?
     private(set) var thermalState = ProcessInfo.processInfo.thermalState
     private(set) var uptime: TimeInterval = 0
     private(set) var helperHealth: HelperClient.Health = .down
@@ -431,9 +432,7 @@ final class FanStore {
     func updateCurve(_ curve: FanCurve) {
         let guarded = curve.guarded()
         curves[guarded.id] = guarded
-        var prefs = Preferences.load()
-        prefs.fanCurves[guarded.id] = guarded.points
-        prefs.save()
+        Preferences.update { $0.fanCurves[guarded.id] = guarded.points }
         if activeCurveID == guarded.id { applyCurve(guarded.id) }
     }
 
@@ -442,9 +441,7 @@ final class FanStore {
     func restoreCurveDefault(_ curveID: String) {
         guard let preset = FanCurve.preset(curveID) else { return }
         curves[curveID] = preset
-        var prefs = Preferences.load()
-        prefs.fanCurves.removeValue(forKey: curveID)
-        prefs.save()
+        Preferences.update { $0.fanCurves.removeValue(forKey: curveID) }
         if activeCurveID == curveID { applyCurve(curveID) }
     }
 
@@ -454,9 +451,7 @@ final class FanStore {
     func setSmoothing(_ seconds: Double) {
         guard smoothingSeconds != seconds else { return }
         smoothingSeconds = seconds
-        var prefs = Preferences.load()
-        prefs.fanCurveSmoothing = seconds
-        prefs.save()
+        Preferences.update { $0.fanCurveSmoothing = seconds }
         if let activeCurveID { applyCurve(activeCurveID) }
     }
 
@@ -484,9 +479,7 @@ final class FanStore {
     private func setActiveCurveID(_ id: String?) {
         guard activeCurveID != id else { return }
         activeCurveID = id
-        var prefs = Preferences.load()
-        prefs.activeFanCurve = id
-        prefs.save()
+        Preferences.update { $0.activeFanCurve = id }
     }
 
     /// Called from app termination — a machine whose fans stay pinned because
@@ -618,7 +611,8 @@ final class FanStore {
 
     private func sampleDisk() {
         let values = try? URL(fileURLWithPath: "/")
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
         diskFreeBytes = values?.volumeAvailableCapacityForImportantUsage
+        diskTotalBytes = values?.volumeTotalCapacity.map(Int64.init)
     }
 }
