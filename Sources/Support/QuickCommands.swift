@@ -105,8 +105,28 @@ struct QuickCommand: Identifiable {
         let hits = all.filter { cmd in
             cmd.keywords.contains { $0.hasPrefix(q) || $0.contains(q) }
         }
-        return hits.filter { $0.keywords.first?.hasPrefix(q) == true }
+        return adHocBrightness(q)
+            + hits.filter { $0.keywords.first?.hasPrefix(q) == true }
             + hits.filter { $0.keywords.first?.hasPrefix(q) != true }
+    }
+
+    /// `50` ↵ / `screen 40%` ↵: one level for every display, Night Shift and
+    /// keyboard kept (spec 2026-09-13 decision 1). Listed first so it is the
+    /// Enter target — the row is visible before Enter, so a bare number is a
+    /// deliberate ask, not a trap.
+    @MainActor
+    private static func adHocBrightness(_ q: String) -> [QuickCommand] {
+        guard let percent = BrightnessQuery.parse(q) else { return [] }
+        let scale = BrightnessStore.shared.externalScale
+        let external = scale == 100 ? "" : " · third-party monitors \(percent * scale / 100)%"
+        return [QuickCommand(
+            id: "brightness:\(percent)",
+            title: "Displays: \(percent)%",
+            subtitle: "every display to \(percent)%\(external) · Night Shift kept",
+            systemImage: percent <= 30 ? "moon.fill" : "sun.max",
+            keywords: [],
+            run: { BrightnessStore.shared.apply(brightness: percent) }
+        )]
     }
 
     /// The native app when installed (instant), the web app otherwise.

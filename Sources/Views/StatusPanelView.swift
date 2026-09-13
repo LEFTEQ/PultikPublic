@@ -458,12 +458,13 @@ struct StatusPanelView: View {
     private var leftColumn: some View {
         VStack(spacing: 0) {
             if showVitrinkaRail && showDevbox {
-                Picker("Left rail", selection: Binding(get: { store.leftRailTab }, set: { store.setLeftRailTab($0) })) {
-                    Text("Vitrinka").tag("vitrinka")
-                    Text("Devbox").tag("devbox")
-                }
-                .pickerStyle(.segmented)
-                .padding(8)
+                PanelTabs(
+                    tabs: [
+                        .init(id: "vitrinka", title: "Vitrinka",
+                              count: store.selectedVitrinkaWorkspace?.today.count ?? 0),
+                        .init(id: "devbox", title: "Devbox", count: store.devboxWorkspaces.count),
+                    ],
+                    selection: Binding(get: { store.leftRailTab }, set: { store.setLeftRailTab($0) }))
             }
             if showVitrinkaRail && (store.leftRailTab == "vitrinka" || !showDevbox) {
                 VitrinkaDailyRail(store: store, snapshots: store.vitrinkaWorkspaces,

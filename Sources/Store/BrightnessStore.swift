@@ -48,9 +48,24 @@ final class BrightnessStore {
     /// Trailing write for a drag that never sends a drop — see `previewPresets`.
     private var persistDebounce: Task<Void, Never>?
 
+    /// Percent third-party (DDC) monitors get of any applied level (spec
+    /// 2026-09-13 decision 2); Apple panels are never scaled. Cached like
+    /// `presets` — read at palette-match time, so it must never hit the disk.
+    private(set) var externalScale: Int
+
+    /// What the displays were last asked for — a preset or an ad-hoc level —
+    /// so a scale change can re-land it instead of waiting for the next apply.
+    private var lastApplied: Preset?
+
     private init() {
-        presets = Preferences.load().displayPresets ?? Preset.defaults
+        let prefs = Preferences.load()
+        presets = prefs.displayPresets ?? Preset.defaults
+        externalScale = Self.clampScale(prefs.externalBrightnessScale ?? 100)
     }
+
+    /// 10…100: a 0 would make every external monitor a black rectangle
+    /// regardless of preset, which is what `screens off` is for.
+    private static func clampScale(_ percent: Int) -> Int { min(max(percent, 10), 100) }
 
     var activeIndex: Int? { presets.firstIndex { $0.id == activeID } }
 
@@ -76,7 +91,18 @@ final class BrightnessStore {
 
     func apply(index: Int) {
         guard presets.indices.contains(index) else { return }
-        let preset = presets[index]
+        apply(preset: presets[index])
+    }
+
+    /// One level for every display, nothing else touched (spec 2026-09-13
+    /// decision 1): `50` ↵ in the palette. Not a preset, so `activeIndex`
+    /// goes nil and the dock button's cycle restarts from the first preset.
+    func apply(brightness percent: Int) {
+        let level = min(max(percent, 0), 100)
+        apply(preset: Preset(id: "adhoc", name: "\(level)%", brightness: level, nightShift: .keep))
+    }
+
+    private func apply(preset: Preset) {
         // A preset applied while dark is the way back too: the display levels
         // it writes replace the remembered ones. The keyboard is only replaced
         // when the preset sets it; a "keep" preset would otherwise leave the
@@ -97,9 +123,11 @@ final class BrightnessStore {
         // every view reading `activeID` even when nothing moved, and during a
         // drag that is one redundant invalidation of the whole pane per frame.
         if activeID != preset.id { activeID = preset.id }
+        lastApplied = preset
         isApplying = true
+        let scale = externalScale
         Task.detached(priority: .userInitiated) {
-            Self.push(preset)
+            Self.push(preset, externalScale: scale)
             for (keyboard, level) in keyboardsToRestore { KeyboardBacklight.setBrightness(level, of: keyboard) }
             await MainActor.run { self.finishPass() }
         }
@@ -109,12 +137,27 @@ final class BrightnessStore {
         isApplying = false
         guard let queued = pending else { return }
         pending = nil
-        if let index = presets.firstIndex(where: { $0.id == queued.id }) {
-            apply(index: index)
-        }
+        // `pending` is overwritten by every request during the pass, so it
+        // already holds the newest values — including a preset the drag has
+        // since moved, and an ad-hoc level that lives in no list.
+        apply(preset: queued)
     }
 
-    private nonisolated static func push(_ preset: Preset) {
+    /// Settings ▸ Displays ▸ Third-party monitors. Re-lands whatever the
+    /// displays were last asked for, so the LG moves as the slider does;
+    /// `persist` is false mid-drag and true on the drop (spec 2026-09-10
+    /// decision 1 applies here too).
+    func setExternalScale(_ percent: Int, persist: Bool) {
+        let clamped = Self.clampScale(percent)
+        if externalScale != clamped {
+            externalScale = clamped
+            if let lastApplied { apply(preset: lastApplied) }
+        }
+        guard persist else { return }
+        Preferences.update { $0.externalBrightnessScale = clamped == 100 ? nil : clamped }
+    }
+
+    private nonisolated static func push(_ preset: Preset, externalScale: Int) {
         switch preset.nightShift {
         case .on: NightShift.setEnabled(true)
         case .off: NightShift.setEnabled(false)
@@ -123,8 +166,9 @@ final class BrightnessStore {
         for display in DisplayServices.controllableDisplays() {
             DisplayServices.setBrightness(preset.level, of: display)
         }
+        let external = preset.level * Double(externalScale) / 100
         for display in DDCDisplays.displays() {
-            DDCDisplays.setBrightness(preset.level, of: display)
+            DDCDisplays.setBrightness(external, of: display)
         }
         if let keys = preset.keyboardLevel {
             for keyboard in KeyboardBacklight.keyboards() {

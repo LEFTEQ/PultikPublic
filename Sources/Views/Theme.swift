@@ -81,6 +81,87 @@ struct Kicker: View {
     }
 }
 
+/// The left column's tab strip — kicker-sized mono labels where the selected
+/// one sits on a soft pill. The stock segmented Picker it replaced was the one
+/// blue Aqua control in a panel that otherwise speaks hairlines and mono
+/// uppercase, and its "Left rail" label was implementation vocabulary.
+struct PanelTabs: View {
+    struct Tab: Identifiable {
+        let id: String
+        let title: String
+        var count: Int = 0
+    }
+
+    let tabs: [Tab]
+    @Binding var selection: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(tabs) { tab in
+                let isSelected = tab.id == selection
+                Button { selection = tab.id } label: {
+                    HStack(spacing: 5) {
+                        Text(tab.title.uppercased())
+                            .kerning(1.2)
+                        if tab.count > 0 {
+                            Text("\(tab.count)")
+                                .kerning(0)
+                                .monospacedDigit()
+                                .opacity(0.7)
+                        }
+                    }
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(
+                        isSelected ? Color.white.opacity(0.08) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+    }
+}
+
+/// The rail-flavoured search field: magnifier + plain text on a soft slab,
+/// the same slab the rail rows hover onto (RailViews). `.roundedBorder` was
+/// the second Aqua control in the left column.
+struct RailSearchField: View {
+    let prompt: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.hairline, lineWidth: 1))
+    }
+}
+
 /// A collapsible right-rail section (decision D11, 2026-08-27).
 ///
 /// The right rail carries nine tenants since the vitals dock moved in, and
