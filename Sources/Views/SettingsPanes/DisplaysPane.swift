@@ -12,6 +12,7 @@ struct DisplaysPane: View {
     private let store = BrightnessStore.shared
     @State private var presets = BrightnessStore.shared.presets
     @State private var nightShiftNow = NightShift.isEnabled
+    @State private var externalScale = BrightnessStore.shared.externalScale
 
     var body: some View {
         Form {
@@ -38,6 +39,32 @@ struct DisplaysPane: View {
                 Text("Presets")
             } footer: {
                 Text("Each preset is a name you can type in the palette, an absolute brightness for every display, and what to do with Night Shift. The sun/moon beside “This Mac” in the vitals dock cycles through them in this order.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Spec 2026-09-13 decision 2: third-party monitors run brighter
+            // than Apple panels at the same percent, so they get a fraction of
+            // every applied level. Drag previews on the LG, the drop persists.
+            Section {
+                HStack {
+                    Slider(value: Binding(
+                        get: { Double(externalScale) },
+                        set: { externalScale = Int($0.rounded()); store.setExternalScale(externalScale, persist: false) }
+                    ), in: 10...100, step: 1, onEditingChanged: { editing in
+                        if !editing { store.setExternalScale(externalScale, persist: true) }
+                    })
+                    .accessibilityLabel("Third-party monitor scale")
+                    .accessibilityValue("\(externalScale) percent")
+                    Text("\(externalScale)%")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+            } header: {
+                Text("Third-party monitors")
+            } footer: {
+                Text("Monitors driven over DDC get this share of every level — a preset or a typed one at 50% puts them at \(50 * externalScale / 100)%. Apple displays always get the full level.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -73,6 +100,7 @@ struct DisplaysPane: View {
         .onAppear {
             presets = store.presets
             nightShiftNow = NightShift.isEnabled
+            externalScale = store.externalScale
         }
         .onChange(of: store.isApplying) { _, applying in
             if !applying { nightShiftNow = NightShift.isEnabled }

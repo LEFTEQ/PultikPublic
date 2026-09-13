@@ -13,17 +13,44 @@ struct VitrinkaDailyRail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Workspace", selection: Binding(get: { selected?.id ?? "" }, set: { store.setVitrinkaWorkspace($0) })) {
+            // The workspace is a menu wearing the rail's own label, not the
+            // Aqua popup: name in body weight, count in mono, a small chevron.
+            Menu {
                 ForEach(snapshots) { snapshot in
-                    Text("\(snapshot.workspace.name) · \(snapshot.unavailable ? "offline" : String(snapshot.today.count))")
-                        .tag(snapshot.id)
+                    Button {
+                        store.setVitrinkaWorkspace(snapshot.id)
+                    } label: {
+                        if snapshot.id == selected?.id {
+                            Label(workspaceTitle(snapshot), systemImage: "checkmark")
+                        } else {
+                            Text(workspaceTitle(snapshot))
+                        }
+                    }
                 }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(selected?.workspace.name ?? "Workspace")
+                        .font(.system(size: 12, weight: .semibold))
+                    if let selected {
+                        Text(selected.unavailable ? "offline" : "\(selected.today.count)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
-            .labelsHidden()
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .padding(.horizontal, 2)
+            // The label names the control; the value carries what it shows,
+            // so VoiceOver still announces the workspace and its count.
             .accessibilityLabel("Vitrinka workspace")
-            TextField("Find tasks and boards", text: $search)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11))
+            .accessibilityValue(selected.map(workspaceTitle) ?? "none")
+            RailSearchField(prompt: "Find tasks and boards", text: $search)
             if let selected {
                 // Filtered once: the headings count what the search left, not
                 // what the workspace holds, or a filtered list reads as broken.
@@ -90,6 +117,10 @@ struct VitrinkaDailyRail: View {
     /// The workspace picker, the search field and their spacing sit above the
     /// scroller; only the rest of the budget is the list's to scroll in.
     private static let chrome: CGFloat = 70
+
+    private func workspaceTitle(_ snapshot: VitrinkaWorkspaceSnapshot) -> String {
+        "\(snapshot.workspace.name) · \(snapshot.unavailable ? "offline" : String(snapshot.today.count))"
+    }
 
     private func matches(_ text: String) -> Bool {
         search.isEmpty || text.localizedCaseInsensitiveContains(search)
