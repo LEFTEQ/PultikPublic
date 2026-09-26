@@ -1,0 +1,299 @@
+import SwiftUI
+
+/// The Devbox widget of the overview column (spec 2026-09-23 D3 C, D13 B):
+/// CPU / RAM / SSD gauges, the running workspaces as chips, the parked pile
+/// in one line and — only past a threshold — one orange line naming the
+/// strain. A tap opens the `.devbox` page; a chip opens it filtered to that
+/// workspace. No summary (box unreachable, laptop off the mesh) → the widget
+/// is not drawn at all.
+struct DevboxWidget: View {
+    let store: StatusStore
+    let onOpen: (String) -> Void
+
+    var body: some View {
+        if let summary = store.devboxSummary {
+            let glance = DevboxGlance(summary: summary, workspaces: store.devboxWorkspaces)
+            VStack(alignment: .leading, spacing: 6) {
+                header(glance, pressure: summary.pressure)
+                gauges(glance)
+                if !glance.boxes.isEmpty {
+                    boxLine(glance)
+                }
+                if !glance.running.isEmpty {
+                    chips(glance)
+                }
+                pile(glance)
+                if !glance.alerts.isEmpty {
+                    alertLine(glance)
+                }
+            }
+            .padding(10)
+            .contentShape(Rectangle())
+            .onTapGesture { onOpen("") }
+        }
+    }
+
+    private func header(_ glance: DevboxGlance, pressure: DevboxOverviewSummary.Pressure) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Kicker(text: "Devbox", count: glance.running.count,
+                   tone: Self.tone(pressure) ?? .secondary,
+                   action: { onOpen("") },
+                   actionHelp: "Open every devbox workspace")
+            Text("\(glance.parked) parked ›")
+                .font(RailRowMetrics.metaFont)
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+        }
+        .padding(.horizontal, RailRowMetrics.inset)
+    }
+
+    /// CPU and SSD take a fixed cell; RAM gets the rest because it carries
+    /// the headroom next to used/total.
+    private func gauges(_ glance: DevboxGlance) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            DevboxGauge(label: "CPU", fraction: glance.cpuFraction, value: glance.cpuText)
+                .frame(width: 58)
+            DevboxGauge(label: "RAM", fraction: glance.memoryFraction, tick: glance.floorTick,
+                        value: glance.ramText, valueTone: glance.headroomBytes < 0 ? .red : nil)
+            DevboxGauge(label: "SSD", fraction: glance.diskFraction, value: glance.ssdText)
+                .frame(width: 58)
+        }
+        .padding(.horizontal, RailRowMetrics.inset)
+        .help("RAM's orange tick is the \(DevboxGlance.compact(glance.floorBytes))G floor the box keeps free")
+    }
+
+    /// One devbox over several guests (spec 2026-09-25): the gauges are the
+    /// boxes combined; this line — drawn only with more than one box — is
+    /// each box's free memory, and names a silent box in orange.
+    private func boxLine(_ glance: DevboxGlance) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(glance.boxes.enumerated()), id: \.element.name) { index, share in
+                if index > 0 { Text(" · ") }
+                if share.isSilent {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 7))
+                        .foregroundStyle(.orange)
+                        .padding(.trailing, 2)
+                }
+                Text(share.label)
+                    .foregroundStyle(share.isSilent ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.tertiary))
+            }
+        }
+        .font(RailRowMetrics.metaFont)
+        .foregroundStyle(.tertiary)
+        .lineLimit(1)
+        .padding(.horizontal, RailRowMetrics.inset)
+        .help("Free memory above each box's floor; the gauges are every box combined. A silent box did not answer its last poll — its workspaces are missing until it does.")
+    }
+
+    /// Heaviest first, so the chips that stay are the ones costing RAM; the
+    /// rest is one "+N" chip into the page — a fixed-height widget (D12).
+    private static let chipLimit = 5
+
+    private func chips(_ glance: DevboxGlance) -> some View {
+        FlowRow(hSpacing: 4, vSpacing: 4) {
+            ForEach(glance.running.prefix(Self.chipLimit)) { workspace in
+                Button {
+                    onOpen(workspace.name)
+                } label: {
+                    chip(workspace)
+                }
+                .buttonStyle(.plain)
+                .help("\(workspace.name) — open it on the devbox page")
+                .accessibilityLabel("\(workspace.name), running, \(workspace.memoryLabel)")
+            }
+            if glance.running.count > Self.chipLimit {
+                Button {
+                    onOpen("")
+                } label: {
+                    Text("+\(glance.running.count - Self.chipLimit) more")
+                        .font(RailRowMetrics.metaFont)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06),
+                                    in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Every running workspace — .devbox")
+            }
+        }
+        .padding(.horizontal, RailRowMetrics.inset)
+    }
+
+    private func chip(_ workspace: DevboxWorkspace) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(workspace.failedApps > 0 ? Color.orange : workspace.isRunning ? .green : .secondary)
+                .frame(width: 5, height: 5)
+            Text(workspace.name)
+                .font(.system(size: 9.5, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 150, alignment: .leading)
+            if workspace.memoryBytes > 0 {
+                Text(workspace.memoryLabel)
+                    .font(RailRowMetrics.metaFont)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
+        .contentShape(Rectangle())
+    }
+
+    /// The parked pile in one line: stale (parked over a week) in orange —
+    /// what the page's clear is for — then held, the pinned ones.
+    private func pile(_ glance: DevboxGlance) -> some View {
+        HStack(spacing: 0) {
+            Text(glance.parked == 0 ? "nothing parked" : "\(glance.parked) parked")
+            if glance.stale > 0 {
+                Text(" · ")
+                Text("\(glance.stale) stale")
+                    .foregroundStyle(.orange)
+            }
+            if glance.held > 0 {
+                Text(" · \(glance.held) held")
+            }
+        }
+        .font(RailRowMetrics.metaFont)
+        .foregroundStyle(.tertiary)
+        .lineLimit(1)
+        .padding(.horizontal, RailRowMetrics.inset)
+    }
+
+    /// Present only while at least one threshold is crossed, so a calm box
+    /// stays compact and a stressed one says why (spec 2026-09-23 D13).
+    private func alertLine(_ glance: DevboxGlance) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 8))
+            Text(glance.alerts.map(\.label).joined(separator: " · "))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .font(RailRowMetrics.metaFont)
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
+        .padding(.horizontal, RailRowMetrics.inset - 2)
+        .help("Shown past a threshold: memory pressure over 5 %, swap over 0.5 G, load over 1 per core, port slots over 80 %")
+    }
+
+    /// The box's own pressure verdict tints the heading (thresholds in
+    /// `DevboxOverviewSummary.pressure`), never a HUD guess.
+    static func tone(_ pressure: DevboxOverviewSummary.Pressure) -> Color? {
+        switch pressure {
+        case .critical: return .red
+        case .elevated: return .orange
+        case .normal: return nil
+        }
+    }
+}
+
+/// Label, a thin bar and its reading — one cell of the Devbox gauges, shared
+/// by the widget and the `.devbox` page's strip. `tick` marks a threshold on
+/// the bar (the RAM floor); the bar tints by `LoadTier`.
+struct DevboxGauge: View {
+    let label: String
+    let fraction: Double?
+    var tick: Double?
+    let value: String
+    var valueTone: Color?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(RailRowMetrics.metaFont)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.09))
+                    if let fraction {
+                        Capsule()
+                            .fill(barTone.opacity(0.8))
+                            .frame(width: proxy.size.width * min(max(fraction, 0), 1))
+                    }
+                    if let tick {
+                        Rectangle()
+                            .fill(Color.orange)
+                            .frame(width: 1.5, height: 8)
+                            .offset(x: proxy.size.width * min(max(tick, 0), 1) - 0.75)
+                    }
+                }
+            }
+            .frame(height: 4)
+            Text(value)
+                .font(RailRowMetrics.metaFont)
+                .monospacedDigit()
+                .foregroundStyle(valueTone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) \(value)")
+    }
+
+    private var barTone: Color {
+        fraction.map { percentTone($0 * 100) } ?? .secondary
+    }
+}
+
+extension DevboxGlance {
+    var cpuFraction: Double? {
+        cpuPercent.map { $0 / 100 }
+    }
+
+    var memoryFraction: Double? {
+        memoryTotalBytes > 0 ? memoryUsedBytes / memoryTotalBytes : nil
+    }
+
+    var diskFraction: Double? {
+        guard let used = diskUsedBytes, let total = diskTotalBytes, total > 0 else { return nil }
+        return used / total
+    }
+
+    /// Where the floor sits on the RAM bar: used memory past this tick is
+    /// eating into what the box keeps free.
+    var floorTick: Double? {
+        guard memoryTotalBytes > 0, floorBytes > 0 else { return nil }
+        return (memoryTotalBytes - floorBytes) / memoryTotalBytes
+    }
+
+    var cpuText: String {
+        cpuPercent.map { "\(Int($0.rounded()))% · \(cores)c" } ?? "—"
+    }
+
+    /// "41/64G · 15G free" — free is the headroom above the floor, "−2G"
+    /// once the box is below it.
+    var ramText: String {
+        guard memoryTotalBytes > 0 else { return "—" }
+        let free = headroomBytes < 0 ? "\u{2212}\(Self.compact(-headroomBytes))" : Self.compact(headroomBytes)
+        return "\(Self.compact(memoryUsedBytes))/\(Self.compact(memoryTotalBytes))G · \(free)G free"
+    }
+
+    var ssdText: String {
+        guard let used = diskUsedBytes, let total = diskTotalBytes, total > 0 else { return "—" }
+        return formatSize(used: used, total: total)
+    }
+}
+
+extension DevboxWorkspace {
+    /// The name without its project prefix — siblings differ at the tail,
+    /// and the prefix is what truncation would keep. Where the project is
+    /// shown beside it (the page's identity column) nothing is lost; the
+    /// full name stays in tooltips and accessibility labels.
+    var shortName: String {
+        guard let project,
+              name.count > project.count + 1,
+              name.hasPrefix("\(project)-")
+        else { return name }
+        return String(name.dropFirst(project.count + 1))
+    }
+}

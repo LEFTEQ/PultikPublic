@@ -133,69 +133,75 @@ struct ServiceTile: View {
 
 // MARK: - Right rail: CI lanes (BuildServer JIT fleet)
 
-/// One row per lane with something to say — running jobs as filled cells,
-/// a queue, or a controller that is down — sectioned by trust group (CI
-/// lanes, then deploy bastions). Idle lanes fold into one line per section.
-/// Hovering a row opens the jobs on it, each linked to its run
-/// (spec 2026-09-09, superseding the 2026-08-27 runner grid).
+/// One line per lane with something to say — running jobs as filled cells,
+/// a queue, or a controller that is down — CI lanes before deploy bastions
+/// (board order of trust groups), by name inside each, so a row never moves
+/// under an open popover. Idle lanes fold into one count. Bounded whatever
+/// the fleet does (2026-09-23): at most `busyLimit` lanes, the ones with the
+/// most to say, the rest a "+N busy" that opens `.ci`, where every lane and
+/// job is listed (spec 2026-09-09, superseding the 2026-08-27 runner grid).
 struct LaneRail: View {
     let board: CILaneBoard
+    let onOpen: (String) -> Void
 
-    private struct Section: Identifiable {
-        let group: String
-        let title: String
-        let active: [CILane]
-        let idle: [CILane]
-        var id: String { group }
+    static let busyLimit = 6
+
+    private var busyLanes: [CILane] {
+        var rank: [String: Int] = [:]
+        for lane in board.lanes where rank[lane.trustGroup] == nil {
+            rank[lane.trustGroup] = rank.count
+        }
+        return board.lanes.filter(\.isActive).sorted {
+            $0.trustGroup == $1.trustGroup ? $0.name < $1.name
+                : rank[$0.trustGroup, default: 0] < rank[$1.trustGroup, default: 0]
+        }
     }
 
-    private var sections: [Section] {
-        let titles = ["firefly": "ci", "bastion": "deploy"]
-        var out: [Section] = []
-        for lane in board.lanes {
-            if out.last?.group != lane.trustGroup {
-                out.append(Section(group: lane.trustGroup,
-                                   title: titles[lane.trustGroup] ?? lane.trustGroup,
-                                   active: [], idle: []))
-            }
-            var section = out.removeLast()
-            if lane.isActive {
-                section = Section(group: section.group, title: section.title,
-                                  active: section.active + [lane], idle: section.idle)
-            } else {
-                section = Section(group: section.group, title: section.title,
-                                  active: section.active, idle: section.idle + [lane])
-            }
-            out.append(section)
-        }
-        return out
+    /// Past the limit a dead controller always shows, then board order — never
+    /// live job or queue counts, which swap between polls and would move rows
+    /// under an open popover. The rest are "+N busy" into `.ci`.
+    private func shown(_ busy: [CILane]) -> [CILane] {
+        guard busy.count > Self.busyLimit else { return busy }
+        let keep = Set((busy.filter { !$0.up } + busy.filter(\.up))
+            .prefix(Self.busyLimit).map(\.id))
+        return busy.filter { keep.contains($0.id) }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(sections) { section in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(section.title)
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        if section.active.isEmpty {
-                            Text("\(section.idle.count) idle")
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundStyle(.tertiary)
+        let busy = busyLanes
+        let rows = shown(busy)
+        let hidden = busy.filter { lane in !rows.contains { $0.id == lane.id } }
+        let idle = board.lanes.count - busy.count
+        VStack(alignment: .leading, spacing: 3) {
+            if let pool = board.pool {
+                PoolRow(pool: pool)
+            }
+            ForEach(rows) { lane in
+                CILaneGrid(lane: lane, onOpen: onOpen)
+            }
+            if !hidden.isEmpty || idle > 0 {
+                HStack(spacing: 5) {
+                    if !hidden.isEmpty {
+                        // Hidden lanes are the running-only ones unless more
+                        // than `busyLimit` are queued or down — then the whole
+                        // page, not a slice that would miss them.
+                        let runningOnly = hidden.allSatisfy { $0.up && $0.queued == 0 }
+                        Button { onOpen(runningOnly ? "running" : "") } label: {
+                            Text("+\(hidden.count) busy ›")
+                                .foregroundStyle(.secondary)
+                                .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                        .help(runningOnly ? "Every running job — .ci running" : "Every CI lane and job — .ci")
                     }
-                    ForEach((section.active + section.idle).sorted { $0.name < $1.name }) { lane in
-                        CILaneGrid(lane: lane)
+                    if idle > 0 {
+                        Text("\(idle) idle").foregroundStyle(.tertiary)
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.white.opacity(0.02), in: RoundedRectangle(cornerRadius: 8))
+                .font(.system(size: 9.5, design: .monospaced))
             }
             if !board.elsewhere.isEmpty || board.elsewhereQueued > 0 {
                 ElsewhereRow(jobs: board.elsewhere, queued: board.elsewhereQueued)
-                    .padding(.horizontal, 8)
             }
         }
     }
@@ -482,394 +488,147 @@ struct NotesRail: View {
     }
 }
 
-// MARK: - Left rail: devbox workspaces
+// MARK: - Devbox: workspace verbs, the stale clear, workspace detail
 
-/// ws-v2 workspaces first, followed only by the shared/stack-slot machinery
-/// that still serves the v2 world. Retired isolated tenant slots never enter
-/// this view.
-struct DevboxRail: View {
-    // Explicit store, panel convention (see RunnerGridRail): the card actions
-    // need a refresh right after `devbox park`/`up`, not 90 s later.
-    let store: StatusStore
-    let workspaces: [DevboxWorkspace]
-    let projects: [DevboxProject]
-    let summary: DevboxOverviewSummary?
-    /// When the hub payload was generated on the box — the "as of" stamp the
-    /// live-ssh data path promised.
-    let fetchedAt: Date?
-
-    /// The kicker counts HOT slots only — parked identities are listed but
-    /// are not load, and the number next to "DEVBOX" is the one glanced at
-    /// against the ceiling in the line below.
-    private var hotCount: Int {
-        workspaces.filter(\.isHot).count
-    }
-
-    /// The rail's colour is the box's own pressure verdict (thresholds in
-    /// `DevboxOverviewSummary.pressure`), never a HUD guess.
-    private var pressureTone: Color? {
-        switch summary?.pressure {
-        case .critical?: return .red
-        case .elevated?: return .orange
-        case .normal?, nil: return nil
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Kicker(text: "Devbox", count: hotCount, tone: pressureTone ?? .secondary)
-                Spacer(minLength: 0)
-                if let fetchedAt {
-                    Text(fetchedAt, format: .dateTime.hour().minute())
-                        .font(.system(size: 8, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .help("When the box generated this snapshot")
-                }
-            }
-            .padding(.horizontal, 2)
-
-            if let summary {
-                Text(summary.shortLabel)
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .foregroundStyle(pressureTone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.tertiary))
-                    .padding(.horizontal, 2)
-                    .help(summary.helpLabel)
-                    .accessibilityLabel(
-                        "devbox capacity: \(summary.shortLabel), pressure \(pressureAccessibility(summary))"
-                    )
-            }
-
-            ForEach(workspaces) { workspace in
-                DevboxWorkspaceCard(workspace: workspace, store: store)
-            }
-
-            if projects.contains(where: { !$0.visibleSlots.isEmpty }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 8))
-                    Text("SHARED + STACKS")
-                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                        .kerning(0.7)
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 2)
-                .padding(.top, 3)
-            }
-
-            ForEach(projects.filter { !$0.visibleSlots.isEmpty }) { project in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "shippingbox")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.secondary)
-                        Text(project.displayName)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 2)
-                    .help(project.repoSlug)
-
-                    ForEach(project.visibleSlots) { slot in
-                        DevboxSlotCard(project: project.name, slot: slot)
-                    }
-                }
-            }
-        }
-        // Matches ServiceRail's uniform padding(10) — the devbox kicker used to
-        // inherit its top inset from the servers rail stacked above it, and sat
-        // higher than SERVICES once that rail was removed.
-        .padding(10)
-    }
-
-    private func pressureAccessibility(_ summary: DevboxOverviewSummary) -> String {
-        switch summary.pressure {
-        case .normal: return "normal"
-        case .elevated: return "elevated"
-        case .critical: return "critical"
-        }
-    }
-}
-
-/// One ws-v2 workspace, designed for the many-app worst case (spec
-/// 2026-09-01) and the many-workspace rail (spec 2026-09-09 decision 6):
-/// a parked card is ONE line (dot, name, parked age), a hot card two (name,
-/// activity), and neither can grow wider than the rail. Identity, the
-/// lifecycle verbs and everything per-app (chips, units, containers,
-/// sources) live behind the disclosure, each verb an icon with its name in
-/// the tooltip (decision 7).
-private struct DevboxWorkspaceCard: View {
+/// One workspace's lifecycle verbs (spec 2026-09-14 decisions 6–7, moved
+/// onto the `.devbox` page by spec 2026-09-23 D8): hot — park (two-click),
+/// hold / unhold, Warp; parked — revive, clear (two-click `devbox reap`,
+/// refused by the box while the branch is alive), hold / unhold. Never
+/// `down`. The icons show only while `revealed`; a running verb's progress
+/// and a failure show regardless, in the same fixed-height slot, so the row
+/// never changes height or count while a verb runs.
+struct DevboxVerbs: View {
     let workspace: DevboxWorkspace
     let store: StatusStore
-    @State private var hovering = false
-    @State private var expanded = false
+    let revealed: Bool
     /// A lifecycle verb is in flight (park ~2 s, revive ~16 s, cold up
-    /// minutes). The card says which, and refuses a second click meanwhile.
+    /// minutes). The slot says which, and refuses a second click meanwhile.
     @State private var busyLabel: String?
-    /// Park is the one action that stops something: the first click arms,
-    /// the second within a few seconds runs. Inline rather than a modal —
-    /// the panel is a floating HUD and a sheet on it is never right.
+    /// Park and clear are the verbs that stop or remove something: the first
+    /// click arms, the second within a few seconds runs. Inline rather than a
+    /// modal — the panel is a floating HUD and a sheet on it is never right.
     @State private var confirmingPark = false
+    @State private var confirmingClear = false
     @State private var lastActionFailed = false
 
-    init(workspace: DevboxWorkspace, store: StatusStore) {
-        self.workspace = workspace
-        self.store = store
-        #if DEBUG
-            _expanded = State(initialValue:
-                ProcessInfo.processInfo.environment["PULTIK_EXPAND_WORKSPACE"] == workspace.name)
-        #endif
-    }
-
-    private var tone: Color {
-        if workspace.isParked { return .secondary.opacity(0.45) }
-        if workspace.failedApps > 0 { return .orange }
-        return workspace.isRunning ? .green : .secondary
-    }
-
-    /// Parked cards dim as a whole: identity stays legible, but nothing on
-    /// them is live and the eye should skip to the hot ones.
-    private var cardOpacity: Double {
-        workspace.isParked ? 0.62 : 1
-    }
-
-    /// The identity line below already names the project, so the title drops
-    /// that shared prefix — siblings differ at the tail, and the prefix is the
-    /// part that truncation would keep. Full name stays in the tooltip and
-    /// the accessibility label.
-    private var displayName: String {
-        guard let project = workspace.project,
-              workspace.name.count > project.count + 1,
-              workspace.name.hasPrefix("\(project)-")
-        else { return workspace.name }
-        return String(workspace.name.dropFirst(project.count + 1))
-    }
-
-    private var accessibilityState: String {
-        if workspace.isParked {
-            return workspace.hold ? "\(workspace.parkedLabel), held" : workspace.parkedLabel
-        }
-        if workspace.failedApps > 0 {
-            return "\(workspace.failedApps) app\(workspace.failedApps == 1 ? "" : "s") failed"
-        }
-        let base = workspace.isRunning ? "running" : "units down"
-        return workspace.hold ? "\(base), held" : base
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    Circle().fill(tone).frame(width: 6, height: 6)
-                    Text(displayName)
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .lineLimit(1)
-                    if workspace.hold {
-                        chip("hold", tone: .orange)
-                            .help("devbox hold — exempt from the park sweep until unhold")
-                    }
-                    if workspace.isParked {
-                        chip(workspace.parkedLabel, tone: .secondary)
-                            .help("Stopped by the park sweep or `devbox park`; identity and ports kept. Expand for Revive (~16 s).")
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 7, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(workspace.name), \(accessibilityState)")
-                .accessibilityAddTraits(.isButton)
-                .accessibilityValue(expanded ? "expanded" : "collapsed")
-                .accessibilityAction {
-                    withAnimation(.easeOut(duration: 0.14)) { expanded.toggle() }
-                }
-                Spacer(minLength: 4)
-                if workspace.isParked {
-                    actionFeedback
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.14)) { expanded.toggle() }
-            }
-
-            // Hot cards carry one activity line at rest; parked cards say
-            // "parked · age" on the title row and stop there. Busy and
-            // failure feedback take the trailing slot of whichever line
-            // exists, so the rail never jumps while a verb runs.
-            if !workspace.isParked {
-                HStack(spacing: 6) {
-                    Text(summaryText)
-                        .font(.system(size: 8.5, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .help(workspace.footprintHelp)
-                    Spacer(minLength: 4)
-                    actionFeedback
-                }
-                .padding(.leading, 12)
-            }
-
-            if expanded {
-                Text(identityText)
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.leading, 12)
-                if workspace.isParked, let footprint = workspace.footprintLabel {
-                    Text(footprint)
-                        .font(.system(size: 8.5, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 12)
-                        .help(workspace.footprintHelp)
-                }
-                verbRow
-                    .padding(.leading, 12)
-                if !workspace.apps.isEmpty, !workspace.isParked {
-                    WorkspaceAppChipsRow(apps: workspace.apps)
-                        .padding(.leading, 12)
-                }
-                if !workspace.isParked {
-                    unitRows
-                    containerRows
-                }
-                sourceRows
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(hovering ? Color.primary.opacity(0.06) : .clear,
-                    in: RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .opacity(cardOpacity)
-        .onHover { inside in
-            hovering = inside
-            if !inside { confirmingPark = false }
-        }
-        .help(workspaceHelp)
-    }
-
-    private func chip(_ text: String, tone: Color) -> some View {
-        Text(text)
-            .font(.system(size: 8, weight: .medium, design: .monospaced))
-            .foregroundStyle(tone)
-            .lineLimit(1)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(tone.opacity(0.12), in: Capsule())
-    }
-
-    // MARK: Lifecycle verbs
-
-    /// The trailing slot on the resting card: what a running verb is doing,
-    /// or that the last one failed. Nothing when idle — the verbs
-    /// themselves live in the expanded detail (decision 6).
-    @ViewBuilder
-    private var actionFeedback: some View {
-        if let busyLabel {
-            HStack(spacing: 4) {
+        HStack(spacing: 8) {
+            if let busyLabel {
                 ProgressView().controlSize(.mini)
                 Text(busyLabel)
                     .font(.system(size: 8.5, design: .monospaced))
                     .foregroundStyle(.tertiary)
+            } else if lastActionFailed {
+                Text("failed · see log")
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(.red)
+            } else if revealed {
+                lifecycleActions
             }
-            .frame(height: 14)
-        } else if lastActionFailed {
-            Text("failed · see log")
-                .font(.system(size: 8.5, design: .monospaced))
-                .foregroundStyle(.red)
-                .frame(height: 14)
+        }
+        .frame(height: 14)
+        .onChange(of: revealed) { _, shown in
+            guard !shown else { return }
+            confirmingPark = false
+            confirmingClear = false
         }
     }
 
-    /// Every verb on one wrapped row inside the disclosure: lifecycle first,
-    /// then the source actions — icons, named by their tooltips (decision 7).
-    private var verbRow: some View {
-        FlowRow(hSpacing: 8, vSpacing: 4) {
-            lifecycleActions
-            if let source = workspace.sources.first {
-                sourceActions(source.path)
-            }
-        }
-    }
-
-    /// Hot: park (two-click) and hold/unhold. Parked: revive and hold/unhold.
-    /// Never `down`, never `gc` — the reversible verbs only.
     @ViewBuilder
     private var lifecycleActions: some View {
-        Group {
-            if workspace.isParked {
-                if let macPath = workspace.macPath,
-                   DevboxLauncher.localDirectory(macPath, quiet: true) != nil
-                {
-                    iconButton("play.circle", "Revive", "Revive — devbox up from \(macPath)") {
-                        runAction("reviving") {
-                            await DevboxClient.shared.up(workspace: workspace.name, macPath: macPath)
-                        }
+        if workspace.isParked {
+            if let macPath = workspace.macPath,
+               DevboxLauncher.localDirectory(macPath, quiet: true) != nil
+            {
+                devboxIconButton("play.circle", "Revive", "Revive — devbox up from \(macPath)") {
+                    runAction("reviving") {
+                        await DevboxClient.shared.up(workspace: workspace.name, macPath: macPath)
                     }
-                } else {
-                    verbGlyph("play.circle")
-                        .foregroundStyle(.quaternary)
-                        .help(workspace.macPath.map { "Cannot revive from here — \($0) is not on this Mac" }
-                            ?? "Cannot revive from here — the box recorded no Mac path")
-                        .accessibilityLabel("Revive unavailable")
                 }
             } else {
-                if confirmingPark {
-                    Button {
-                        confirmingPark = false
-                        runAction("parking") {
-                            await DevboxClient.shared.run(.park, workspace: workspace.name)
-                        }
-                    } label: {
-                        Text("park?")
-                            .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.orange)
+                devboxVerbGlyph("play.circle")
+                    .foregroundStyle(.quaternary)
+                    .help(workspace.macPath.map { "Cannot revive from here — \($0) is not on this Mac" }
+                        ?? "Cannot revive from here — the box recorded no Mac path")
+                    .accessibilityLabel("Revive unavailable")
+            }
+            if confirmingClear {
+                Button {
+                    confirmingClear = false
+                    runAction("clearing") {
+                        await DevboxClient.shared.run(.reap, workspace: workspace.name)
                     }
-                    .buttonStyle(.plain)
-                    .help("Click again to park (stops the stack, keeps identity and ports)")
-                    .accessibilityLabel("Confirm park")
-                } else {
-                    iconButton("parkingsign.circle", "Park", "Park — stop, keep hot; up revives in ~16 s") {
-                        confirmingPark = true
-                        Task {
-                            try? await Task.sleep(for: .seconds(4))
-                            await MainActor.run { confirmingPark = false }
-                        }
+                } label: {
+                    Text("clear?")
+                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Click again to reap this workspace (devbox reap — fails while its branch is still alive)")
+                .accessibilityLabel("Confirm clear")
+            } else {
+                devboxIconButton("trash", "Clear", "Clear — devbox reap: tear the workspace down; refused while its branch is alive") {
+                    confirmingClear = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(4))
+                        await MainActor.run { confirmingClear = false }
                     }
                 }
             }
-            if workspace.hold {
-                iconButton("pin.slash", "Unhold", "Unhold — return to auto-parking") {
-                    runAction("unholding") {
-                        await DevboxClient.shared.run(.unhold, workspace: workspace.name)
+        } else {
+            if confirmingPark {
+                Button {
+                    confirmingPark = false
+                    runAction("parking") {
+                        await DevboxClient.shared.run(.park, workspace: workspace.name)
                     }
+                } label: {
+                    Text("park?")
+                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.orange)
                 }
+                .buttonStyle(.plain)
+                .help("Click again to park (stops the stack, keeps identity and ports)")
+                .accessibilityLabel("Confirm park")
             } else {
-                iconButton("pin", "Hold", "Hold — exempt from the park sweep") {
-                    runAction("holding") {
-                        await DevboxClient.shared.run(.hold, workspace: workspace.name)
+                devboxIconButton("parkingsign.circle", "Park", "Park — stop, keep hot; up revives in ~16 s") {
+                    confirmingPark = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(4))
+                        await MainActor.run { confirmingPark = false }
                     }
                 }
             }
         }
+        if workspace.hold {
+            devboxIconButton("pin.slash", "Unhold", "Unhold — return to auto-parking") {
+                runAction("unholding") {
+                    await DevboxClient.shared.run(.unhold, workspace: workspace.name)
+                }
+            }
+        } else {
+            devboxIconButton("pin", "Hold", "Hold — exempt from the park sweep") {
+                runAction("holding") {
+                    await DevboxClient.shared.run(.hold, workspace: workspace.name)
+                }
+            }
+        }
+        if !workspace.isParked, !workspace.sources.isEmpty {
+            devboxIconButton("terminal", "Warp", "Open workspace in Warp") {
+                DevboxLauncher.summonWorkspaceWarp(workspace.name, on: workspace.box)
+            }
+        }
     }
 
-    /// One verb at a time per card; the box is refreshed straight after so
-    /// the card flips within the same breath, not at the next poll.
+    /// One verb at a time per workspace; the box is refreshed straight after
+    /// so the row flips within the same breath, not at the next poll.
     ///
     /// Deliberately NOT generation-scoped (cf. the warm-panel rule in
-    /// `.claude/memory/`): the busy flag is card-local truth about a verb
+    /// `.claude/memory/`): the busy flag is row-local truth about a verb
     /// that is still running on the box, not a per-open presentation. The
     /// panel being dismissed and reopened mid-revive must still end with the
     /// flag cleared — gating the clear on the presenting generation would
-    /// leave the card stuck on "reviving" forever. Concurrency is bounded by
+    /// leave the row stuck on "reviving" forever. Concurrency is bounded by
     /// the `busyLabel == nil` guard, so no later action can be stomped.
     private func runAction(_ label: String, _ work: @escaping () async -> Bool) {
         guard busyLabel == nil else { return }
@@ -885,49 +644,90 @@ private struct DevboxWorkspaceCard: View {
             await MainActor.run { lastActionFailed = false }
         }
     }
+}
 
-    private var identityText: String {
-        switch (workspace.project, workspace.branch) {
-        case let (project?, branch?): return "\(project) · \(branch)"
-        case let (project?, nil): return project
-        case let (nil, branch?): return branch
-        default: return "committed workspace"
-        }
-    }
+/// The page-level "clear" (`devbox gc --retire-stale`): a trash glyph that
+/// arms on the first click and runs on the second, then refreshes the box
+/// straight after so the reaped rows leave within the same breath.
+struct DevboxClearStale: View {
+    let store: StatusStore
+    @State private var confirming = false
+    @State private var clearing = false
+    @State private var failed = false
 
-    /// The whole fleet in one line — this is all the collapsed card says
-    /// about apps; the chips are behind the disclosure. Footprint reads
-    /// "<live> · peak <peak>" (parked: peak only — nothing is live).
-    private var summaryText: String {
-        if workspace.isParked {
-            return workspace.footprintLabel ?? ""
-        }
-        let units: String
-        if !workspace.unitApps.isEmpty {
-            units = "\(workspace.activeApps)/\(workspace.unitApps.count) up"
-        } else if !workspace.apps.isEmpty {
-            units = "\(workspace.apps.count) app\(workspace.apps.count == 1 ? "" : "s")"
+    var body: some View {
+        if clearing {
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("clearing")
+                    .font(RailRowMetrics.metaFont)
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(height: 14)
+        } else if failed {
+            Text("failed · see log")
+                .font(RailRowMetrics.metaFont)
+                .foregroundStyle(.red)
+                .frame(height: 14)
+        } else if confirming {
+            Button {
+                confirming = false
+                clearing = true
+                Task {
+                    let ok = await DevboxClient.shared.gc()
+                    await store.refreshDevboxNow()
+                    await MainActor.run { clearing = false }
+                    guard !ok else { return }
+                    await MainActor.run { failed = true }
+                    try? await Task.sleep(for: .seconds(6))
+                    await MainActor.run { failed = false }
+                }
+            } label: {
+                Text("clear?")
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Click again to reap every workspace whose branch is merged or gone (devbox gc --retire-stale)")
+            .accessibilityLabel("Confirm clear")
         } else {
-            units = "—"
+            Button {
+                confirming = true
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    await MainActor.run { confirming = false }
+                }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Clear — reap every workspace whose branch is merged or gone; live branches stay")
+            .accessibilityLabel("Clear dead workspaces")
         }
-        var parts = [units]
-        if let footprint = workspace.footprintLabel { parts.append(footprint) }
-        if !workspace.stats.isEmpty { parts.append(workspace.cpuLabel) }
-        return parts.joined(separator: " · ")
     }
+}
 
-    private var workspaceHelp: String {
-        var lines = [workspace.name, identityText]
-        if workspace.isParked, let parkedAt = workspace.parkedAt {
-            lines.append("parked \(parkedAt.formatted(date: .abbreviated, time: .shortened))")
+/// Everything per-app about one workspace — app chips, units, containers,
+/// and every source with its Warp / Finder / Cursor / Copy verbs — shown
+/// under its row on the `.devbox` page once the row is expanded.
+struct DevboxWorkspaceDetail: View {
+    let workspace: DevboxWorkspace
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if !workspace.apps.isEmpty, !workspace.isParked {
+                WorkspaceAppChipsRow(apps: workspace.apps)
+            }
+            if !workspace.isParked {
+                unitRows
+                containerRows
+            }
+            sourceRows
         }
-        if workspace.hold { lines.append("held — exempt from auto-parking") }
-        if let window = workspace.portWindowLabel { lines.append("ports \(window)") }
-        if let macPath = workspace.macPath { lines.append("mac \(macPath)") }
-        if let created = workspace.created {
-            lines.append("created \(created.formatted(date: .abbreviated, time: .shortened))")
-        }
-        return lines.joined(separator: "\n")
     }
 
     private var unitRows: some View {
@@ -994,12 +794,7 @@ private struct DevboxWorkspaceCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 2)
-                // The verb row above already carries Warp / Finder / Cursor /
-                // Copy for the first source; extra sources get icon-only
-                // verbs here, and the words stay off this narrow line.
-                if source.path != workspace.sources.first?.path {
-                    sourceActions(source.path)
-                }
+                sourceActions(source.path)
             }
             .padding(.leading, 12)
             .help("\(source.app): \(source.path)")
@@ -1008,38 +803,19 @@ private struct DevboxWorkspaceCard: View {
 
     private func sourceActions(_ path: String) -> some View {
         HStack(spacing: 7) {
-            iconButton("terminal", "Warp", "Open workspace in Warp") {
-                DevboxLauncher.summonWorkspaceWarp(workspace.name)
+            devboxIconButton("terminal", "Warp", "Open workspace in Warp") {
+                DevboxLauncher.summonWorkspaceWarp(workspace.name, on: workspace.box)
             }
-            iconButton("folder", "Finder", "Reveal in Finder") {
+            devboxIconButton("folder", "Finder", "Reveal in Finder") {
                 DevboxLauncher.revealLocalPath(path)
             }
-            iconButton("chevron.left.forwardslash.chevron.right", "Cursor", "Open in Cursor") {
+            devboxIconButton("chevron.left.forwardslash.chevron.right", "Cursor", "Open in Cursor") {
                 DevboxLauncher.openLocalCursor(path)
             }
-            iconButton("doc.on.doc", "Copy path", "Copy the Mac path") {
+            devboxIconButton("doc.on.doc", "Copy path", "Copy the Mac path") {
                 DevboxLauncher.copyLocalPath(path)
             }
         }
-    }
-
-    /// A verb is its glyph; the name lives in the tooltip and the
-    /// accessibility label (decision 7, revised during the hand test — hover
-    /// words wrapped inside the 280 pt rail).
-    private func verbGlyph(_ symbol: String) -> some View {
-        Image(systemName: symbol).font(.system(size: 10))
-    }
-
-    private func iconButton(_ symbol: String, _ word: String, _ help: String,
-                            action: @escaping () -> Void) -> some View
-    {
-        Button(action: action) {
-            verbGlyph(symbol)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .help(help)
-        .accessibilityLabel("\(word) — \(help)")
     }
 
     private func appTone(_ app: DevboxWorkspaceApp) -> Color {
@@ -1059,6 +835,25 @@ private struct DevboxWorkspaceCard: View {
         let prefix = "devbox-\(project)-\(workspace.name)-"
         return name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
     }
+}
+
+/// A verb is its glyph; the name lives in the tooltip and the accessibility
+/// label (spec 2026-09-01 decision 7, revised during the hand test — hover
+/// words wrapped inside the 280 pt rail).
+private func devboxVerbGlyph(_ symbol: String) -> some View {
+    Image(systemName: symbol).font(.system(size: 10))
+}
+
+private func devboxIconButton(_ symbol: String, _ word: String, _ help: String,
+                              action: @escaping () -> Void) -> some View
+{
+    Button(action: action) {
+        devboxVerbGlyph(symbol)
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(.secondary)
+    .help(help)
+    .accessibilityLabel("\(word) — \(help)")
 }
 
 /// One-click URLs for both workspace forms: committed apps use their routed
@@ -1181,234 +976,6 @@ struct FlowRow: Layout {
             subview.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
             x += size.width + hSpacing
             rowHeight = max(rowHeight, size.height)
-        }
-    }
-}
-
-/// One flat dense row per slot (redesign 2026-07-29): dot · slug ···· stats.
-/// Hovering swaps the stats for the action icons IN PLACE — same footprint,
-/// so the rail never jumps.
-private struct DevboxSlotCard: View {
-    let project: String
-    let slot: DevboxSlot
-    @State private var hovering = false
-    @State private var busy = false
-    /// Container drill-down, toggled by clicking the row — the shared slot's
-    /// postgres/mongo/openldap tier is the case this exists for, but every
-    /// slot with stats can expand.
-    @State private var expanded = false
-
-    private var tone: Color {
-        slot.running ? .green : .secondary
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                // The tap gesture is invisible to VoiceOver; this leading
-                // group announces as the disclosure control. Scoped to the
-                // dot+slug+chevron ONLY — combining the whole row would
-                // swallow the action buttons into one opaque element.
-                HStack(spacing: 6) {
-                    Circle().fill(tone).frame(width: 6, height: 6)
-                    Text(slot.isShared ? "shared" : slot.slug)
-                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                        .lineLimit(1)
-                    // Decision D9=C: git state is ONE dot at rest. The rail is
-                    // 280pt and the routed-host chips below already spend that
-                    // width on names; drawing repo names too put the same word
-                    // ("ai-ms") on the card twice in two meanings — a chip that
-                    // opens a URL, and a row that reports uncommitted work.
-                    if !slot.dirtyRepos.isEmpty {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 5, height: 5)
-                            .help(dirtySummary)
-                            .accessibilityLabel("uncommitted work in \(slot.dirtyRepos.count) repo(s)")
-                    }
-                    if canExpand {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 7, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(canExpand ? .isButton : [])
-                .accessibilityValue(canExpand ? (expanded ? "expanded" : "collapsed") : "")
-                .accessibilityHint(canExpand ? "Shows per-container CPU and memory" : "")
-                // The outer row's tap gesture is not reachable through this
-                // combined element — VoiceOver activation needs its own action.
-                .accessibilityAction {
-                    guard canExpand else { return }
-                    withAnimation(.easeOut(duration: 0.14)) { expanded.toggle() }
-                }
-                Spacer(minLength: 4)
-                ZStack(alignment: .trailing) {
-                    Text(statsText)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .opacity(hovering ? 0 : 1)
-                    actionRow.opacity(hovering ? 1 : 0)
-                }
-                .frame(height: 16)
-            }
-            // The row toggles the drill-down; the action icons sit on top of
-            // this gesture and win, so hover-actions keep working unchanged.
-            .contentShape(Rectangle())
-            .onTapGesture {
-                guard canExpand else { return }
-                withAnimation(.easeOut(duration: 0.14)) { expanded.toggle() }
-            }
-
-            if expanded, let stats = slot.stats {
-                ForEach(stats) { container in
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(containerTone(container))
-                            .frame(width: 4, height: 4)
-                        Text(shortName(container.name))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        Text(container.isUp
-                            ? "\(Int(container.cpuPercent.rounded()))% · \(container.memoryLabel)"
-                            : "stopped")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.leading, 12)
-                    .help(container.status)
-                    // The dot is the only health signal and .help is
-                    // hover-only — VoiceOver gets the state in words.
-                    .accessibilityElement(children: .combine)
-                    .accessibilityValue(
-                        container.isUnhealthy ? "unhealthy"
-                            : container.isUp ? "up" : "stopped"
-                    )
-                }
-            }
-
-            // Behind the chevron since D9=C — at rest the amber dot on the
-            // slug carries this, and the routed-host chips get the width back.
-            if expanded {
-                ForEach(slot.dirtyRepos) { repo in
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.trianglehead.branch")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
-                        Text(repo.name.replacingOccurrences(of: "pwf-", with: ""))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        if repo.dirty > 0 {
-                            Text("●\(repo.dirty)").font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.orange)
-                        }
-                        if repo.ahead > 0 {
-                            Text("↑\(repo.ahead)").font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                        if repo.behind > 0 {
-                            Text("↓\(repo.behind)").font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.leading, 12)
-                    .help("\(repo.name) on \(repo.branch)")
-                }
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(hovering ? Color.primary.opacity(0.06) : .clear,
-                    in: RoundedRectangle(cornerRadius: 6))
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .help(slot.running
-            ? "\(project) · \(slot.slug) — \(slot.containers) containers"
-            : "\(project) · \(slot.slug) — stopped")
-    }
-
-    /// A slot is expandable when it has EITHER container stats or dirty repos:
-    /// since D9=C moved the repo breakdown behind the chevron, a stopped slot
-    /// with uncommitted work has something to show and no stats to show it with.
-    private var canExpand: Bool {
-        !(slot.stats ?? []).isEmpty || !slot.dirtyRepos.isEmpty
-    }
-
-    /// What the amber dot means, in words — the whole breakdown without the
-    /// click, for the case where you only need the headline.
-    private var dirtySummary: String {
-        let dirty = slot.dirtyRepos.reduce(0) { $0 + $1.dirty }
-        let ahead = slot.dirtyRepos.reduce(0) { $0 + $1.ahead }
-        var parts = ["\(slot.dirtyRepos.count) repo\(slot.dirtyRepos.count == 1 ? "" : "s") need attention"]
-        if dirty > 0 { parts.append("\(dirty) uncommitted") }
-        if ahead > 0 { parts.append("\(ahead) unpushed") }
-        return parts.joined(separator: " · ") + "\n" +
-            slot.dirtyRepos.map { "\($0.name) (\($0.branch))" }.joined(separator: "\n")
-    }
-
-    /// "pwf-shared-postgresdb" → "postgresdb": the card already names the
-    /// slot, repeating its prefix per row wastes the rail's width.
-    private func shortName(_ name: String) -> String {
-        let prefix = slot.containerPrefix + "-"
-        return name.hasPrefix(prefix) ? String(name.dropFirst(prefix.count)) : name
-    }
-
-    private func containerTone(_ container: DevboxContainerStat) -> Color {
-        if container.isUnhealthy { return .orange }
-        return container.isUp ? .green : .red
-    }
-
-    /// A stackless tenant serves from a process, so a container count of 0
-    /// next to a green dot would read as broken — it says "serving" instead.
-    private var statsText: String {
-        guard slot.running else { return "stopped" }
-        guard slot.containers > 0 else { return "serving" }
-        return "\(slot.containers)c · \(slot.memoryLabel) · \(slot.cpuLabel)"
-    }
-
-    private var actionRow: some View {
-        HStack(spacing: 7) {
-            iconButton("terminal", "Warp + tmux") {
-                DevboxLauncher.summonWarp(project: project, slug: slot.slug)
-            }
-            if slot.running {
-                iconButton("safari", "Open Portal") {
-                    DevboxLauncher.openPortal(port: slot.entrypointPort)
-                }
-                iconButton("stop.circle", "Stop the stack") {
-                    runAction { await DevboxClient.shared.down(project: project, slug: slot.slug) }
-                }
-            } else {
-                iconButton("play.circle", "Start the stack") {
-                    runAction { await DevboxClient.shared.up(project: project, slug: slot.slug) }
-                }
-            }
-        }
-        .opacity(busy ? 0.4 : 1)
-        .disabled(busy)
-    }
-
-    private func iconButton(_ symbol: String, _ help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11))
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .help(help)
-    }
-
-    /// `up` and `pull` take tens of seconds; without the busy flag the card
-    /// looks inert and invites a second click that would race the first.
-    private func runAction(_ work: @escaping () async -> Bool) {
-        busy = true
-        Task {
-            _ = await work()
-            await MainActor.run { busy = false }
         }
     }
 }

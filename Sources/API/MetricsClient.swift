@@ -83,9 +83,9 @@ actor MetricsClient {
     /// nameless since 2026-08-30, so the stable unit is the controller
     /// instance (`ci_kvm_controller_up`), its occupancy the collector's
     /// per-job series (`ci_runner_job_info`, link included) and its backlog
-    /// `ci_jobs_queued`. Ceilings ride in on `ci_lane_info` when the infra
-    /// side exports it; until then `maxRunners` is nil and rows show counts
-    /// only (spec 2026-09-09). Jobs on lanes that are not ours
+    /// `ci_jobs_queued`. `ci_lane_info` carries each lane's repo tier and job
+    /// kind; lanes have no ceilings since 2026-09-26 — the shared pool comes
+    /// from Semafor (`SemaforClient`). Jobs on lanes that are not ours
     /// (`github-hosted`, `unknown`) are kept aside as `elsewhere`.
     func laneBoard() async -> CILaneBoard {
         async let controllersQuery = try? instantSeries("ci_kvm_controller_up")
@@ -98,7 +98,7 @@ actor MetricsClient {
         let (runnerCPU, runnerMemory) = await (runnerCPUQuery, runnerMemoryQuery)
         guard let controllers, !controllers.isEmpty else { return CILaneBoard() }
 
-        var ceilings: [String: Int] = [:]
+        var laneInfo: [String: (tier: Int?, kind: String?)] = [:]
         func byRunner(_ samples: [(labels: [String: String], value: Double)]?) -> [String: Double] {
             Dictionary((samples ?? []).compactMap { sample in
                 guard let runner = sample.labels["runner"], sample.value.isFinite, sample.value >= 0 else { return nil }
@@ -108,8 +108,8 @@ actor MetricsClient {
         let cpuByRunner = byRunner(runnerCPU)
         let memoryByRunner = byRunner(runnerMemory)
         for series in info ?? [] {
-            if let lane = series.labels["lane"], let max = series.labels["max_runners"].flatMap(Int.init) {
-                ceilings[lane] = max
+            if let lane = series.labels["lane"] {
+                laneInfo[lane] = (series.labels["tier"].flatMap(Int.init), series.labels["kind"])
             }
         }
         var queuedByLane: [String: Int] = [:]
@@ -147,7 +147,8 @@ actor MetricsClient {
                 backend: series.labels["backend"] ?? "",
                 trustGroup: series.labels["trust_group"] ?? "",
                 up: series.value > 0,
-                maxRunners: ceilings[name],
+                tier: laneInfo[name]?.tier,
+                kind: laneInfo[name]?.kind,
                 queued: queuedByLane[name] ?? 0,
                 jobs: (jobsByLane[name] ?? []).sorted { ($0.since ?? .distantPast) < ($1.since ?? .distantPast) }))
         }

@@ -81,52 +81,126 @@ struct Kicker: View {
     }
 }
 
-/// The left column's tab strip — kicker-sized mono labels where the selected
-/// one sits on a soft pill. The stock segmented Picker it replaced was the one
-/// blue Aqua control in a panel that otherwise speaks hairlines and mono
-/// uppercase, and its "Left rail" label was implementation vocabulary.
-struct PanelTabs: View {
-    struct Tab: Identifiable {
-        let id: String
-        let title: String
-        var count: Int = 0
+/// A capsule count on a rail row's trailing edge — open questions, open
+/// items, a held lease. Tone is the caller's; the shape is shared.
+struct RailBadge: Identifiable {
+    let text: String
+    let tone: Color
+    var help: String = ""
+    var id: String { text + help }
+}
+
+/// THE row of the left column (2026-09-14): one grammar for a task, a
+/// listener, a board and a devbox workspace, so the column reads as one list
+/// rather than three apps. Dot · title · trailing meta, an optional second
+/// line in mono, badges at the edge; hover lifts the row onto the same slab
+/// every rail row in the panel uses. Devbox cards extend it with their
+/// disclosure and verbs but keep these metrics (`RailRowMetrics`).
+struct RailRow: View {
+    enum Dot {
+        case filled(Color)
+        case hollow
     }
 
-    let tabs: [Tab]
-    @Binding var selection: String
+    let dot: Dot
+    let title: String
+    /// Second line — project · reason, activity, "last seen". Mono, tertiary.
+    var subtitle: String? = nil
+    var subtitleTone: Color? = nil
+    /// Trailing text on the title line — a project, an age. Mono, tertiary.
+    var meta: String? = nil
+    var badges: [RailBadge] = []
+    var help: String = ""
+    var accessibilityLabel: String? = nil
+    let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(tabs) { tab in
-                let isSelected = tab.id == selection
-                Button { selection = tab.id } label: {
-                    HStack(spacing: 5) {
-                        Text(tab.title.uppercased())
-                            .kerning(1.2)
-                        if tab.count > 0 {
-                            Text("\(tab.count)")
-                                .kerning(0)
-                                .monospacedDigit()
-                                .opacity(0.7)
-                        }
-                    }
-                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(
-                        isSelected ? Color.white.opacity(0.08) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 6))
-                    .contentShape(RoundedRectangle(cornerRadius: 6))
+        HStack(alignment: .firstTextBaseline, spacing: RailRowMetrics.dotGap) {
+            dotView
+                .frame(width: RailRowMetrics.dotSize, height: RailRowMetrics.dotSize)
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 3 }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(RailRowMetrics.titleFont)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(RailRowMetrics.metaFont)
+                        .foregroundStyle(subtitleTone.map(AnyShapeStyle.init) ?? AnyShapeStyle(.tertiary))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+            if let meta {
+                Text(meta)
+                    .font(RailRowMetrics.metaFont)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            ForEach(badges) { badge in
+                Text(badge.text)
+                    .font(RailRowMetrics.metaFont)
+                    .monospacedDigit()
+                    .foregroundStyle(badge.tone)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(badge.tone.opacity(0.12), in: Capsule())
+                    .help(badge.help)
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 8)
-        .padding(.bottom, 4)
+        .padding(.horizontal, RailRowMetrics.inset)
+        .padding(.vertical, RailRowMetrics.verticalInset)
+        .background(hovering ? RailRowMetrics.hoverFill : .clear,
+                    in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: action)
+        .help(help)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel ?? [title, subtitle, meta].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityAddTraits(.isButton)
+    }
+
+    @ViewBuilder
+    private var dotView: some View {
+        switch dot {
+        case let .filled(tone): Circle().fill(tone)
+        case .hollow: Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1)
+        }
+    }
+}
+
+/// The numbers behind `RailRow`, shared with the devbox card so a workspace
+/// line and a board line sit on the same grid.
+enum RailRowMetrics {
+    static let titleFont = Font.system(size: 10.5)
+    static let metaFont = Font.system(size: 9, design: .monospaced)
+    static let dotSize: CGFloat = 6
+    static let dotGap: CGFloat = 6
+    static let inset: CGFloat = 8
+    static let verticalInset: CGFloat = 4
+    static let radius: CGFloat = 6
+    static let hoverFill = Color.primary.opacity(0.06)
+    /// Content under a row's title (a card's detail) starts under the title,
+    /// not under the dot.
+    static let indent: CGFloat = dotSize + dotGap
+}
+
+/// A rail.s quiet aside — "no session is listening", "no match", "+3 more" —
+/// in the row meta voice and on the row grid.
+struct RailNote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(RailRowMetrics.metaFont)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, RailRowMetrics.inset)
+            .padding(.vertical, 2)
     }
 }
 

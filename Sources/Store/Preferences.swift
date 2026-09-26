@@ -134,7 +134,12 @@ struct Preferences: Codable {
     /// dock is deliberately not collapsible and never appears here.
     var collapsedRails: [String] = []
 
+    /// Retired 2026-09-14 with the left-column tabs; decoded and re-encoded so
+    /// a hand-edited settings.json keeps its line, never read.
     var leftRailTab: String?
+    /// Retired 2026-09-23 with the split handle (the left column is fixed
+    /// widgets now); decoded and re-encoded like `leftRailTab`, never read.
+    var leftRailSplit: Double?
     var vitrinkaWorkspace: String?
 
     /// Workspace layouts for the Hammerspoon `.organize` engine
@@ -357,6 +362,7 @@ struct Preferences: Codable {
         todoProject = try container.decodeIfPresent(String.self, forKey: .todoProject)
         collapsedRails = try container.decodeIfPresent([String].self, forKey: .collapsedRails) ?? []
         leftRailTab = try container.decodeIfPresent(String.self, forKey: .leftRailTab)
+        leftRailSplit = try container.decodeIfPresent(Double.self, forKey: .leftRailSplit)
         vitrinkaWorkspace = try container.decodeIfPresent(String.self, forKey: .vitrinkaWorkspace)
         workspaces = try container.decodeIfPresent(WorkspacesConfig.self, forKey: .workspaces)
         displayPresets = try container.decodeIfPresent([DisplayPreset].self, forKey: .displayPresets)

@@ -419,7 +419,11 @@ struct CILane: Identifiable {
     let backend: String // "docker" | "kvm"
     let trustGroup: String // "firefly" (CI) | "bastion" (deploys)
     let up: Bool // controller unit active
-    let maxRunners: Int? // `ci_lane_info`; nil until the infra side exports it
+    /// Repo priority tier (0 places first) and job kind (ci/build/e2e, deploy
+    /// on bastion lanes) from `ci_lane_info`. No lane has a runner ceiling
+    /// since 2026-09-26: capacity is the shared pool (`CILaneBoard.pool`).
+    var tier: Int?
+    var kind: String?
     let queued: Int
     let jobs: [CIJob]
 
@@ -454,9 +458,85 @@ struct CILaneBoard {
     var lanes: [CILane] = []
     var elsewhere: [CIJob] = []
     var elsewhereQueued: Int = 0
+    /// The shared Docker pool from Semafor; nil when Semafor did not answer.
+    var pool: CIPool?
 
     var isEmpty: Bool { lanes.isEmpty }
     var running: Int { lanes.reduce(0) { $0 + $1.running } }
+}
+
+/// The one Docker JIT pool every CI lane draws on (build-server-infra priority
+/// decisions 4-6, 2026-09-26): slots and reservation budget, and the head of
+/// its priority queue — the waiter that places next.
+struct CIPool: Equatable {
+    var slotsUsed: Int
+    var slotsMax: Int
+    var reservedMiB: Int
+    var budgetMiB: Int
+    var head: CIPoolHead?
+    /// The newest controller render behind these numbers.
+    var observedAt: Date?
+}
+
+struct CIPoolHead: Equatable {
+    let lane: String
+    let tier: Int?
+    let kind: String?
+    let waiting: Int
+}
+
+/// Semafor's `GET /api/v1/admission` (semafor `internal/query`), only the
+/// fields the pool reads. Partition "" is the Docker ordinary pool; the
+/// bastion guests report as "kvm".
+struct SemaforAdmission: Decodable {
+    struct Partition: Decodable {
+        let name: String
+        let budgetMib: Int
+        let reservedMib: Int
+        let slotsUsed: Int
+        let slotsMax: Int
+    }
+
+    struct Lane: Decodable {
+        let lane: String
+        let partition: String
+        let waiting: Int
+        let head: Bool
+    }
+
+    let observedAt: String? // RFC 3339, null before any controller exported
+    let partitions: [Partition]
+    let lanes: [Lane]
+
+    static func decode(_ data: Data) -> SemaforAdmission? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(SemaforAdmission.self, from: data)
+    }
+
+    private var observedDate: Date? {
+        guard let observedAt else { return nil }
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: observedAt) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: observedAt)
+    }
+
+    /// The Docker pool, its head resolved against the lanes' tiers: every
+    /// controller flags itself head at its own last attempt, so between two
+    /// attempts more than one lane can say so — the best tier wins, then the
+    /// name, so the line does not flicker between polls.
+    func pool(lanes board: [CILane]) -> CIPool? {
+        guard let docker = partitions.first(where: { $0.name.isEmpty }) else { return nil }
+        let byName = Dictionary(board.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let head = lanes
+            .filter { $0.partition.isEmpty && $0.head && $0.waiting > 0 }
+            .map { CIPoolHead(lane: $0.lane, tier: byName[$0.lane]?.tier, kind: byName[$0.lane]?.kind, waiting: $0.waiting) }
+            .min { ($0.tier ?? Int.max, $0.lane) < ($1.tier ?? Int.max, $1.lane) }
+        return CIPool(slotsUsed: docker.slotsUsed, slotsMax: docker.slotsMax,
+                      reservedMiB: docker.reservedMib, budgetMiB: docker.budgetMib,
+                      head: head, observedAt: observedDate)
+    }
 }
 
 // MARK: - Project registry (the on-call layer)
@@ -813,9 +893,15 @@ struct DevboxWorkspace: Identifiable {
     /// The box's `WS_MEM_ESTIMATE_DRIFT` verdict text, when declared and
     /// measured disagree; nil otherwise.
     var drift: String? = nil
+    /// The guest this row came from (spec 2026-09-25) — stamped by
+    /// `DevboxEstate`, since Pultík knows which endpoint it polled. Anything
+    /// that acts on the row over ssh uses this endpoint, never a default.
+    var box: DevboxEndpoint? = nil
 
+    /// A name is unique per box; during a `devbox move` both copies can be
+    /// listed, so the box keeps them apart.
     var id: String {
-        name
+        box.map { "\($0.name)/\(name)" } ?? name
     }
 
     var isParked: Bool {
@@ -976,13 +1062,16 @@ struct DevboxOverviewSummary {
     let memoryAvailableBytes: Double
     let swapTotalBytes: Double
     let swapFreeBytes: Double
+    /// Every discovered box when there is more than one (silent ones
+    /// included); empty for a single box, whose summary is its own.
+    var boxes: [DevboxBoxShare] = []
 
     /// Mirrors the sweep's own thresholds so the rail turns colour when the
     /// box would start parking, not at a HUD-invented number: elevated at
     /// PSI some ≥ 5 (the sweep's hysteresis floor) or under 8G above the
     /// floor (its recovery target); critical at PSI some ≥ 10 or below the
     /// floor (when it parks).
-    enum Pressure {
+    enum Pressure: Comparable {
         case normal, elevated, critical
     }
 
@@ -990,10 +1079,18 @@ struct DevboxOverviewSummary {
         memoryAvailableBytes / 1_073_741_824
     }
 
+    /// Merged totals could hide one box below its floor behind another's
+    /// headroom, so a multi-box estate is as strained as its worst box.
     var pressure: Pressure {
-        if pressureSome >= 10 || availableGB < Double(floorGB) { return .critical }
-        if pressureSome >= 5 || availableGB - Double(floorGB) < 8 { return .elevated }
-        return .normal
+        let own: Pressure
+        if pressureSome >= 10 || availableGB < Double(floorGB) {
+            own = .critical
+        } else if pressureSome >= 5 || availableGB - Double(floorGB) < 8 {
+            own = .elevated
+        } else {
+            own = .normal
+        }
+        return boxes.compactMap(\.pressure).reduce(own, max)
     }
 
     private var usesMemoryAdmission: Bool {

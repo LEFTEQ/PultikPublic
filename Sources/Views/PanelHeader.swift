@@ -3,8 +3,9 @@ import SwiftUI
 /// The status strip across the panel's bottom edge.
 ///
 /// It is supporting chrome rather than the panel's primary hierarchy: search
-/// and the grouped inbox own the top edge, while CI, alerts, Eve, freshness and
-/// window actions close the panel as one stable full-width footer.
+/// and the grouped inbox own the top edge, while alerts, Eve, freshness and
+/// window actions close the panel as one stable full-width footer. CI's totals
+/// moved to the right rail's CI section (spec 2026-09-23, D10).
 ///
 /// One line by contract, same as the footer was: every child is lineLimit(1)
 /// and fixed-shape, because an overflowing cell in a fixed frame makes SwiftUI
@@ -18,9 +19,6 @@ struct PanelFooter: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if store.isSectionVisible("ci") {
-                CIFooterSummary(repos: store.repos)
-            }
             if store.isSectionVisible("alerts"), let latest = store.visibleAlerts.first {
                 AlertPulse(latest: latest, unread: store.unreadAlertCount)
             }

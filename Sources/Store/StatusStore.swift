@@ -46,14 +46,20 @@ final class StatusStore {
                                            defaultWorkspace: VitrinkaClient.shared.workspace)
     }
     var eveAlerts: [EveAlert] = []
-    /// ws-v2 workspaces are the primary Devbox surface. The remaining project
-    /// list carries only slot-0 shared stacks and SampleStack's v2 stack slots.
+    /// ws-v2 workspaces are the Devbox surface — the widget's chips and pile,
+    /// the `.devbox` page's table.
     var devboxWorkspaces: [DevboxWorkspace] = []
-    var devboxProjects: [DevboxProject] = []
     var devboxSummary: DevboxOverviewSummary?
     /// When the hub payload was generated ON THE BOX — the rail's "as of"
     /// stamp. The user asked for real status; real status carries its age.
     var devboxFetchedAt: Date?
+    /// Every devbox guest to poll (spec 2026-09-25) — today's single
+    /// endpoint until `devbox boxes --json` first answers.
+    private(set) var devboxBoxes: [DevboxEndpoint] = [.fallback]
+    /// Each box's last answer; a box that fails drops out, one on hold
+    /// keeps what it had — the one-box rules, per box.
+    private var devboxSnapshots: [String: DevboxSnapshot] = [:]
+    private var devboxDiscoveredAt: Date?
     var lastRefresh: Date?
     /// When a refresh last RAN, as opposed to when it last produced data —
     /// the floor `refreshIfStale` enforces on panel opens.
@@ -72,9 +78,11 @@ final class StatusStore {
     // runId → was-running, used to notify only on observed transitions
     private var previousRunning: [Int: Bool] = [:]
     private var previousDeployRunning: [Int: Bool] = [:]
-    /// Last overview's parked count, for the pressure-park notification.
-    /// nil until the first snapshot so a launch never announces history.
-    private var previousDevboxParked: Int?
+    /// Each box's last parked count, for the pressure-park notification.
+    /// Absent until that box's first snapshot so a launch never announces
+    /// history. Per box: a silent box answering again rejoins the merged
+    /// total, which must never read as a park.
+    private var previousDevboxParked: [String: Int] = [:]
     /// Sentry issue ids already seen — notify only on genuinely new issues,
     /// and never on the first load after launch.
     private var seenSentryIssues: Set<String>?
@@ -834,6 +842,7 @@ final class StatusStore {
     private func refreshInfraMetrics() async {
         let servers = preferences.servers.map { (name: $0.name, instance: $0.ref) }
         let services = preferences.services.map { (name: $0.name, probe: $0.ref, host: $0.host) }
+        var lanesRefreshed = false
         await gated(.prometheus, probe: {
             await MetricsClient.shared.reachable()
                 ? nil : .unreachable("prometheus not answering")
@@ -855,10 +864,24 @@ final class StatusStore {
 
             if isSectionVisible("runners") {
                 laneBoard = await MetricsClient.shared.laneBoard()
+                lanesRefreshed = true
             } else {
                 laneBoard = CILaneBoard()
             }
             return nil
+        }
+        // The shared pool line is Semafor's, another host: its failures back
+        // off on their own breaker instead of riding Prometheus's success, and
+        // while it holds the line stays hidden. Only a board this pass fetched
+        // is labelled — a board kept through a Prometheus pause keeps its
+        // last pool rather than pairing a new head with old lanes.
+        guard lanesRefreshed, !laneBoard.isEmpty else { return }
+        let lanes = laneBoard.lanes
+        laneBoard.pool = nil
+        await gated(.semafor) {
+            let (pool, failure) = await SemaforClient.shared.pool(lanes: lanes)
+            laneBoard.pool = pool
+            return failure
         }
     }
 
@@ -920,45 +943,80 @@ final class StatusStore {
     /// every 90 seconds, forever. Its breaker matters more than the rest —
     /// and its one-request way back in stays `DevboxClient.status()`, the
     /// cheap probe, never this heavier call.
+    ///
+    /// Every discovered box is polled concurrently behind ITS OWN breaker
+    /// (spec 2026-09-25): a silent box drops out of the merge and is marked
+    /// silent, and never blanks the rail or delays the other box.
     private func refreshDevbox() async {
         guard isSectionVisible("devbox") else {
             devboxWorkspaces = []
-            devboxProjects = []
             devboxSummary = nil
             devboxFetchedAt = nil
+            devboxSnapshots = [:]
             return
         }
-        await gated(.devbox, probe: {
+        await discoverDevboxBoxesIfDue()
+        let boxes = devboxBoxes
+        await withTaskGroup(of: Void.self) { group in
+            for box in boxes {
+                group.addTask { await self.refreshDevbox(box) }
+            }
+        }
+        // Keyed by name, so a box whose host, port or alias changed would
+        // otherwise keep a held snapshot stamped with its OLD endpoint —
+        // and its rows would act there. Only an exact endpoint match stays.
+        devboxSnapshots = devboxSnapshots.filter { _, snapshot in boxes.contains(snapshot.endpoint) }
+        let estate = DevboxEstate(boxes: boxes, snapshots: Array(devboxSnapshots.values))
+        // The overview lists hot AND parked identities (parking contract,
+        // 2026-09-02): a parked workspace still holds its slot and ports and
+        // is one `up` from hot, so it stays on the rail as a parked card —
+        // vanishing is what a reaped workspace does. Anything the box calls
+        // neither is not a slot and is not shown.
+        devboxWorkspaces = estate.workspaces.filter { $0.isHot || $0.isParked }
+        devboxSummary = estate.summary
+        // A hidden rail must not keep a stale "as of" for its return.
+        devboxFetchedAt = estate.generated
+        for box in boxes {
+            guard let snapshot = devboxSnapshots[box.name] else { continue }
+            notifyDevboxPressure(snapshot.summary, box: box.name, named: boxes.count > 1)
+        }
+    }
+
+    /// One box's overview behind that box's breaker.
+    private func refreshDevbox(_ box: DevboxEndpoint) async {
+        await gated(.devbox(box: box.name), probe: {
             // The cheap one-request way back in for a half-open breaker —
             // `status()`, never the docker-stats-heavy hub call. A successful
             // trial then proceeds to `work` like every other gated target.
-            if case let .failed(failure) = await DevboxClient.shared.status() {
+            if case let .failed(failure) = await DevboxClient.shared.status(box) {
                 return failure
             }
             return nil
         }) {
-            switch await DevboxClient.shared.hub() {
+            switch await DevboxClient.shared.hub(box) {
             case let .failed(failure):
-                devboxWorkspaces = []
-                devboxProjects = []
-                devboxSummary = nil
-                // A hidden rail must not keep a stale "as of" for its return.
-                devboxFetchedAt = nil
+                devboxSnapshots[box.name] = nil
                 return failure
-            case let .value(hub):
-                // The overview lists hot AND parked identities (parking
-                // contract, 2026-09-02): a parked workspace still holds its
-                // slot and ports and is one `up` from hot, so it stays on the
-                // rail as a parked card — vanishing is what a reaped
-                // workspace does. Anything the box calls neither is not a
-                // slot and is not shown.
-                devboxWorkspaces = hub.workspaces.filter { $0.isHot || $0.isParked }
-                devboxProjects = hub.projects
-                devboxSummary = hub.summary
-                devboxFetchedAt = hub.generated
-                notifyDevboxPressure(hub.summary)
+            case let .value(snapshot):
+                devboxSnapshots[box.name] = snapshot
                 return nil
             }
+        }
+    }
+
+    /// `devbox boxes --json` at launch and every `DevboxDiscovery.interval`.
+    /// A failed discovery (older CLI, no answer) keeps the last good list;
+    /// with none, today's single endpoint stays. The stamp is taken before
+    /// the await so an overlapping refresh does not discover twice.
+    private func discoverDevboxBoxesIfDue() async {
+        if let last = devboxDiscoveredAt, Date().timeIntervalSince(last) < DevboxDiscovery.interval { return }
+        devboxDiscoveredAt = Date()
+        let discovered = await DevboxClient.shared.discoverBoxes()
+        let boxes = DevboxDiscovery.resolve(discovered: discovered, previous: devboxBoxes)
+        if boxes != devboxBoxes {
+            NSLog("pultik: devbox boxes → %@",
+                  boxes.map { "\($0.name)=\($0.host):\($0.port)" }.joined(separator: ", "))
+            devboxBoxes = boxes
         }
     }
 
@@ -966,9 +1024,9 @@ final class StatusStore {
     /// workspace went quiet: parked rose while memory PSI was non-zero. A
     /// stale park at PSI 0 is routine housekeeping and stays silent. Only a
     /// rise counts — a revive that lowers the count is the user's own doing.
-    private func notifyDevboxPressure(_ summary: DevboxOverviewSummary) {
-        defer { previousDevboxParked = summary.parked }
-        guard let previous = previousDevboxParked,
+    private func notifyDevboxPressure(_ summary: DevboxOverviewSummary, box: String, named: Bool) {
+        defer { previousDevboxParked[box] = summary.parked }
+        guard let previous = previousDevboxParked[box],
               summary.parked > previous,
               summary.pressureSome > 0
         else { return }
@@ -976,7 +1034,7 @@ final class StatusStore {
         let psi = String(format: "%.1f", summary.pressureSome)
         let free = String(format: "%.0fG", summary.availableGB)
         Notifier.send(
-            title: "devbox — parked \(parked) under memory pressure",
+            title: "\(named ? "devbox \(box)" : "devbox") — parked \(parked) under memory pressure",
             body: "\(summary.running) hot of \(summary.hotCeiling) · PSI some \(psi) · \(free) free / \(summary.floorGB)G floor",
             url: nil
         )
@@ -1018,11 +1076,6 @@ final class StatusStore {
         preferences.servers.map(\.name)
     }
 
-    /// Which left-column tab is up. Normalised to the two tags the segmented
-    /// picker offers: settings.json is documented as hand-editable, and an
-    /// unknown value would draw the picker with no segment selected.
-    var leftRailTab: String { preferences.leftRailTab == "devbox" ? "devbox" : "vitrinka" }
-    func setLeftRailTab(_ value: String) { mutate { $0.leftRailTab = value } }
     var vitrinkaWorkspace: String { preferences.vitrinkaWorkspace ?? VitrinkaClient.shared.workspace ?? "" }
     /// Rail and palette derive their data from this pick, including when a
     /// refresh finishes after a switch or the picked workspace is unavailable.

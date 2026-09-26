@@ -11,6 +11,7 @@
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette state as JSON (prints it)
 #   tools/panel-drive.sh metrics [/tmp/mem.json]   # footprint + summon time, also hidden
+#   tools/panel-drive.sh frame                     # any build: window inside its screen? exit 1 if not
 #
 # Launch the app first, e.g.
 #   PULTIK_KEEP_PANEL_OPEN=1 /tmp/pultik-dd/Build/Products/Debug/Pultik.app/Contents/MacOS/Pultik &
@@ -25,7 +26,8 @@ case "$cmd" in
   capture) PD_PATH="${1:?png path}" ;;
   state) PD_PATH="${1:-/tmp/pultik-panel-state.json}" ;;
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  frame) ;;
+  *) sed -n '2,16p' "$0"; exit 2 ;;
 esac
 
 post() {
@@ -48,6 +50,37 @@ case "$cmd" in
     for _ in $(seq 1 40); do [ -s "$PD_PATH" ] && break; sleep 0.1; done
     [ -s "$PD_PATH" ] || { echo "panel-drive: no response at $PD_PATH (is a Debug Pultík running with the panel open?)" >&2; exit 1; }
     if [ "$cmd" = state ] || [ "$cmd" = metrics ]; then cat "$PD_PATH"; fi
+    ;;
+  frame)
+    # No driver needed, any build: the panel window against the visibleFrame of
+    # the screen its top edge sits on. `capture` grabs the whole window even
+    # where it runs offscreen, so this — not a PNG — proves the panel fits
+    # (2026-09-23: a capture looked right while the panel ran 313 pt past the bottom).
+    out="$(osascript -l JavaScript -e '
+      ObjC.import("CoreGraphics"); ObjC.import("AppKit");
+      const primary = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
+      const screens = [];
+      for (let i = 0; i < $.NSScreen.screens.count; i++) {
+        const v = $.NSScreen.screens.objectAtIndex(i).visibleFrame;
+        screens.push({ left: v.origin.x, right: v.origin.x + v.size.width,
+                       top: primary - (v.origin.y + v.size.height), bottom: primary - v.origin.y });
+      }
+      JSON.stringify(ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1, 0)))
+        .filter(w => /pult/i.test(w.kCGWindowOwnerName || "") && w.kCGWindowBounds.Height > 200)
+        .map(w => {
+          const b = w.kCGWindowBounds, cx = b.X + b.Width / 2;
+          const s = screens.find(s => cx >= s.left && cx < s.right && b.Y >= s.top && b.Y < s.bottom) || screens[0];
+          return { left: b.X, right: b.X + b.Width, top: b.Y, bottom: b.Y + b.Height,
+                   screen: { left: s.left, right: s.right, top: s.top, bottom: s.bottom },
+                   inside: b.X >= s.left && b.X + b.Width <= s.right
+                       && b.Y >= s.top && b.Y + b.Height <= s.bottom };
+        }));
+    ')"
+    echo "$out"
+    case "$out" in
+      "[]") echo "panel-drive: no Pultík panel window on screen (is the panel open?)" >&2; exit 1 ;;
+      *'"inside":false'*) exit 1 ;;
+    esac
     ;;
   *)
     post
