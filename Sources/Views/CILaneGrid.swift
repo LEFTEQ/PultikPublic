@@ -1,40 +1,114 @@
 import SwiftUI
 
+/// One busy lane on one line (2026-09-23, bounded for the right rail): the
+/// name, the running jobs as squares — hover one for its runner and run
+/// link — `cellLimit` cells at most, then the queue or a dead controller and
+/// the running count. Lanes have no capacity of their own since 2026-09-26:
+/// free room is the shared pool's, shown once above the lanes (`PoolRow`).
+/// A lane with more jobs than cells ends in "+N", which opens `.ci <lane>`
+/// where every job is listed.
 struct CILaneGrid: View {
     let lane: CILane
+    let onOpen: (String) -> Void
+
+    /// Sized to the rail: 88pt name + six 12pt cells + the trailing numbers
+    /// fill the 244pt a `RailSection` row gets.
+    static let cellLimit = 6
+
+    private var laneHelp: String {
+        let rank = [lane.tier.map { "tier \($0)" }, lane.kind].compactMap { $0 }.joined(separator: " · ")
+        return "\(lane.running) running on \(lane.name)" + (rank.isEmpty ? "" : " · \(rank)") + "; capacity is the shared pool"
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 4) {
-                Text(lane.name).lineLimit(1)
-                Spacer(minLength: 2)
-                Text(lane.maxRunners.map { "\(lane.running)/\($0)" } ?? "\(lane.running) · cap —")
-                    .foregroundStyle(.secondary)
-                    .help(lane.maxRunners == nil ? "Capacity telemetry unavailable" : "Running / configured capacity; shared admission may limit starts")
-            }
-            .font(.system(size: 9.5, design: .monospaced))
-            if lane.maxRunners != nil || !lane.jobs.isEmpty {
-                LazyVGrid(columns: Array(repeating: GridItem(.fixed(12), spacing: 5), count: 12), alignment: .leading, spacing: 5) {
-                ForEach(lane.jobs) { job in
+        let overflow = lane.jobs.count > Self.cellLimit
+        let jobs = overflow ? Array(lane.jobs.prefix(Self.cellLimit - 1)) : lane.jobs
+        HStack(spacing: 6) {
+            Text(lane.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: 88, alignment: .leading)
+                .help(lane.name)
+            HStack(spacing: 2) {
+                ForEach(jobs) { job in
                     CIJobCell(job: job, controllerUp: lane.up)
                 }
-                ForEach(0..<min(96, max(0, (lane.maxRunners ?? lane.running) - lane.running)), id: \.self) { _ in
-                    Circle()
-                        .fill(lane.up ? Color.secondary.opacity(0.3) : Color.red.opacity(0.5))
-                        .frame(width: 3, height: 3)
-                        .frame(width: 12, height: 12)
-                        .help(lane.up ? "Unoccupied capacity · \(lane.name); shared admission may limit starts" : "Controller unavailable · \(lane.name)")
-                        .accessibilityLabel(lane.up ? "Available slot" : "Unavailable slot")
-                }
+                if overflow {
+                    Button { onOpen(lane.name) } label: {
+                        Text("+\(lane.jobs.count - jobs.count)")
+                            .foregroundStyle(.secondary)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(lane.jobs.count - jobs.count) more jobs on \(lane.name)")
+                    .help("Every job on \(lane.name) — .ci \(lane.name)")
                 }
             }
-            if !lane.up || lane.queued > 0 {
-                Text(!lane.up ? "controller down" : "\(lane.queued) queued")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(lane.up ? Color.secondary : .red)
+            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                if !lane.up {
+                    Text("down")
+                        .foregroundStyle(.red)
+                        .help("Controller down · \(lane.name)")
+                        .accessibilityLabel("Controller down")
+                } else if lane.queued > 0 {
+                    Text("q\(lane.queued)")
+                        .foregroundStyle(.orange)
+                        .help("\(lane.queued) queued on \(lane.name)")
+                        .accessibilityLabel("\(lane.queued) queued")
+                }
+                Text("\(lane.running)")
+                    .foregroundStyle(.secondary)
+                    .help(laneHelp)
+            }
+            // The counts are what the row is for — the name gives way first.
+            .fixedSize()
+        }
+        .font(.system(size: 9.5, design: .monospaced))
+        .padding(.vertical, 1)
+    }
+}
+
+/// The shared Docker pool above the lanes (Semafor's admission board): slots
+/// and reserved memory against the budget, then the queue's head — the lane
+/// that places next — with its repo tier and kind. Hidden when Semafor did
+/// not answer; dimmed when its numbers are older than `CIPoolGlance.staleAfter`.
+struct PoolRow: View {
+    let pool: CIPool
+
+    var body: some View {
+        let glance = CIPoolGlance(pool: pool)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                Text("pool").foregroundStyle(.tertiary)
+                    .frame(width: 30, alignment: .leading)
+                Text("\(glance.slots) · \(glance.memory)")
+                    .foregroundStyle(glance.full ? Color.orange : Color.secondary)
+                    .lineLimit(1)
+                if glance.stale {
+                    Text("stale").foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+            }
+            .help(glance.stale
+                ? "Shared CI pool — Semafor's newest controller reading is over \(Int(CIPoolGlance.staleAfter / 60)) min old"
+                : "Shared CI pool: live jobs / \(pool.slotsMax) slots and reserved / budgeted memory; no lane has a ceiling of its own")
+            if let head = glance.head {
+                HStack(spacing: 6) {
+                    Text("next").foregroundStyle(.tertiary)
+                        .frame(width: 30, alignment: .leading)
+                    Text(head)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .help("Head of the priority queue (repo tier, then kind ci · build · e2e, then age): the waiter that places next")
             }
         }
-        .padding(.vertical, 4)
+        .font(.system(size: 9.5, design: .monospaced))
+        .opacity(glance.stale ? 0.6 : 1)
+        .accessibilityElement(children: .combine)
     }
 }
 

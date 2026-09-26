@@ -8,13 +8,31 @@ import Observation
 /// host — not for the single query that happened to fail. `prometheus` and
 /// `devbox` are separate cases despite sharing a box: one is an HTTP port on
 /// the mesh, the other is sshd, and only the second is behind fail2ban.
-enum ProbeTarget: String, CaseIterable, Sendable {
+/// Each devbox guest is its own sshd behind its own fail2ban (spec
+/// 2026-09-25), so each box gets its own breaker: a silent box b never
+/// pauses box a.
+enum ProbeTarget: Hashable, Sendable {
     case github
     case prometheus
     case eve
     case sentry
     case vitrinka
-    case devbox
+    case semafor
+    case devbox(box: String)
+
+    /// Stable key for logs and `Pause.id`. The first box keeps today's
+    /// bare `devbox`, so a one-box Mac reads exactly as before.
+    var rawValue: String {
+        switch self {
+        case .github: return "github"
+        case .prometheus: return "prometheus"
+        case .eve: return "eve"
+        case .sentry: return "sentry"
+        case .vitrinka: return "vitrinka"
+        case .semafor: return "semafor"
+        case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox" : "devbox-\(box)"
+        }
+    }
 
     var label: String {
         switch self {
@@ -23,7 +41,8 @@ enum ProbeTarget: String, CaseIterable, Sendable {
         case .eve: return "eve"
         case .sentry: return "sentry"
         case .vitrinka: return "vitrinka"
-        case .devbox: return "devbox (ssh)"
+        case .semafor: return "CI pool (semafor)"
+        case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox (ssh)" : "devbox \(box) (ssh)"
         }
     }
 }

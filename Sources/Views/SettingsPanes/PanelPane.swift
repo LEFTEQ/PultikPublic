@@ -5,8 +5,8 @@ struct PanelPane: View {
     let store: StatusStore
 
     private static let sections = [
-        ("prod", "Prod issues strip"), ("servers", "Servers rail"),
-        ("services", "Services rail"), ("ci", "CI footer"),
+        ("prod", "Prod issues strip"), ("servers", "Estate widget · servers"),
+        ("services", "Estate widget · services"), ("ci", "CI · GitHub runs"),
         ("alerts", "Eve alerts"), ("fans", "Fan & Mac strip"),
     ]
 

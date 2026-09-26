@@ -64,6 +64,16 @@ private struct LeftColumnHeightKey: PreferenceKey {
     }
 }
 
+/// The Devbox and Estate widgets' combined rendered height — the Vitrinka
+/// widget above them fits its recent boards into what they leave of the
+/// column budget.
+private struct MachineWidgetsHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct RightRailsHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -101,9 +111,11 @@ private extension View {
 /// `maxHeight`. Short rails still size to their content — only a rail that
 /// would overrun the screen becomes a scroller.
 ///
-/// Internal, not fileprivate: every full-height left-column tab has to obey the
-/// same rule, and `VitrinkaDailyRail` lives in its own file. A second copy would
-/// drift into the rigid `.frame(height:)` this replaced.
+/// Internal, not fileprivate: any view file that caps a column has to obey the
+/// same rule. A second copy would drift into the rigid `.frame(height:)` this
+/// replaced. (The overview column is one of these too; its Vitrinka widget
+/// fits its recent boards to an explicit `maxHeight`, so that column only
+/// scrolls when even the widget's floor cannot fit.)
 struct ScrollColumn<Content: View>: View {
     let maxHeight: CGFloat
     @ViewBuilder var content: Content
@@ -118,10 +130,13 @@ struct ScrollColumn<Content: View>: View {
                     }
                 )
         }
+        // Content that fits must neither rubber-band nor scroll.
+        .scrollBounceBehavior(.basedOnSize)
         // Quantised for the same reason as the centre column: every write
         // re-renders the panel AND resizes the window, which re-pins it.
+        // Rounded UP: half a point short would leave fitting content scrollable.
         .onPreferenceChange(ContentHeightKey.self) { value in
-            let rounded = value.rounded()
+            let rounded = value.rounded(.up)
             if abs(rounded - measured) >= 1 { measured = rounded }
         }
         // Before the first measurement lands there is nothing to cap against —
@@ -249,7 +264,7 @@ struct StatusPanelView: View {
     /// ".t" → every todo, ".v" → every listener. Text after the mode token
     /// filters within the mode. Esc exits.
     enum PaletteMode: String, CaseIterable {
-        case todos, schedule, prod, vit, boards, issues, fans, notes, organize
+        case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate
 
         var title: String {
             switch self {
@@ -262,6 +277,10 @@ struct StatusPanelView: View {
             case .fans: "Fan deck"
             case .notes: "All notes"
             case .organize: "Organize workspaces"
+            case .work: "Today’s work"
+            case .devbox: "Devbox workspaces"
+            case .ci: "CI jobs"
+            case .estate: "Estate"
             }
         }
 
@@ -276,6 +295,10 @@ struct StatusPanelView: View {
             case .fans: "this Mac — fans, temps, vitals"
             case .notes: "scratch notes — read, edit, promote"
             case .organize: "route Warp windows to their displays — hammerspoon"
+            case .work: "vitrinka work that needs you — grouped by reason"
+            case .devbox: "every workspace — running, held, parked; verbs on hover"
+            case .ci: "running jobs, queues and failed runs across lanes"
+            case .estate: "servers and every service probe, with latency"
             }
         }
 
@@ -290,6 +313,10 @@ struct StatusPanelView: View {
             case .fans: "fanblades"
             case .notes: "square.text.square"
             case .organize: "rectangle.3.group"
+            case .work: "tray.full"
+            case .devbox: "shippingbox"
+            case .ci: "gearshape.2"
+            case .estate: "server.rack"
             }
         }
 
@@ -332,8 +359,10 @@ struct StatusPanelView: View {
         return PaletteMode.allCases.filter { token.isEmpty || $0.rawValue.hasPrefix(token) }
     }
 
-    private func enterMode(_ mode: PaletteMode) {
-        query = ".\(mode.rawValue) "
+    /// A widget opens its page pre-filtered (`.work overdue`, `.devbox pultik`)
+    /// through the same query text a typed mode uses.
+    private func enterMode(_ mode: PaletteMode, filter: String = "") {
+        query = ".\(mode.rawValue) \(filter)"
         DispatchQueue.main.async { moveCaretToEnd() }
     }
 
@@ -353,28 +382,35 @@ struct StatusPanelView: View {
         return notes.ordered.filter { $0.matches(q) }
     }
 
-    /// Active vitrinka listeners narrowed by the same query.
-    private var filteredVitrinka: [VitrinkaListening] {
-        store.vitrinkaListening.filter {
-            $0.matches(query) && !hiddenResolved.contains("vit:\($0.id)")
-        }
-    }
-
+    /// The widget draws only from a summary — the same condition it hides on.
     private var showDevbox: Bool {
-        store.isSectionVisible("devbox")
-            && (store.devboxSummary != nil || !(store.devboxWorkspaces.isEmpty && store.devboxProjects.isEmpty))
+        store.isSectionVisible("devbox") && store.devboxSummary != nil
     }
 
-    /// The left rail is devbox only since the VPS meters moved to the bottom
-    /// bar — the cards duplicated numbers the bar now carries, and cost a rail
-    /// of height to say it. It is also the first thing to fold when the screen
-    /// is too narrow for all three columns (scaled laptop displays go below
-    /// the 1240pt the full panel needs) — a hidden rail beats a window
-    /// overhanging the screen edge.
-    /// Vitrinka on top, Devbox below (spec 2026-09-09 decision 8); either
-    /// having data keeps the column alive.
+    /// The right rail's CI section: lanes reporting, or GitHub answering —
+    /// with neither there is nothing true to say, so it hides like any rail
+    /// whose backend is off the mesh.
+    private var showCIWidget: Bool {
+        let lanes = store.isSectionVisible("runners") && !store.laneBoard.isEmpty
+        let runs = store.isSectionVisible("ci") && !store.repos.isEmpty
+            && !store.repos.allSatisfy { $0.error != nil }
+        return lanes || runs
+    }
+
+    /// Mirrors `EstateWidget`'s own hide rule — off-mesh both halves are empty.
+    private var showEstateWidget: Bool {
+        (store.isSectionVisible("servers") && !store.serverMetrics.isEmpty)
+            || (store.isSectionVisible("services") && !store.serviceStatuses.isEmpty)
+    }
+
+    /// The overview column (spec 2026-09-23): any widget with data keeps it
+    /// alive. It is also the first thing to fold when the screen is too
+    /// narrow for all three columns (scaled laptop displays go below the
+    /// 1240pt the full panel needs) — a hidden column beats a window
+    /// overhanging the screen edge; every widget's page stays reachable by
+    /// typing its mode.
     private var showLeftRail: Bool {
-        guard showDevbox || showVitrinkaRail else { return false }
+        guard showVitrinkaRail || showDevbox || showEstateWidget else { return false }
         let needed: CGFloat = 680 + 280 + (showServiceRail ? 280 : 0)
         return PanelMetrics.shared.maxWidth >= needed
     }
@@ -392,10 +428,6 @@ struct StatusPanelView: View {
         RemindersRail.attentionWorthy(todoStore.reminderCandidates)
     }
 
-    private var showRunnerSlots: Bool {
-        store.isSectionVisible("runners") && !store.laneBoard.isEmpty
-    }
-
     private var showAlerts: Bool {
         store.isSectionVisible("alerts") && !store.visibleAlerts.isEmpty
     }
@@ -407,13 +439,12 @@ struct StatusPanelView: View {
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
     @State private var fanTicking = false
     @State private var presentedGeneration: Int?
-    /// The right rail carries service probes AND the CI slot queue — either
-    /// having data keeps the column alive (both come from mesh Prometheus, so
-    /// off-mesh they vanish together and the panel narrows).
+    /// The right rail carries reminders, CI, eve alerts, links and notes;
+    /// service probes moved to the overview column's Estate widget (spec
+    /// 2026-09-23 D11). CI came back here the same day (D10, amended).
     private var showServiceRail: Bool {
-        (store.isSectionVisible("services") && !store.serviceStatuses.isEmpty)
-            || showRunnerSlots
-            || showAlerts
+        showAlerts
+            || showCIWidget
             // Links, notes and reminders are local — they must be able to hold
             // the rail open on their own, or off-mesh they'd vanish with the
             // probes. The vitals dock counts too: this Mac's fans are readable
@@ -445,6 +476,9 @@ struct StatusPanelView: View {
     /// are measured on the scrollers, not the stretched HStack cells.
     @State private var leftColumnHeight: CGFloat = 0
     @State private var rightRailsHeight: CGFloat = 0
+    /// The Devbox and Estate widgets as rendered — what the Vitrinka
+    /// widget's recent boards must leave room for.
+    @State private var machineWidgetsHeight: CGFloat = 0
     /// The centre list keeps its 560pt design cap on a roomy screen and gives
     /// it up only when the screen is shorter than that — or when a side rail
     /// has already made the panel taller: the panel's height is set by its
@@ -453,39 +487,49 @@ struct StatusPanelView: View {
     /// The screen budget still wins over both. The palette and the pinned
     /// strips are stacked outside this frame, so every bound subtracts them
     /// first or the column would overrun the cap it is supposed to obey.
-    /// Full-height integration tabs share the left column.
+    /// The overview column (spec 2026-09-23): Vitrinka · Devbox · Estate in
+    /// that fixed order, hairlines only between widgets that draw. The two
+    /// machine widgets are content-sized and measured; the Vitrinka widget
+    /// gets the rest of the column budget and fits its recent boards to it,
+    /// so no split is stored. The body wraps the column in a `ScrollColumn`
+    /// capped at the SAME `columnBudget`: it scrolls only when the machines
+    /// leave Vitrinka below its floor (head + 3 recents). One-way on purpose —
+    /// machines → Vitrinka's budget → content → scroller frame; nothing
+    /// measured on the scroller may feed Vitrinka, or the two would chase.
     @ViewBuilder
     private var leftColumn: some View {
         VStack(spacing: 0) {
-            if showVitrinkaRail && showDevbox {
-                PanelTabs(
-                    tabs: [
-                        .init(id: "vitrinka", title: "Vitrinka",
-                              count: store.selectedVitrinkaWorkspace?.today.count ?? 0),
-                        .init(id: "devbox", title: "Devbox", count: store.devboxWorkspaces.count),
-                    ],
-                    selection: Binding(get: { store.leftRailTab }, set: { store.setLeftRailTab($0) }))
+            if showVitrinkaRail {
+                // Until the machine widgets have been measured, Vitrinka keeps
+                // its floor: a cold tree's first pass must not fill the whole
+                // budget with recents and hand the window an over-tall fit.
+                VitrinkaWidget(store: store, snapshots: store.vitrinkaWorkspaces,
+                               maxHeight: (showDevbox || showEstateWidget) && machineWidgetsHeight == 0 ? 0
+                                   : max(0, columnBudget - machineWidgetsHeight
+                                       - (showDevbox || showEstateWidget ? 1 : 0)),
+                               onOpenWork: { enterMode(.work, filter: $0) },
+                               onOpenBoards: { enterMode(.boards) })
+                if showDevbox || showEstateWidget { hairline }
             }
-            if showVitrinkaRail && (store.leftRailTab == "vitrinka" || !showDevbox) {
-                VitrinkaDailyRail(store: store, snapshots: store.vitrinkaWorkspaces,
-                                  maxHeight: max(80, columnBudget - 42))
-            } else if showDevbox {
-                if let summary = store.devboxSummary {
-                    MachineVitals(name: "Devbox VM", cpuCount: summary.cpus, cpuPercent: summary.cpuUsagePercent,
-                                  memoryUsed: summary.memoryTotalBytes - summary.memoryAvailableBytes,
-                                  memoryTotal: summary.memoryTotalBytes,
-                                  diskUsed: summary.diskUsedBytes, diskTotal: summary.diskTotalBytes)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+            VStack(spacing: 0) {
+                if showDevbox {
+                    DevboxWidget(store: store, onOpen: { enterMode(.devbox, filter: $0) })
+                    if showEstateWidget { hairline }
                 }
-                ScrollColumn(maxHeight: max(80, columnBudget - 96)) {
-                    DevboxRail(store: store,
-                               workspaces: store.devboxWorkspaces,
-                               projects: store.devboxProjects,
-                               summary: store.devboxSummary,
-                               fetchedAt: store.devboxFetchedAt)
+                if showEstateWidget {
+                    // Estate carries no outer padding of its own (it grew out
+                    // of a padded rail section); the column gives it the same
+                    // 10pt the Devbox and Vitrinka widgets keep.
+                    EstateWidget(store: store, onOpen: { enterMode(.estate, filter: $0) })
+                        .padding(10)
                 }
             }
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: MachineWidgetsHeightKey.self,
+                                           value: proxy.size.height)
+                }
+            )
         }
     }
 
@@ -500,7 +544,9 @@ struct StatusPanelView: View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
                 if showLeftRail {
-                    leftColumn
+                    ScrollColumn(maxHeight: columnBudget) {
+                        leftColumn
+                    }
                     .background(
                         GeometryReader { proxy in
                             Color.clear.preference(key: LeftColumnHeightKey.self,
@@ -584,6 +630,13 @@ struct StatusPanelView: View {
         .onPreferenceChange(RightRailsHeightKey.self) { value in
             let rounded = value.rounded()
             if abs(rounded - rightRailsHeight) >= 1 { rightRailsHeight = rounded }
+        }
+        .onPreferenceChange(MachineWidgetsHeightKey.self) { value in
+            // Rounded UP: Vitrinka fits into the budget less this, and the
+            // column's scroller caps at that same budget — half a point
+            // under would leave an exactly-fitting column scrollable.
+            let rounded = value.rounded(.up)
+            if abs(rounded - machineWidgetsHeight) >= 1 { machineWidgetsHeight = rounded }
         }
         .onPreferenceChange(CentreChromeKey.self) { value in
             let rounded = value.rounded()
@@ -718,12 +771,6 @@ struct StatusPanelView: View {
     /// eight indentation levels deep in the body.
     private var railsColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if store.isSectionVisible("services") && !store.serviceStatuses.isEmpty {
-                RailSection(key: "services", title: "Services") {
-                    ServiceRail(statuses: store.serviceStatuses,
-                                hostOrder: store.serverNames)
-                }
-            }
             if !reminders.isEmpty {
                 RailSection(key: "reminders", title: "Reminders",
                             count: reminders.count,
@@ -733,29 +780,28 @@ struct StatusPanelView: View {
                     RemindersRail(todos: reminders)
                 }
             }
-            if showRunnerSlots {
-                // The Grafana escape hatch used to live on this
-                // rail's kicker; the kicker is now RailSection's
-                // collapse control, so the link becomes an
-                // accessory rather than being lost.
+            if showCIWidget {
+                // Back in the rail on user direction (D10, amended): the
+                // header folds it like every rail section — key `runners`
+                // keeps the collapse state it always had — so the page is
+                // an accessory beside it rather than the kicker's action.
+                let ci = CIWidget(store: store, onOpen: { enterMode(.ci, filter: $0) })
                 RailSection(
-                    key: "runners", title: "CI · lanes",
-                    count: store.laneBoard.running,
+                    key: "runners", title: "CI", count: ci.running,
                     accessory: AnyView(
-                        Button {
-                            if let url = URL(string: "https://runners.ops.example.invalid") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        } label: {
-                            Image(systemName: "chart.xyaxis.line")
-                                .font(.system(size: 9))
+                        Button { enterMode(.ci) } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 7, weight: .bold))
                                 .foregroundStyle(.tertiary)
+                                .frame(width: 12, height: 12)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("BuildServer JIT lane fleet — Grafana runners dashboard")
+                        .help("Open every CI job — .ci")
+                        .accessibilityLabel("Open every CI job")
                     )
                 ) {
-                    LaneRail(board: store.laneBoard)
+                    ci
                 }
             }
             if showAlerts {
@@ -1110,6 +1156,8 @@ struct StatusPanelView: View {
                 if let note = modeNotes(filter).first { toggleNote(note) }
             case .fans:
                 break // the deck is controls, not a result list — ↵ is a no-op
+            case .work, .devbox, .ci, .estate:
+                break // overview pages are mouse-first (spec 2026-09-23) — ↵ is a no-op
             case .organize:
                 // Bare ↵ runs "default" (names() sorts it first); unmatched
                 // text runs literally — the Lua engine may know layouts the
@@ -1236,7 +1284,7 @@ struct StatusPanelView: View {
                         toggleNote(note)
                     }
                 }
-            case .fans:
+            case .fans, .work, .devbox, .ci, .estate:
                 return []
             case .organize:
                 return modeOrganize(filter).map { name in
@@ -1273,7 +1321,7 @@ struct StatusPanelView: View {
         }
         guard !(store.pinned.isEmpty && query.isEmpty) else { return items }
         // Matching the visual order exactly: PRs in fixed repo order, todos,
-        // listeners, archive, then the pinned strips at the foot — prod, links.
+        // archive, then the pinned strips at the foot — prod, links.
         for entry in filteredInbox {
             items.append(PaletteItem(id: "pr:\(entry.id)") {
                 Self.open(entry.info.pr.htmlUrl)
@@ -1281,9 +1329,6 @@ struct StatusPanelView: View {
         }
         for todo in filteredTodos {
             items.append(PaletteItem(id: "todo:\(todo.id)") { todo.open() })
-        }
-        for entry in filteredVitrinka {
-            items.append(PaletteItem(id: "vit:\(entry.id)") { entry.open() })
         }
         if searchActive {
             for pr in store.searchMatches {
@@ -1394,6 +1439,14 @@ struct StatusPanelView: View {
             OrganizePageView(layouts: modeOrganize(filter),
                              isSelected: { isSelected($0) },
                              onRun: { runOrganize($0) }) { query = "" }
+        case .work:
+            WorkPage(store: store, filter: filter) { query = "" }
+        case .devbox:
+            DevboxPage(store: store, filter: filter) { query = "" }
+        case .ci:
+            CIPage(store: store, filter: filter) { query = "" }
+        case .estate:
+            EstatePage(store: store, filter: filter) { query = "" }
         }
     }
 
@@ -1882,7 +1935,7 @@ struct StatusPanelView: View {
                 || !store.searchMatches.isEmpty || !store.sentryMatches.isEmpty)
             {
                 EmptyView()
-            } else if filteredTodos.isEmpty && filteredVitrinka.isEmpty && filteredNotes.isEmpty {
+            } else if filteredTodos.isEmpty && filteredNotes.isEmpty {
                 Text(query.isEmpty
                     ? "no open PRs"
                     : "no matches")
@@ -1891,10 +1944,9 @@ struct StatusPanelView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 20)
             }
-            // No PRs doesn't mean nothing to show — todos and listeners
-            // keep their sections.
+            // No PRs doesn't mean nothing to show — todos keep their
+            // section. Live sessions are the overview column's (D9).
             todosSection
-            vitrinkaSection
         } else {
             // Fixed order (2026-07-29): one section per repo, always in the
             // same sequence (preferences.repoOrder, rest by recency) — the
@@ -1906,7 +1958,6 @@ struct StatusPanelView: View {
                     repoSection(group)
                 }
                 todosSection
-                vitrinkaSection
             }
         }
     }
@@ -1977,28 +2028,6 @@ struct StatusPanelView: View {
                 TodoRow(todo: todo, selected: isSelected("todo:\(todo.id)"))
                     .opacity(resolvedStore.isResolved("todo:\(todo.id)") ? 0.35 : 1)
                     .id("todo:\(todo.id)")
-            }
-        }
-    }
-
-    // MARK: - Vitrinka listeners (main list section)
-
-    /// Boards a Claude Code session is currently tuned into — the same data
-    /// as the rail, in the wide palette-navigable idiom the inbox uses.
-    @ViewBuilder
-    private var vitrinkaSection: some View {
-        let entries = filteredVitrinka
-        if !entries.isEmpty {
-            Kicker(text: "🧷 Vitrinka", count: entries.count,
-                   action: { enterMode(.vit) },
-                   actionHelp: "Open all active Vitrinka listeners")
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-                .padding(.bottom, 2)
-            ForEach(entries) { entry in
-                VitrinkaListRow(entry: entry, selected: isSelected("vit:\(entry.id)"))
-                    .opacity(resolvedStore.isResolved("vit:\(entry.id)") ? 0.35 : 1)
-                    .id("vit:\(entry.id)")
             }
         }
     }

@@ -17,17 +17,17 @@ import Foundation
 actor DevboxClient {
     static let shared = DevboxClient()
 
-    /// The VM-backed Devbox guest, addressed EXPLICITLY rather than through
-    /// the `devops` ~/.ssh/config alias. Bypassing the alias is the point,
-    /// not a shortcut: with `IdentitiesOnly=yes` ssh still offers every
-    /// identity the matched config block configures, so going through
-    /// `devops` would offer the full-shell key alongside the dedicated one
-    /// and whichever authenticated first would silently decide whether the
-    /// forced-command dispatcher applies. The guest is mesh-only and logs in
-    /// as the unprivileged `devbox` user; off the VPN the probe fails fast
-    /// and ProbeGate holds it rather than repeatedly hitting sshd.
-    private let sshDestination = "devbox@192.0.2.11"
-    private let sshPort = "2222"
+    // Every VM-backed Devbox guest is addressed EXPLICITLY — the
+    // `DevboxEndpoint`'s host:port, resolved once by discovery — rather than
+    // through its `devops`/`devops-b` ~/.ssh/config alias. Bypassing the
+    // alias is the point, not a shortcut: with `IdentitiesOnly=yes` ssh
+    // still offers every identity the matched config block configures, so
+    // going through the alias would offer the full-shell key alongside the
+    // dedicated one and whichever authenticated first would silently decide
+    // whether the forced-command dispatcher applies. Each guest is mesh-only
+    // and logs in as the unprivileged `devbox` user; off the VPN the probe
+    // fails fast and ProbeGate holds that box rather than repeatedly
+    // hitting its sshd.
 
     /// Pultík's dedicated Devbox identity. Its authorized_keys line on the
     /// guest carries `command=/usr/local/bin/pultik-dispatch,restrict`, so
@@ -157,7 +157,9 @@ actor DevboxClient {
     /// Runs a configured child with bounded wall time and concurrent stdout /
     /// stderr drains. Keeping this primitive shared prevents the fast local
     /// discovery pass from becoming less safe than the network subprocess.
-    private func execute(
+    /// Nonisolated: it touches no actor state, and one box's 30-second poll
+    /// must never queue another box's behind it on this actor.
+    private nonisolated func execute(
         _ process: Process, timeout: Int, outputLimit: Int = 4 * 1024 * 1024
     ) -> Result {
         let out = Pipe(), err = Pipe()
@@ -241,10 +243,13 @@ actor DevboxClient {
     /// local manifests into running state.
     private let workspaceSnapshotCommand = "devbox overview --json"
 
-    /// Runs ssh and returns its output. Never throws — every caller here would
-    /// only turn a throw straight back into "rail hides", and a menu-bar app
-    /// must not surface a modal because a laptop is off the network.
-    private func ssh(_ remoteCommand: String, timeout: Int = 15) -> Result {
+    /// Runs ssh against one box and returns its output. Never throws — every
+    /// caller here would only turn a throw straight back into "rail hides",
+    /// and a menu-bar app must not surface a modal because a laptop is off
+    /// the network.
+    private nonisolated func ssh(
+        _ remoteCommand: String, on box: DevboxEndpoint, timeout: Int = 15
+    ) -> Result {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/ssh")
         var args = [
@@ -260,9 +265,9 @@ actor DevboxClient {
             "-o", "IdentitiesOnly=yes",
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=8",
-            // NOT accept-new. This box's key is already pinned in known_hosts,
-            // so trust-on-first-use buys nothing and would silently accept
-            // whoever answers on 192.0.2.11 if the mesh were ever spoofed. A
+            // NOT accept-new. Each box's key is pinned in known_hosts under
+            // its [host]:port, so trust-on-first-use buys nothing and would
+            // silently accept whoever answers there if the mesh were ever spoofed. A
             // legitimate host-key rotation should stop Pultík and make the
             // user look, not be waved through by a background poller.
             "-o", "StrictHostKeyChecking=yes",
@@ -270,9 +275,9 @@ actor DevboxClient {
             // otherwise leaves ssh reading forever — and refreshDevbox with it.
             "-o", "ServerAliveInterval=5",
             "-o", "ServerAliveCountMax=2",
-            "-p", sshPort,
+            "-p", String(box.port),
         ]
-        args += [sshDestination, remoteCommand]
+        args += [box.destination, remoteCommand]
         process.arguments = args
 
         // The keepalives cover dead connections; the shared deadline covers a
@@ -307,7 +312,7 @@ actor DevboxClient {
     /// Runs the Mac-side transport for verbs that may need GitHub access. The
     /// driver owns token minting and passes credentials only for the lifetime
     /// of its SSH connection; Pultík never reads or stores them.
-    private func localDevbox(
+    private nonisolated func localDevbox(
         _ arguments: [String], timeout: Int, currentDirectory: URL? = nil
     ) -> Result {
         let executable = FileManager.default.homeDirectoryForCurrentUser
@@ -320,6 +325,50 @@ actor DevboxClient {
         process.arguments = arguments
         if let currentDirectory { process.currentDirectoryURL = currentDirectory }
         return execute(process, timeout: timeout)
+    }
+
+    // MARK: - Box discovery (one devbox over several guests)
+
+    /// Every box the Mac CLI would route to — `devbox boxes --json`, state
+    /// not `off` — with each one's forced-command endpoint read from
+    /// `ssh -G <alias>`. nil when there is no usable answer (an older CLI
+    /// without the verb, a failed envelope, no box resolving); the caller
+    /// keeps its last good list. The payload is the verdict, not the exit
+    /// status: an unreachable box still leaves `ok: true` with a warning.
+    nonisolated func discoverBoxes() async -> [DevboxEndpoint]? {
+        let result = localDevbox(["boxes", "--json"], timeout: 30)
+        guard let candidates = DevboxDiscovery.candidates(fromBoxesJSON: Data(result.stdout.utf8)) else {
+            NSLog("pultik: devbox box discovery gave no usable answer: %@",
+                  result.stderr.isEmpty ? String(result.stdout.prefix(200)) : result.stderr)
+            return nil
+        }
+        // Concurrently, registry order kept: one slow alias costs its own
+        // five seconds, not every box's after it.
+        let endpoints = await withTaskGroup(of: (Int, DevboxEndpoint?).self) { group in
+            for (index, candidate) in candidates.enumerated() {
+                group.addTask { (index, self.resolveEndpoint(candidate)) }
+            }
+            var resolved = [DevboxEndpoint?](repeating: nil, count: candidates.count)
+            for await (index, endpoint) in group { resolved[index] = endpoint }
+            return resolved.compactMap { $0 }
+        }
+        return endpoints.isEmpty ? nil : endpoints
+    }
+
+    private nonisolated func resolveEndpoint(_ candidate: DevboxDiscovery.Candidate) -> DevboxEndpoint? {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/ssh")
+        // `-G` only prints the resolved config; it opens no connection.
+        // Only hostname and port are read from it — the poll's identity
+        // flags stay the null-config ones in `ssh(_:on:timeout:)`.
+        process.arguments = ["-G", candidate.sshAlias]
+        let resolved = execute(process, timeout: 5)
+        guard resolved.ok else {
+            NSLog("pultik: ssh -G %@ failed: %@", candidate.sshAlias,
+                  resolved.stderr.isEmpty ? "no output" : resolved.stderr)
+            return nil
+        }
+        return DevboxDiscovery.endpoint(for: candidate, sshConfig: resolved.stdout)
     }
 
     // MARK: - Read
@@ -337,8 +386,8 @@ actor DevboxClient {
     /// probe that speaks to sshd, so a failing poll is a repeated
     /// authentication attempt — the exact pattern fail2ban bans on. The caller
     /// feeds the classification to `ProbeGate`, which stops the polling.
-    func status() async -> ProbeResult<[DevboxProject]> {
-        let result = ssh("devbox status --json")
+    nonisolated func status(_ box: DevboxEndpoint) async -> ProbeResult<[DevboxProject]> {
+        let result = ssh("devbox status --json", on: box)
 
         // The PAYLOAD is the verdict, not the exit status. `devbox status`
         // exits 128 on a box with no slots — a git call inside it fails — while
@@ -356,7 +405,7 @@ actor DevboxClient {
             // WHY must land somewhere — a silent [] made "sidebar gone" an
             // undiagnosable mystery.
             let stderr = result.stderr.isEmpty ? "no output" : result.stderr
-            NSLog("pultik: devbox status failed: %@", stderr)
+            NSLog("pultik: devbox status (box %@) failed: %@", box.name, stderr)
             return .failed(Self.classify(stderr))
         }
         // The box answered and we could not read it: our bug or a devbox
@@ -369,16 +418,6 @@ actor DevboxClient {
     }
 
     // MARK: - Hub (the rail's one-call feed)
-
-    /// Everything the devbox rail renders, in one ssh round-trip.
-    /// `generated` is the BOX-side stamp — nil when no payload carried one,
-    /// never fabricated from local time.
-    struct Hub {
-        let generated: Date?
-        let workspaces: [DevboxWorkspace]
-        let projects: [DevboxProject]
-        let summary: DevboxOverviewSummary
-    }
 
     private struct OverviewResourcesPayload: Codable {
         let cpus: Int
@@ -427,6 +466,8 @@ actor DevboxClient {
 
     private struct OverviewPayload: Codable {
         let schema: String
+        /// The guest's own name (spec 2026-09-25); absent on older guests.
+        let box: String?
         let generated: String
         let capacity: DevboxOverviewCapacity
         let resources: OverviewResourcesPayload
@@ -495,12 +536,21 @@ actor DevboxClient {
     /// `status()` stays the cheap one-request way back in for the breaker.
     ///
     /// Same payload-is-the-verdict rule as `status()`: exit codes lie.
-    func hub() async -> ProbeResult<Hub> {
-        let result = ssh(workspaceSnapshotCommand, timeout: 30)
+    /// Rows come back untagged; `DevboxEstate` stamps them with `box`.
+    nonisolated func hub(_ box: DevboxEndpoint) async -> ProbeResult<DevboxSnapshot> {
+        let result = ssh(workspaceSnapshotCommand, on: box, timeout: 30)
         if let data = result.stdout.data(using: .utf8),
            let payload = try? JSONDecoder().decode(OverviewPayload.self, from: data),
            payload.schema == "devbox.overview/v1"
         {
+            // An alias pointing at the wrong guest would count one box twice
+            // and act on the wrong copy. It will not fix itself, so it backs
+            // off like any other refusal. Older guests name no box.
+            if let named = payload.box, named != box.name {
+                NSLog("pultik: devbox endpoint %@ (%@:%d) answered as box %@",
+                      box.name, box.host, box.port, named)
+                return .failed(.rejected("endpoint for box \(box.name) answered as box \(named)"))
+            }
             let iso = ISO8601DateFormatter()
             let workspaces = payload.workspaces.compactMap { row -> DevboxWorkspace? in
                 guard DevboxName.isValid(row.name) else { return nil }
@@ -554,9 +604,10 @@ actor DevboxClient {
             }
             let capacity = payload.capacity
             let resources = payload.resources
-            return .value(Hub(
+            return .value(DevboxSnapshot(
+                endpoint: box,
                 generated: iso.date(from: payload.generated),
-                workspaces: workspaces, projects: [],
+                workspaces: workspaces,
                 summary: DevboxOverviewSummary(
                     identitySlots: capacity.identitySlots, targetHot: capacity.targetHot,
                     hotCeiling: capacity.hotCeiling ?? capacity.targetHot,
@@ -580,7 +631,7 @@ actor DevboxClient {
 
         guard result.ok else {
             let stderr = result.stderr.isEmpty ? "no output" : result.stderr
-            NSLog("pultik: devbox hub failed: %@", stderr)
+            NSLog("pultik: devbox hub (box %@) failed: %@", box.name, stderr)
             return .failed(Self.classify(stderr))
         }
         // The host answered, but this composite snapshot is incomplete. It
@@ -801,37 +852,57 @@ actor DevboxClient {
         return result.ok
     }
 
+    /// Legacy slot stop over the forced-command key — on the box that owns
+    /// the slot, never a default one.
     @discardableResult
-    func down(project: String, slug: String?) async -> Bool {
+    nonisolated func down(project: String, slug: String?, on box: DevboxEndpoint) async -> Bool {
         guard let command = DevboxName.command("devbox down", project, slug) else { return false }
-        return ssh(command).ok
+        return ssh(command, on: box).ok
     }
 
     // MARK: - ws-v2 lifecycle (park / hold / unhold / up)
 
-    /// Which Mac-side verbs the card may run. `down` and `gc` are deliberately
-    /// absent: parking is the reversible stop, and the HUD never offers the
-    /// destructive ones. The forced-command dispatcher behind `ssh()` does
+    /// Which Mac-side verbs the card may run. `down` is deliberately absent:
+    /// parking is the reversible stop. `reap` is the one teardown the HUD
+    /// offers (2026-09-14, "clear" on a parked card): it refuses a workspace
+    /// whose branch is still alive, so the worst a stray click can do is
+    /// fail loudly. The forced-command dispatcher behind `ssh()` does
     /// not know these verbs, and adding them there would hand the dashboard
     /// key a lifecycle it does not need — the Mac-side driver already owns
     /// `up` for the same reason (it syncs and mints), so the three cheap
     /// verbs ride the same executable.
     enum WorkspaceVerb: String {
-        case park, hold, unhold
+        case park, hold, unhold, reap
     }
 
-    /// `devbox park|hold|unhold <ws>`. None of them resolves the cwd; the
-    /// driver forwards the verb to the box by name.
+    /// `devbox park|hold|unhold|reap <ws>`. None of them resolves the cwd; the
+    /// driver forwards the verb to the box by name. Reap tears a workspace
+    /// down on the box, so it gets the long timeout.
     @discardableResult
     func run(_ verb: WorkspaceVerb, workspace: String) async -> Bool {
         guard DevboxName.isValid(workspace) else {
             NSLog("pultik: refusing devbox %@ — unsafe workspace name", verb.rawValue)
             return false
         }
-        let result = localDevbox([verb.rawValue, workspace], timeout: 90)
+        let result = localDevbox([verb.rawValue, workspace], timeout: verb == .reap ? 300 : 90)
         if !result.ok {
             NSLog("pultik: devbox %@ %@ failed: %@", verb.rawValue, workspace,
                   result.stderr.isEmpty ? "no output" : result.stderr)
+        }
+        return result.ok
+    }
+
+    /// `devbox gc --retire-stale` — the rail-level "clear": reap every
+    /// workspace whose branch is merged or gone and whose Mac worktree is
+    /// gone, and retire inactive, unheld ones sitting at a clean merged HEAD
+    /// (their worktrees and persistent data are kept). Hand-written
+    /// workspaces carry no `.ws-meta` and are never touched; a live branch is
+    /// never reaped. Several workspaces in one pass can take a while.
+    @discardableResult
+    func gc() async -> Bool {
+        let result = localDevbox(["gc", "--retire-stale"], timeout: 600)
+        if !result.ok {
+            NSLog("pultik: devbox gc failed: %@", result.stderr.isEmpty ? "no output" : result.stderr)
         }
         return result.ok
     }
@@ -861,42 +932,13 @@ actor DevboxClient {
     }
 }
 
-/// Project names and slot slugs arrive in `devbox status --json` — over the
-/// network, from a machine — and end up interpolated into shell commands. One
-/// of those shells runs on THIS Mac (the Warp launch config), so a crafted
-/// payload would be remote JSON turning into local code execution.
-///
-/// They are VALIDATED, not escaped. Every name devbox mints is
-/// `[A-Za-z0-9._-]`, so anything else is refused outright — "quote it
-/// cleverly" is the approach that eventually loses.
-enum DevboxName {
-    static func isValid(_ value: String) -> Bool {
-        !value.isEmpty
-            && value.count <= 64
-            && value.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil
-    }
-
-    /// "devbox up" + project + optional slug, or nil if either is unsafe.
-    static func command(_ verb: String, _ project: String, _ slug: String?) -> String? {
-        guard isValid(project) else {
-            NSLog("pultik: refusing devbox command — unsafe project name")
-            return nil
-        }
-        guard let slug, !slug.isEmpty else { return "\(verb) \(project)" }
-        guard isValid(slug) else {
-            NSLog("pultik: refusing devbox command — unsafe slug")
-            return nil
-        }
-        return "\(verb) \(project) \(slug)"
-    }
-}
-
 // MARK: - Local launchers
 
 /// Actions that run on THIS Mac against a remote slot.
 enum DevboxLauncher {
     /// Interactive attachment deliberately KEEPS the full-shell `devops`
-    /// alias: a human shell cannot run under the forced-command dispatcher
+    /// alias (a workspace attach uses its own box's alias, e.g. `devops-b`):
+    /// a human shell cannot run under the forced-command dispatcher
     /// that `DevboxClient`'s dedicated identity is bound to, and Warp runs
     /// these commands as the user, not as Pultík.
     private static let host = "devops"
@@ -978,11 +1020,13 @@ enum DevboxLauncher {
     }
 
     /// Opens the native workspace viewer in Warp. Unlike the legacy tenant
-    /// shell launcher, this attaches the whole multi-repo/systemd/Compose unit.
+    /// shell launcher, this attaches the whole multi-repo/systemd/Compose unit
+    /// — through the full-shell alias of the box the row lives on.
     @MainActor
-    static func summonWorkspaceWarp(_ workspace: String) {
-        guard DevboxName.isValid(workspace) else {
-            NSLog("pultik: refusing Warp workspace with unsafe name")
+    static func summonWorkspaceWarp(_ workspace: String, on box: DevboxEndpoint?) {
+        let alias = (box ?? .fallback).sshAlias
+        guard DevboxName.isValid(workspace), DevboxDiscovery.isSafeWord(alias) else {
+            NSLog("pultik: refusing Warp workspace with unsafe name or alias")
             return
         }
         let name = "devbox-workspace-\(workspace)"
@@ -998,7 +1042,7 @@ enum DevboxLauncher {
                   - layout:
                       cwd: \(home.path)
                       commands:
-                        - exec: ssh -t \(host) 'devbox ws attach \(workspace)'
+                        - exec: ssh -t \(alias) 'devbox ws attach \(workspace)'
             """
             try yaml.write(to: dir.appending(path: "\(name).yaml"), atomically: true, encoding: .utf8)
         } catch {

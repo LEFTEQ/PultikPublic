@@ -175,8 +175,10 @@ final class StatusPanel: NSPanel {
             guard let self, let size = self.pendingSize else { return }
             self.pendingSize = nil
             var target = self.frame
+            // Already that size — AppKit may have resized it first, top-left
+            // fixed — but it still has to sit where the pin says.
             guard abs(target.width - size.width) >= 0.5
-                || abs(target.height - size.height) >= 0.5 else { return }
+                || abs(target.height - size.height) >= 0.5 else { self.applyPin(); return }
             // Resize from the bottom edge: the top (search bar) stays put.
             target.origin.y = target.maxY - size.height
             target.size = size
@@ -264,10 +266,63 @@ final class StatusPanel: NSPanel {
                height: min(size.height, PanelMetrics.shared.maxHeight))
     }
 
+    /// Every frame write passes the backstop, whoever makes it. The window
+    /// was seen resized past both writers above — top-left fixed, unclamped,
+    /// never re-pinned (2026-09-23: 1265pt on a 1215pt working area, still at
+    /// the x of a 960pt-wide pin, its footer under the Dock) — most likely
+    /// AppKit sizing it from the hosting view's required edge pins inside its
+    /// own layout pass. Pure on purpose: the rect is capped and placed
+    /// from `pin` exactly as `applyPin` would place it, so this never starts
+    /// a second frame change for a layout pass to feed on (the 2026-07-27
+    /// NSISEngine overflow). No pin yet (prewarm) → capped, not placed.
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(constrainedToWorkingArea(frameRect), display: flag)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display displayFlag: Bool, animate animateFlag: Bool) {
+        super.setFrame(constrainedToWorkingArea(frameRect), display: displayFlag, animate: animateFlag)
+    }
+
+    private func constrainedToWorkingArea(_ rect: NSRect) -> NSRect {
+        let size = clampedToScreen(rect.size)
+        guard let topLeft = pinnedTopLeft(for: size) else {
+            return NSRect(x: rect.minX, y: rect.maxY - size.height, width: size.width, height: size.height)
+        }
+        return NSRect(x: topLeft.x, y: topLeft.y - size.height, width: size.width, height: size.height)
+    }
+
+    /// Where the pin puts a window of `size`, kept inside the working area.
+    private func pinnedTopLeft(for size: NSSize) -> NSPoint? {
+        var target: NSPoint
+        switch pin {
+        case .topLeft(let point):
+            target = point
+        case .topCenter(let point):
+            target = NSPoint(x: point.x - size.width / 2, y: point.y)
+        case nil:
+            return nil
+        }
+        // A tall panel slides UP rather than off the bottom edge: the centered
+        // summon's top sits 20% down the screen, which is not room enough for a
+        // full-height hub. Height is already clamped to the working area, so
+        // the lower bound can never rise above the menu bar.
+        if let vf = (pinScreen ?? NSScreen.main)?.visibleFrame {
+            let lowestTop = vf.minY + PanelMetrics.margin + size.height
+            target.y = min(max(target.y, lowestTop), vf.maxY)
+            // Same backstop horizontally: width is clamped to the working
+            // area, so keeping the left edge on-screen keeps all of it
+            // on-screen. The max runs last — a panel at the width limit
+            // prefers its leading edge visible.
+            target.x = max(min(target.x, vf.maxX - PanelMetrics.margin - size.width),
+                           vf.minX + PanelMetrics.margin)
+        }
+        return target
+    }
+
     /// Re-assert the top pin after any content-driven resize.
     ///
-    /// Both guards below exist because this runs from `didResizeNotification`
-    /// and itself moves the window: SwiftUI resizes the hosting view from
+    /// Both guards below date from when this ran from `didResizeNotification`
+    /// and itself moved the window: SwiftUI resizes the hosting view from
     /// inside the window's own layout pass (`NSHostingView.updateAnimatedWindowSize`
     /// → `_setFrameCommon` → layout → render → …), so an unguarded re-pin feeds
     /// that cycle. It ran away while eve was streaming a reply — every token
@@ -275,30 +330,7 @@ final class StatusPanel: NSPanel {
     /// thread's stack (`___chkstk_darwin` inside `NSISEngine`, SIGSEGV
     /// 2026-07-27 09:20).
     private func applyPin() {
-        guard !isPinning else { return }
-        var target: NSPoint
-        switch pin {
-        case .topLeft(let point):
-            target = point
-        case .topCenter(let point):
-            target = NSPoint(x: point.x - frame.width / 2, y: point.y)
-        case nil:
-            return
-        }
-        // A tall panel slides UP rather than off the bottom edge: the centered
-        // summon's top sits 20% down the screen, which is not room enough for a
-        // full-height hub. Height is already clamped to the working area, so
-        // the lower bound can never rise above the menu bar.
-        if let vf = (pinScreen ?? NSScreen.main)?.visibleFrame {
-            let lowestTop = vf.minY + PanelMetrics.margin + frame.height
-            target.y = min(max(target.y, lowestTop), vf.maxY)
-            // Same backstop horizontally: width is clamped to the working
-            // area, so keeping the left edge on-screen keeps all of it
-            // on-screen. The max runs last — a panel at the width limit
-            // prefers its leading edge visible.
-            target.x = max(min(target.x, vf.maxX - PanelMetrics.margin - frame.width),
-                           vf.minX + PanelMetrics.margin)
-        }
+        guard !isPinning, let target = pinnedTopLeft(for: frame.size) else { return }
         // A no-op move still posts didResize, which lands back here.
         let current = NSPoint(x: frame.minX, y: frame.maxY)
         guard abs(current.x - target.x) >= 0.5 || abs(current.y - target.y) >= 0.5 else { return }

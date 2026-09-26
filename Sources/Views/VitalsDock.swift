@@ -16,35 +16,23 @@ import SwiftUI
 ///
 /// The dock lives OUTSIDE the rail's ScrollView and is not collapsible: it is
 /// the one thing that must be legible without a prior decision about it.
+///
+/// Since 2026-09-23 (spec D2/D11) the estate tier lives in the overview
+/// column's Estate widget; the dock is this Mac alone.
 struct VitalsDock: View {
     let store: StatusStore
     let fanStore: FanStore
 
-    /// Off-mesh the estate tier is empty and only the Mac tier renders — the
-    /// rail-hides-when-unreachable law, applied within one card.
-    private var showEstate: Bool {
-        store.isSectionVisible("servers") && !store.serverMetrics.isEmpty
-    }
     private var showMac: Bool {
         store.isSectionVisible("fans") && (fanStore.hottest != nil || !fanStore.fans.isEmpty)
     }
 
     var body: some View {
-        if showMac || showEstate {
+        if showMac {
             VStack(alignment: .leading, spacing: 0) {
                 Rectangle().fill(Theme.hairline).frame(height: 1)
-                VStack(alignment: .leading, spacing: 7) {
-                    if showMac {
-                        MacTier(fanStore: fanStore)
-                    }
-                    if showMac && showEstate {
-                        Rectangle().fill(Theme.hairline).frame(height: 1)
-                    }
-                    if showEstate {
-                        EstateTier(metrics: store.serverMetrics)
-                    }
-                }
-                .padding(10)
+                MacTier(fanStore: fanStore)
+                    .padding(10)
             }
             .background(.white.opacity(0.02))
         }
@@ -115,6 +103,17 @@ private struct MacTier: View {
                           text: "\(fastest.currentRPM)×\(fanStore.fans.count)",
                           tone: fanTone(fastest), help: allFansHelp)
                 }
+                if let load = fanStore.cpuLoad {
+                    Vital(symbol: "cpu", text: "\(Int((load * 100).rounded()))%",
+                          tone: percentTone(load * 100), help: "CPU load, all cores")
+                }
+                if let mem = fanStore.memUsedFraction {
+                    // memTone, not percentTone: used-% over-alarms on a healthy
+                    // Mac where inactive pages keep "used" high while kernel
+                    // pressure is nominal.
+                    Vital(symbol: "memorychip", text: "\(Int((mem * 100).rounded()))%",
+                          tone: memTone(fanStore, percent: mem * 100), help: memHelp)
+                }
                 Spacer(minLength: 0)
             }
             .lineLimit(1)
@@ -125,12 +124,6 @@ private struct MacTier: View {
             // to hang it on, and that is exactly a machine whose thermal
             // pressure you would want to know about.
             .help(thermalHelp)
-            MachineVitals(cpuCount: ProcessInfo.processInfo.activeProcessorCount,
-                          cpuPercent: fanStore.cpuLoad.map { $0 * 100 },
-                          memoryUsed: fanStore.memUsedBytes, memoryTotal: fanStore.memTotalBytes,
-                          diskUsed: fanStore.diskTotalBytes.flatMap { total in fanStore.diskFreeBytes.map { Double(total - $0) } },
-                          diskTotal: fanStore.diskTotalBytes.map(Double.init))
-                .padding(.horizontal, 2)
         }
     }
 
@@ -150,6 +143,11 @@ private struct MacTier: View {
         fanStore.fans.map(fanHelp).joined(separator: " · ")
     }
 
+    private var memHelp: String {
+        guard let used = fanStore.memUsedBytes else { return "Memory used" }
+        return String(format: "Memory %.1f / %.0f GB", used / 1e9, fanStore.memTotalBytes / 1e9)
+    }
+
     /// The OS thermal state used to have its own cell ("warm"/"hot"). The
     /// numbers already say it and the row must stay one line, so it lives on
     /// the tier's tooltip now (2026-08-29).
@@ -160,58 +158,6 @@ private struct MacTier: View {
         case .critical: "macOS thermal pressure: critical — the OS is throttling"
         default: ""
         }
-    }
-}
-
-// MARK: - Tier 2: the estate
-
-/// One row per box, through the same `MachineVitals` grammar the Mac and the
-/// Devbox guest use — so cpu / ram / disk read identically on every machine.
-private struct EstateTier: View {
-    let metrics: [ServerMetrics]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Kicker(text: "Estate")
-                .padding(.horizontal, 2)
-                .padding(.bottom, 1)
-            ForEach(metrics) { server in
-                MachineVitals(name: server.name, cpuCount: server.cpuCount, cpuPercent: server.cpu,
-                              memoryUsed: server.ramUsedBytes, memoryTotal: server.ramTotalBytes,
-                              diskUsed: server.diskUsedBytes, diskTotal: server.diskTotalBytes)
-                .padding(.horizontal, 2)
-                .padding(.vertical, 3)
-            }
-        }
-    }
-}
-
-// MARK: - Shared vital cell
-
-/// Icon + number, tinted by a tone the caller has already chosen — a fan's tone
-/// comes from its own min/max, not from a percentage. The estate tier's
-/// percentage-tiered variant retired with its fixed columns; `MachineVitals`
-/// owns that row now, and `percentTone` owns the scale.
-private struct Vital: View {
-    let symbol: String
-    let text: String
-    let tone: Color
-    var help: String?
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol)
-                .font(.system(size: 9))
-                .frame(width: 10)
-            Text(text)
-                .font(.system(size: 9.5, design: .monospaced))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .foregroundStyle(tone)
-        .help(help ?? "")
     }
 }
 
