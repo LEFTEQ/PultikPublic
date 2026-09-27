@@ -38,6 +38,11 @@ final class StatusStore {
     var serverMetrics: [ServerMetrics] = []
     var serviceStatuses: [ServiceStatus] = []
     var laneBoard = CILaneBoard()
+    /// Semafor's `/overview`, refreshed at most every `throughputInterval`
+    /// inside the pool's breaker; nil whenever Semafor is not answering.
+    var ciThroughput: CIThroughput?
+    private var throughputFetchedAt: Date?
+    private static let throughputInterval: TimeInterval = 60
     var vitrinkaListening: [VitrinkaListening] { selectedVitrinkaWorkspace?.tray.listeners ?? [] }
     var vitrinkaBoards: [VitrinkaBoard] { selectedVitrinkaWorkspace?.tray.boards ?? [] }
     var vitrinkaWorkspaces: [VitrinkaWorkspaceSnapshot] = []
@@ -878,10 +883,28 @@ final class StatusStore {
         guard lanesRefreshed, !laneBoard.isEmpty else { return }
         let lanes = laneBoard.lanes
         laneBoard.pool = nil
+        var semaforAnswered = false
         await gated(.semafor) {
             let (pool, failure) = await SemaforClient.shared.pool(lanes: lanes)
             laneBoard.pool = pool
-            return failure
+            guard failure == nil else { return failure }
+            semaforAnswered = true
+            // The overview is a day-scale read: once a minute, like Semafor's
+            // own SPA. A failed overview hides its lines but is no reason to
+            // back off the pool that just answered.
+            if Date().timeIntervalSince(throughputFetchedAt ?? .distantPast) >= Self.throughputInterval {
+                let (throughput, overviewFailure) = await SemaforClient.shared.overview()
+                ciThroughput = throughput
+                throughputFetchedAt = throughput == nil ? nil : Date()
+                if let overviewFailure {
+                    NSLog("pultik: semafor overview — %@", String(describing: overviewFailure))
+                }
+            }
+            return nil
+        }
+        if !semaforAnswered {
+            ciThroughput = nil
+            throughputFetchedAt = nil
         }
     }
 

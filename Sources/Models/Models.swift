@@ -476,6 +476,24 @@ struct CIPool: Equatable {
     var head: CIPoolHead?
     /// The newest controller render behind these numbers.
     var observedAt: Date?
+    /// The KVM bastion guests' pool (partition `kvm`) — deploy lanes, gated
+    /// by the host's real free memory; nil when Semafor reports none.
+    var bastion: CIPartitionLoad?
+    /// Why waiting lanes were refused over the last 15 minutes, summed
+    /// across both pools, most frequent first. Empty while nobody waits.
+    var refusals: [CIRefusal] = []
+}
+
+struct CIPartitionLoad: Equatable {
+    let slotsUsed: Int
+    let slotsMax: Int
+    let reservedMiB: Int
+    let budgetMiB: Int
+}
+
+struct CIRefusal: Equatable {
+    let reason: String
+    let count: Int
 }
 
 struct CIPoolHead: Equatable {
@@ -498,10 +516,24 @@ struct SemaforAdmission: Decodable {
     }
 
     struct Lane: Decodable {
+        struct Refusal: Decodable {
+            let reason: String
+            let count: Int
+        }
+
         let lane: String
         let partition: String
         let waiting: Int
         let head: Bool
+        // `refusals_15m`; optional so an older Semafor still decodes.
+        let refusals15m: [Refusal]?
+
+        private enum CodingKeys: String, CodingKey {
+            case lane, partition, waiting, head
+            // convertFromSnakeCase capitalises after a digit: `refusals_15m`
+            // reaches the container as `refusals15M`.
+            case refusals15m = "refusals15M"
+        }
     }
 
     let observedAt: String? // RFC 3339, null before any controller exported
@@ -533,9 +565,77 @@ struct SemaforAdmission: Decodable {
             .filter { $0.partition.isEmpty && $0.head && $0.waiting > 0 }
             .map { CIPoolHead(lane: $0.lane, tier: byName[$0.lane]?.tier, kind: byName[$0.lane]?.kind, waiting: $0.waiting) }
             .min { ($0.tier ?? Int.max, $0.lane) < ($1.tier ?? Int.max, $1.lane) }
+        let bastion = partitions.first(where: { $0.name == "kvm" }).map {
+            CIPartitionLoad(slotsUsed: $0.slotsUsed, slotsMax: $0.slotsMax,
+                            reservedMiB: $0.reservedMib, budgetMiB: $0.budgetMib)
+        }
+        // A refusal on a lane nobody waits on any more is history, not a
+        // reason the queue is stuck now.
+        var refused: [String: Int] = [:]
+        for lane in lanes where lane.waiting > 0 {
+            for refusal in lane.refusals15m ?? [] {
+                refused[refusal.reason, default: 0] += refusal.count
+            }
+        }
+        let refusals = refused.map { CIRefusal(reason: $0.key, count: $0.value) }
+            .sorted { ($0.count, $1.reason) > ($1.count, $0.reason) }
         return CIPool(slotsUsed: docker.slotsUsed, slotsMax: docker.slotsMax,
                       reservedMiB: docker.reservedMib, budgetMiB: docker.budgetMib,
-                      head: head, observedAt: observedDate)
+                      head: head, observedAt: observedDate,
+                      bastion: bastion, refusals: refusals)
+    }
+}
+
+/// Semafor's `GET /api/v1/overview` (added 2026-09-27), only what the CI
+/// widget reads: today's throughput against yesterday at the same time,
+/// today's queue wait, and the 24 local hours. "Today" is Semafor's
+/// Europe/Prague day, so `hour` is the current bucket in `tz`.
+struct CIThroughput: Equatable, Decodable {
+    struct Queue: Equatable, Decodable {
+        let p50: Double
+        let p95: Double
+    }
+
+    struct Hour: Equatable, Decodable {
+        let hour: Int
+        let jobs: Int
+    }
+
+    let at: String
+    let tz: String
+    let jobs: Int
+    let yesterdaySameTime: Int
+    /// nil until a job completed today.
+    let queue: Queue?
+    let over300sShare: Double?
+    let hours: [Hour]
+
+    private enum CodingKeys: String, CodingKey {
+        case at, tz, jobs, yesterdaySameTime, queue, hours
+        // convertFromSnakeCase capitalises after a digit: `over_300s_share`
+        // reaches the container as `over300SShare`.
+        case over300sShare = "over300SShare"
+    }
+
+    static func decode(_ data: Data) -> CIThroughput? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(CIThroughput.self, from: data)
+    }
+
+    /// The hour `at` falls in, in Semafor's zone; nil when either is unreadable.
+    var currentHour: Int? {
+        guard let zone = TimeZone(identifier: tz) else { return nil }
+        let formatter = ISO8601DateFormatter()
+        var date = formatter.date(from: at)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            date = formatter.date(from: at)
+        }
+        guard let date else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        return calendar.component(.hour, from: date)
     }
 }
 

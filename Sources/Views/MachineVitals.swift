@@ -22,8 +22,12 @@ struct MachineVitals: View {
     /// them so a box reporting no byte counters still gets a tone.
     var memoryPercent: Double? = nil
     var diskPercent: Double? = nil
+    /// This Mac tints memory by kernel pressure, where used-% over-alarms.
+    var memoryTone: Color? = nil
 
-    private enum Column {
+    /// Shared with the This Mac widget's sensors row, so its cells sit in
+    /// the same columns as the machine rows.
+    enum Column {
         static let name: CGFloat = 60
         static let percent: CGFloat = 26
         static let size: CGFloat = 58
@@ -49,9 +53,12 @@ struct MachineVitals: View {
                 .lineLimit(1)
                 .frame(width: Column.name, alignment: .leading)
             Vital(symbol: "cpu", percent: cpuPercent, text: percentText(cpuPercent), width: Column.percent)
-            Vital(symbol: "memorychip", percent: memoryLoad,
-                  text: sizeText(used: memoryUsed, total: memoryTotal) ?? percentText(memoryLoad),
-                  width: Column.size)
+            let memoryText = sizeText(used: memoryUsed, total: memoryTotal) ?? percentText(memoryLoad)
+            if let memoryTone {
+                Vital(symbol: "memorychip", text: memoryText, tone: memoryTone, width: Column.size)
+            } else {
+                Vital(symbol: "memorychip", percent: memoryLoad, text: memoryText, width: Column.size)
+            }
             Vital(symbol: "internaldrive", percent: diskLoad, text: percentText(diskLoad),
                   width: Column.percent)
         }
@@ -97,10 +104,11 @@ struct Vital: View {
     var width: CGFloat?
     var help: String?
 
-    init(symbol: String, text: String, tone: Color, help: String? = nil) {
+    init(symbol: String, text: String, tone: Color, width: CGFloat? = nil, help: String? = nil) {
         self.symbol = symbol
         self.text = text
         self.tone = tone
+        self.width = width
         self.help = help
     }
 

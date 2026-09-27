@@ -78,6 +78,10 @@ final class OverviewGlanceTests: XCTestCase {
         XCTAssertEqual(past.alerts, [
             .pressure(percent: 5.1), .swap(bytes: 0.75 * gib), .load(perCore: 1.1), .slots(used: 81, total: 100),
         ])
+        // Swap is a gauge on the widget; the banner leaves it out.
+        XCTAssertEqual(past.bannerAlerts, [
+            .pressure(percent: 5.1), .load(perCore: 1.1), .slots(used: 81, total: 100),
+        ])
 
         let noCores = DevboxGlance(summary: summary(cpus: 0, load1: 40), workspaces: [])
         XCTAssertNil(noCores.loadPerCore)
@@ -113,6 +117,30 @@ final class OverviewGlanceTests: XCTestCase {
         XCTAssertTrue(CIGlance(board: board, repos: [RepoStatus(slug: "a/x", error: "offline")]).githubUnreachable)
     }
 
+    func testSemaforOverviewBecomesTheDayLines() throws {
+        // Live shape of semafor's GET /api/v1/overview (2026-09-27), trimmed:
+        // 13:40 in Prague, so hours 14..23 are still ahead.
+        let hours = (0..<24).map { #"{"hour":\#($0),"jobs":\#($0 <= 13 ? $0 + 1 : 0),"repos":[]}"# }
+        let body = """
+        {"at":"2026-09-27T11:40:02Z","tz":"Europe/Prague","day":"2026-09-27","jobs":1712,
+         "yesterday_same_time":1507,"queue":{"p50":3.35,"p95":412.2},"over_300s_share":0.071,
+         "hours":[\(hours.joined(separator: ","))],"repos":[],"days":[],"recorded_since":null}
+        """
+        let glance = CIThroughputGlance(try XCTUnwrap(CIThroughput.decode(Data(body.utf8))))
+        XCTAssertEqual(glance.wait, "wait p50 3s · p95 6m52s · 7.1% > 5m")
+        XCTAssertTrue(glance.waitSlow)
+        XCTAssertEqual(glance.delta, "+14%")
+        XCTAssertEqual(glance.hours, Array(1...14))
+
+        // Before the day's first job: no wait line, and no comparison
+        // against an empty yesterday.
+        let quiet = #"{"at":"2026-09-27T22:05:00Z","tz":"Europe/Prague","jobs":0,"yesterday_same_time":0,"queue":null,"over_300s_share":null,"hours":[]}"#
+        let empty = CIThroughputGlance(try XCTUnwrap(CIThroughput.decode(Data(quiet.utf8))))
+        XCTAssertNil(empty.wait)
+        XCTAssertFalse(empty.waitSlow)
+        XCTAssertNil(empty.delta)
+    }
+
     func testSemaforAdmissionBecomesTheDockerPoolWithItsBestRankedHead() throws {
         // Live shape of semafor's GET /api/v1/admission (2026-09-26): the
         // Docker ordinary pool is partition "", the bastion guests "kvm".
@@ -122,7 +150,7 @@ final class OverviewGlanceTests: XCTestCase {
                        {"name":"","budget_mib":96256,"reserved_mib":63488,"slots_used":18,"slots_max":32}],
          "lanes":[{"lane":"onyx-ci","backend":"docker","partition":"","running":0,"waiting":1,"head":true,"reserved_mib":2048,"refusals_15m":[]},
                   {"lane":"exampleapp-web","backend":"docker","partition":"","running":2,"waiting":3,"head":true,"reserved_mib":12288,"refusals_15m":[{"reason":"fifo","count":4}]},
-                  {"lane":"vitrinka-ci","backend":"docker","partition":"","running":1,"waiting":0,"head":true,"reserved_mib":3072,"refusals_15m":[]},
+                  {"lane":"vitrinka-ci","backend":"docker","partition":"","running":1,"waiting":0,"head":true,"reserved_mib":3072,"refusals_15m":[{"reason":"mem_budget","count":9}]},
                   {"lane":"exampleapp-bastion","backend":"kvm","partition":"kvm","running":1,"waiting":1,"head":true,"reserved_mib":32768,"refusals_15m":[]}]}
         """
         let lanes = [
@@ -136,6 +164,10 @@ final class OverviewGlanceTests: XCTestCase {
         // win; of two live ones the better tier does.
         XCTAssertEqual(pool.head, CIPoolHead(lane: "exampleapp-web", tier: 0, kind: "e2e", waiting: 3))
         XCTAssertEqual([pool.slotsUsed, pool.slotsMax, pool.reservedMiB, pool.budgetMiB], [18, 32, 63488, 96256])
+        XCTAssertEqual(pool.bastion, CIPartitionLoad(slotsUsed: 1, slotsMax: 4, reservedMiB: 32768, budgetMiB: 98304))
+        // Only lanes still waiting explain a stuck queue: vitrinka-ci's
+        // refusals are history.
+        XCTAssertEqual(pool.refusals, [CIRefusal(reason: "fifo", count: 4)])
 
         let glance = CIPoolGlance(pool: pool, now: try XCTUnwrap(pool.observedAt).addingTimeInterval(60))
         XCTAssertEqual(glance.slots, "18/32 slots")

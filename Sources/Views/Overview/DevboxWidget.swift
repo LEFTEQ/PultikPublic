@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// The Devbox widget of the overview column (spec 2026-09-23 D3 C, D13 B):
-/// CPU / RAM / SSD gauges, the running workspaces as chips, the parked pile
-/// in one line and — only past a threshold — one orange line naming the
-/// strain. A tap opens the `.devbox` page; a chip opens it filtered to that
-/// workspace. No summary (box unreachable, laptop off the mesh) → the widget
-/// is not drawn at all.
+/// The Devbox widget of the overview column (spec 2026-09-23, leaned by
+/// 2026-09-27): CPU / RAM / SSD / swap gauges, the workspace pile in one line
+/// and — only past a threshold — one orange line naming the strain. A tap
+/// opens the `.devbox` page, where the names are. No summary (box
+/// unreachable, laptop off the mesh) → the widget is not drawn at all.
 struct DevboxWidget: View {
     let store: StatusStore
     let onOpen: (String) -> Void
@@ -19,11 +18,8 @@ struct DevboxWidget: View {
                 if !glance.boxes.isEmpty {
                     boxLine(glance)
                 }
-                if !glance.running.isEmpty {
-                    chips(glance)
-                }
                 pile(glance)
-                if !glance.alerts.isEmpty {
+                if !glance.bannerAlerts.isEmpty {
                     alertLine(glance)
                 }
             }
@@ -47,19 +43,24 @@ struct DevboxWidget: View {
         .padding(.horizontal, RailRowMetrics.inset)
     }
 
-    /// CPU and SSD take a fixed cell; RAM gets the rest because it carries
-    /// the headroom next to used/total.
+    /// CPU, SSD and swap take a fixed cell with their shortest readings; RAM
+    /// gets the rest because it carries the headroom next to used/total.
+    /// Swap's reading turns orange past the threshold the alert line used
+    /// to name. Cores and the full SSD reading are on the `.devbox` strip.
     private func gauges(_ glance: DevboxGlance) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            DevboxGauge(label: "CPU", fraction: glance.cpuFraction, value: glance.cpuText)
-                .frame(width: 58)
+        HStack(alignment: .top, spacing: 8) {
+            DevboxGauge(label: "CPU", fraction: glance.cpuFraction, value: glance.cpuPercentText)
+                .frame(width: 34)
             DevboxGauge(label: "RAM", fraction: glance.memoryFraction, tick: glance.floorTick,
                         value: glance.ramText, valueTone: glance.headroomBytes < 0 ? .red : nil)
-            DevboxGauge(label: "SSD", fraction: glance.diskFraction, value: glance.ssdText)
-                .frame(width: 58)
+            DevboxGauge(label: "SSD", fraction: glance.diskFraction, value: glance.ssdCompactText)
+                .frame(width: 48)
+            DevboxGauge(label: "SWAP", fraction: glance.swapFraction, value: glance.swapText,
+                        valueTone: glance.swapUsedBytes > DevboxGlance.swapAlertBytes ? .orange : nil)
+                .frame(width: 40)
         }
         .padding(.horizontal, RailRowMetrics.inset)
-        .help("RAM's orange tick is the \(DevboxGlance.compact(glance.floorBytes))G floor the box keeps free")
+        .help("\(glance.cores) cores. RAM's orange tick is the \(DevboxGlance.compact(glance.floorBytes))G floor the box keeps free")
     }
 
     /// One devbox over several guests (spec 2026-09-25): the gauges are the
@@ -86,68 +87,11 @@ struct DevboxWidget: View {
         .help("Free memory above each box's floor; the gauges are every box combined. A silent box did not answer its last poll — its workspaces are missing until it does.")
     }
 
-    /// Heaviest first, so the chips that stay are the ones costing RAM; the
-    /// rest is one "+N" chip into the page — a fixed-height widget (D12).
-    private static let chipLimit = 5
-
-    private func chips(_ glance: DevboxGlance) -> some View {
-        FlowRow(hSpacing: 4, vSpacing: 4) {
-            ForEach(glance.running.prefix(Self.chipLimit)) { workspace in
-                Button {
-                    onOpen(workspace.name)
-                } label: {
-                    chip(workspace)
-                }
-                .buttonStyle(.plain)
-                .help("\(workspace.name) — open it on the devbox page")
-                .accessibilityLabel("\(workspace.name), running, \(workspace.memoryLabel)")
-            }
-            if glance.running.count > Self.chipLimit {
-                Button {
-                    onOpen("")
-                } label: {
-                    Text("+\(glance.running.count - Self.chipLimit) more")
-                        .font(RailRowMetrics.metaFont)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.06),
-                                    in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Every running workspace — .devbox")
-            }
-        }
-        .padding(.horizontal, RailRowMetrics.inset)
-    }
-
-    private func chip(_ workspace: DevboxWorkspace) -> some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(workspace.failedApps > 0 ? Color.orange : workspace.isRunning ? .green : .secondary)
-                .frame(width: 5, height: 5)
-            Text(workspace.name)
-                .font(.system(size: 9.5, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 150, alignment: .leading)
-            if workspace.memoryBytes > 0 {
-                Text(workspace.memoryLabel)
-                    .font(RailRowMetrics.metaFont)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
-        .contentShape(Rectangle())
-    }
-
-    /// The parked pile in one line: stale (parked over a week) in orange —
-    /// what the page's clear is for — then held, the pinned ones.
+    /// The whole pile in one line: running, parked, stale (parked over a
+    /// week) in orange — what the page's clear is for — then held.
     private func pile(_ glance: DevboxGlance) -> some View {
         HStack(spacing: 0) {
+            Text("\(glance.running.count) running · ")
             Text(glance.parked == 0 ? "nothing parked" : "\(glance.parked) parked")
             if glance.stale > 0 {
                 Text(" · ")
@@ -170,7 +114,7 @@ struct DevboxWidget: View {
         HStack(spacing: 4) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 8))
-            Text(glance.alerts.map(\.label).joined(separator: " · "))
+            Text(glance.bannerAlerts.map(\.label).joined(separator: " · "))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
@@ -181,7 +125,7 @@ struct DevboxWidget: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
         .padding(.horizontal, RailRowMetrics.inset - 2)
-        .help("Shown past a threshold: memory pressure over 5 %, swap over 0.5 G, load over 1 per core, port slots over 80 %")
+        .help("Shown past a threshold: memory pressure over 5 %, load over 1 per core, port slots over 80 % (swap over 0.5 G tints its gauge)")
     }
 
     /// The box's own pressure verdict tints the heading (thresholds in
@@ -281,6 +225,26 @@ extension DevboxGlance {
     var ssdText: String {
         guard let used = diskUsedBytes, let total = diskTotalBytes, total > 0 else { return "—" }
         return formatSize(used: used, total: total)
+    }
+
+    var cpuPercentText: String {
+        cpuPercent.map { "\(Int($0.rounded()))%" } ?? "—"
+    }
+
+    /// "418/483G" — the widget's cell; the page's strip keeps `ssdText`.
+    var ssdCompactText: String {
+        guard let used = diskUsedBytes, let total = diskTotalBytes, total > 0 else { return "—" }
+        return "\(Self.compact(used))/\(Self.compact(total))G"
+    }
+
+    var swapFraction: Double? {
+        swapTotalBytes > 0 ? swapUsedBytes / swapTotalBytes : nil
+    }
+
+    /// "20/24G" — same shape as the RAM reading; "none" on a box without swap.
+    var swapText: String {
+        guard swapTotalBytes > 0 else { return "none" }
+        return "\(Self.compact(swapUsedBytes))/\(Self.compact(swapTotalBytes))G"
     }
 }
 
