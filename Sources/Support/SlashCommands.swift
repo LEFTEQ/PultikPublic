@@ -266,7 +266,7 @@ enum SlashCommands {
 
     /// Section keys the panel actually understands. Validated so a typo says so
     /// instead of silently hiding nothing.
-    static let sectionKeys = ["prod", "servers", "services", "ci", "runners", "devbox"]
+    static let sectionKeys = ["prod", "firing", "servers", "services", "ci", "runners", "devbox"]
 
     @MainActor
     private static func setSection(_ argument: String, visible: Bool) -> SlashResult {

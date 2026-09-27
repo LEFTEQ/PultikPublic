@@ -173,6 +173,73 @@ private struct NoteAction: View {
     }
 }
 
+/// What `.notes` offers for the field's text: the paste read back in full
+/// (bounded like an expanded note) before it is saved. The palette bar is one
+/// line, so this row is where a long paste is actually readable.
+struct NoteDraftRow: View {
+    let text: String
+    var selected = false
+    /// "↵" when the draft is the only row, "⌘↵" when matches sit under it.
+    let shortcut: String
+    let onCreate: () -> Void
+
+    @State private var hovering = false
+
+    private var lineCount: Int {
+        text.split(whereSeparator: \.isNewline).count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "plus.square")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.accent)
+                Text("New note")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text("\(lineCount) \(lineCount == 1 ? "line" : "lines") · \(text.count) chars")
+                    .font(.system(size: 10, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 4)
+                Text("\(shortcut) create")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView(.vertical, showsIndicators: true) {
+                Text(text)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 16)
+                    .padding(.trailing, 2)
+                    .padding(.bottom, 2)
+            }
+            .frame(maxHeight: NoteRow.Metrics.expandedMaxHeight)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            Theme.accent.opacity(selected ? 0.16 : hovering ? 0.10 : 0.06),
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Theme.accent.opacity(selected ? 0.35 : 0.15), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onCreate)
+        .help("Save as a note")
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Create note")
+        .accessibilityValue(text)
+        .accessibilityAction { onCreate() }
+    }
+}
+
 // MARK: - .notes mode — the full surface
 
 /// Every note, full width, filterable. The rail is a glance capped at five;
@@ -182,6 +249,10 @@ struct NotesPageView: View {
     let store: NoteStore
     /// Pre-filtered by the panel so rows and ↑/↓ stay in step.
     let notes: [SavedNote]
+    /// The field's text, offered as a new note above the matches.
+    let newNote: String?
+    let newNoteID: String
+    let onCreate: () -> Void
     var selectedID: String?
     let isSelected: (String) -> Bool
     let expandedID: String?
@@ -208,8 +279,17 @@ struct NotesPageView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                     }
-                    if notes.isEmpty {
-                        Text("no notes — /note <text> to jot one")
+                    if let newNote {
+                        NoteDraftRow(
+                            text: newNote,
+                            selected: isSelected(newNoteID),
+                            // Bare ↵ reads the top match when there is one.
+                            shortcut: notes.isEmpty ? "↵" : "⌘↵",
+                            onCreate: onCreate
+                        )
+                        .id(newNoteID)
+                    } else if notes.isEmpty {
+                        Text("no notes — type or paste one, ↵ saves it")
                             .font(.system(size: 12))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity)
@@ -266,7 +346,7 @@ struct NotesPageView: View {
                 .font(.system(size: 10.5, design: .monospaced))
                 .foregroundStyle(.secondary)
             Spacer()
-            Text("↵ read · ⌘C copy")
+            Text(newNote != nil && notes.isEmpty ? "↵ create" : "↵ read · ⌘C copy")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.tertiary)
         }

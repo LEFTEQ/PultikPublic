@@ -244,6 +244,61 @@ struct CIThroughputGlance {
     }
 }
 
+/// The right rail's alert rows (2026-09-27): firing rules at critical or
+/// warning, one row per alert name — the same rule across hosts is one
+/// problem, led by its critical instance if any. Critical rows first, then
+/// the most recently started, so a new fire is on top. `Watchdog` fires by
+/// design and is never shown.
+struct AlertGlance {
+    struct Row: Identifiable, Equatable {
+        let name: String
+        let critical: Bool
+        /// The first instance's summary, else the rule name.
+        let title: String
+        /// Other instances folded into this row.
+        let more: Int
+        /// `app · environment` of the first instance, when labelled.
+        let context: String?
+        /// When the newest instance started firing.
+        let since: Date?
+        let alerts: [FiringAlert]
+
+        var id: String { name }
+    }
+
+    static let shownSeverities: Set<String> = ["critical", "warning"]
+
+    let rows: [Row]
+    var critical: Int { rows.filter(\.critical).count }
+
+    init(_ alerts: [FiringAlert]) {
+        let shown = alerts.filter {
+            $0.state == "firing" && $0.name != "Watchdog" && Self.shownSeverities.contains($0.severity ?? "")
+        }
+        let groups = Dictionary(grouping: shown, by: \.name)
+        rows = groups.map { name, group in
+            // Critical instances lead, so a red row always reads a critical
+            // alert's words; newest first within each severity.
+            let ordered = group.sorted { a, b in
+                let (aCritical, bCritical) = (a.severity == "critical", b.severity == "critical")
+                if aCritical != bCritical { return aCritical }
+                return (a.activeAt ?? .distantPast) > (b.activeAt ?? .distantPast)
+            }
+            let first = ordered[0]
+            let context = [first.labels["app"], first.labels["environment"]]
+                .compactMap { $0 }.joined(separator: " · ")
+            return Row(name: name, critical: group.contains { $0.severity == "critical" },
+                       title: first.summary ?? name, more: group.count - 1,
+                       context: context.isEmpty ? nil : context,
+                       since: first.activeAt, alerts: ordered)
+        }
+        .sorted { a, b in
+            if a.critical != b.critical { return a.critical }
+            return (a.since ?? .distantPast, b.name) > (b.since ?? .distantPast, a.name)
+        }
+    }
+}
+
 /// Semafor's refusal reasons in the words its own admission page uses
 /// (semafor `web/src/routes/admission.tsx` `REASON_LABEL`), so the widget
 /// and the page it links to say the same thing.

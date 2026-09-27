@@ -117,6 +117,42 @@ final class OverviewGlanceTests: XCTestCase {
         XCTAssertTrue(CIGlance(board: board, repos: [RepoStatus(slug: "a/x", error: "offline")]).githubUnreachable)
     }
 
+    func testFiringAlertsBecomeOneRowPerRuleCriticalFirst() throws {
+        // Live shape of Prometheus's GET /api/v1/alerts (2026-09-27), trimmed.
+        func alert(_ name: String, _ severity: String, _ summary: String, state: String = "firing",
+                   at: String, extra: String = "") -> String
+        {
+            #"{"labels":{"alertname":"\#(name)","severity":"\#(severity)"\#(extra)},"annotations":{"summary":"\#(summary)","description":"d"},"state":"\#(state)","activeAt":"\#(at)","value":"1e+00"}"#
+        }
+        let alerts = [
+            alert("Watchdog", "none", "heartbeat", at: "2026-09-25T05:51:03.717905439Z"),
+            alert("DiskSpaceWarning", "warning", "Low disk space on build-vps", at: "2026-09-27T08:00:00Z"),
+            alert("DiskSpaceWarning", "warning", "Low disk space on web-server", at: "2026-09-27T09:00:00.5Z"),
+            alert("ContainerMemoryAtLimit", "critical", "litellm over 97%", at: "2026-09-27T07:00:00Z",
+                  extra: #","app":"eve","environment":"production""#),
+            // Newer, but a warning: it must not speak for the red row.
+            alert("ContainerMemoryAtLimit", "warning", "sidecar over 97%", at: "2026-09-27T11:00:00Z"),
+            alert("RedisGrowth", "info", "redis", at: "2026-09-27T10:00:00Z"),
+            alert("SlowSoon", "critical", "pending", state: "pending", at: "2026-09-27T10:00:00Z"),
+        ]
+        let body = #"{"status":"success","data":{"alerts":[\#(alerts.joined(separator: ","))]}}"#
+        let decoded = try XCTUnwrap(FiringAlert.decode(Data(body.utf8), source: .prometheus))
+        XCTAssertEqual(decoded.count, 7)
+        XCTAssertNotNil(decoded[0].activeAt, "nanosecond timestamps must parse")
+
+        // Watchdog, info and pending never show; the same rule on two hosts
+        // is one row led by its newest instance; critical outranks newer.
+        let glance = AlertGlance(decoded)
+        XCTAssertEqual(glance.rows.map(\.name), ["ContainerMemoryAtLimit", "DiskSpaceWarning"])
+        XCTAssertEqual(glance.rows[0].title, "litellm over 97%")
+        XCTAssertEqual(glance.rows[0].context, "eve · production")
+        XCTAssertEqual(glance.rows[0].more, 1)
+        XCTAssertEqual(glance.rows[1].title, "Low disk space on web-server")
+        XCTAssertEqual(glance.rows[1].more, 1)
+        XCTAssertEqual(glance.critical, 1)
+        XCTAssertNil(FiringAlert.decode(Data(#"{"status":"error"}"#.utf8), source: .loki))
+    }
+
     func testSemaforOverviewBecomesTheDayLines() throws {
         // Live shape of semafor's GET /api/v1/overview (2026-09-27), trimmed:
         // 13:40 in Prague, so hours 14..23 are still ahead.

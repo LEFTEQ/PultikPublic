@@ -25,6 +25,40 @@ actor MetricsClient {
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
+    /// The Loki ruler on the same host — its LogQL rules fire here, not in
+    /// Prometheus, and its rules API speaks Prometheus's alert shape.
+    private let lokiBase = URL(string: "http://192.0.2.10:3100")!
+
+    /// Both rule evaluators' alerts (the right rail's alert rows). nil when
+    /// Prometheus does not answer; a Loki that does not answer drops only its
+    /// own alerts, logged — the rail still shows what Prometheus knows.
+    func firingAlerts() async -> [FiringAlert]? {
+        guard let prometheus = await alerts(at: base.appending(path: "api/v1/alerts"), source: .prometheus) else {
+            return nil
+        }
+        let loki = await alerts(at: lokiBase.appending(path: "prometheus/api/v1/alerts"), source: .loki)
+        if loki == nil { NSLog("pultik: loki ruler alerts unavailable") }
+        return prometheus + (loki ?? [])
+    }
+
+    private func alerts(at url: URL, source: FiringAlert.Source) async -> [FiringAlert]? {
+        do {
+            let (data, response) = try await session.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return FiringAlert.decode(data, source: source)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Where a Prometheus alert's row opens: its rules page narrowed to it.
+    /// Loki has no UI of its own — its rows open nothing.
+    nonisolated func alertsPage(for name: String) -> URL? {
+        var components = URLComponents(url: base.appending(path: "alerts"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "search", value: name)]
+        return components?.url
+    }
+
     /// instance label → value, for a query returning one sample per instance.
     private func instantByInstance(_ query: String) async throws -> [String: Double] {
         var components = URLComponents(

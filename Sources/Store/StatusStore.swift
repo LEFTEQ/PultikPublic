@@ -37,6 +37,9 @@ final class StatusStore {
     var eveSessions: [EveSession] = []
     var serverMetrics: [ServerMetrics] = []
     var serviceStatuses: [ServiceStatus] = []
+    /// Every alert the Prometheus and Loki rule evaluators report, fetched in
+    /// the Prometheus pass; empty off-mesh or with `firing` hidden.
+    var firingAlerts: [FiringAlert] = []
     var laneBoard = CILaneBoard()
     /// Semafor's `/overview`, refreshed at most every `throughputInterval`
     /// inside the pool's breaker; nil whenever Semafor is not answering.
@@ -864,8 +867,11 @@ final class StatusStore {
                serverMetrics.isEmpty, serviceStatuses.isEmpty
             {
                 laneBoard = CILaneBoard()
+                firingAlerts = []
                 return .unreachable("no answer from Prometheus")
             }
+
+            firingAlerts = isSectionVisible("firing") ? await MetricsClient.shared.firingAlerts() ?? [] : []
 
             if isSectionVisible("runners") {
                 laneBoard = await MetricsClient.shared.laneBoard()

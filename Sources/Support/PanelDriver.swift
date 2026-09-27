@@ -10,7 +10,8 @@ import Foundation
 /// paste would produce, and can write the panel's own window to a PNG. It
 /// compiles into Debug builds only, so the shipped app has no such listener.
 ///
-/// Commands (userInfo `cmd`): `open`, `close`, `query` (`text`), `key`
+/// Commands (userInfo `cmd`): `open`, `close`, `query` (`text`), `paste`
+/// (the clipboard through the field editor), `key`
 /// (`key` = enter|tab|up|down|left|right|esc, `mods` = comma list of
 /// cmd|opt|shift|ctrl), `capture` (`path` → PNG), `state` (`path` → JSON of
 /// the palette state the view reports).
@@ -48,7 +49,7 @@ enum PanelDriver {
         case "metrics":
             guard let path = info["path"] else { return }
             app.debugWriteMetrics(to: path)
-        case "query", "key", "state":
+        case "query", "key", "paste", "state":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:
             NSLog("pultik: debug driver ignored %@", String(describing: info))
@@ -66,6 +67,7 @@ enum PanelDriver {
         case "left": (code, chars) = (123, "")
         case "right": (code, chars) = (124, "")
         case "esc": (code, chars) = (53, "\u{1b}")
+        case "v": (code, chars) = (9, "v")
         default: return nil
         }
         var flags: NSEvent.ModifierFlags = []
