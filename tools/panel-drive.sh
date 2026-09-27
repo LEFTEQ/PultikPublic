@@ -6,7 +6,7 @@
 #   tools/panel-drive.sh open                      # summon (⌥Space path)
 #   tools/panel-drive.sh close
 #   tools/panel-drive.sh query '<text>'            # set the palette text
-#   tools/panel-drive.sh paste                     # query = clipboard contents
+#   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V)
 #   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette state as JSON (prints it)
@@ -21,7 +21,7 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   open|close) ;;
   query) PD_TEXT="${1-}" ;;
-  paste) cmd=query; PD_TEXT="$(pbpaste)" ;;
+  paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}" ;;
   capture) PD_PATH="${1:?png path}" ;;
   state) PD_PATH="${1:-/tmp/pultik-panel-state.json}" ;;

@@ -197,122 +197,124 @@ private struct AlertRow: View {
     }
 }
 
-// MARK: - Right rail: saved links
+// MARK: - Right rail: what needs you (2026-09-27)
 
-/// Bookmarks, ordered by how much they've been used this week.
-///
-/// The order is the feature: a static list becomes a thing you scan, whereas a
-/// list that floats what you actually opened becomes a thing you reach for.
-struct LinksRail: View {
+/// Production Sentry issues, moved from the centre's red strip into the rail
+/// in the panel's one row grammar: red dot, the error, then product · events
+/// · users in mono, last seen at the edge. Resolved ones dim until the next
+/// open hides them, as they did in the strip. `.p` lists every issue.
+struct ProdRail: View {
+    let issues: [ProdIssue]
+    let isResolved: (ProdIssue) -> Bool
+
+    static let limit = 4
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(issues.prefix(Self.limit)) { prodIssue in
+                let issue = prodIssue.issue
+                RailRow(dot: .filled(issue.level == "warning" ? .orange : .red),
+                        title: issue.title,
+                        subtitle: "\(prodIssue.productLabel) · \(issue.eventCount)× · \(issue.userCount) users",
+                        meta: issue.lastSeen.shortAge,
+                        help: "\(issue.shortId) — \(issue.culprit ?? issue.title)\nClick opens it in Sentry",
+                        action: {
+                            if let url = URL(string: issue.permalink) { NSWorkspace.shared.open(url) }
+                        })
+                        .opacity(isResolved(prodIssue) ? 0.35 : 1)
+            }
+            if issues.count > Self.limit {
+                RailNote("+\(issues.count - Self.limit) more — .p")
+            }
+        }
+    }
+}
+
+/// Firing Prometheus and Loki rules at critical or warning (`AlertGlance`):
+/// one row per rule, red dot for critical, orange for warning, the summary
+/// and its app · environment, how long it has been firing at the edge. The
+/// rules' own view — manual Alertmanager silences are not applied.
+struct FiringAlertsRail: View {
+    let glance: AlertGlance
+
+    static let limit = 5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(glance.rows.prefix(Self.limit)) { row in
+                let subtitle = [row.context, row.more > 0 ? "+\(row.more) more" : nil]
+                    .compactMap { $0 }.joined(separator: " · ")
+                RailRow(dot: .filled(row.critical ? .red : .orange),
+                        title: row.title,
+                        subtitle: subtitle.isEmpty ? nil : subtitle,
+                        meta: row.since?.shortAge,
+                        help: help(row),
+                        accessibilityLabel: "\(row.critical ? "Critical" : "Warning"): \(row.title)",
+                        action: { open(row) })
+            }
+            if glance.rows.count > Self.limit {
+                RailNote("+\(glance.rows.count - Self.limit) more firing")
+            }
+        }
+    }
+
+    private func help(_ row: AlertGlance.Row) -> String {
+        let lines = row.alerts.map { alert in
+            [alert.summary ?? alert.name, alert.description].compactMap { $0 }.joined(separator: " — ")
+        }
+        return ([row.name] + lines).joined(separator: "\n")
+    }
+
+    /// Prometheus rules open their alerts page narrowed to the rule; Loki
+    /// has no UI of its own, so its rows only carry the tooltip.
+    private func open(_ row: AlertGlance.Row) {
+        guard row.alerts.contains(where: { $0.source == .prometheus }),
+              let url = MetricsClient.shared.alertsPage(for: row.name)
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+/// Reference, not attention: the rail's last line holds the saved links as
+/// small titles and the notes as a count into `.notes`. Links stay findable
+/// by typing in the palette and are added with `/add-link`.
+struct RailFoot: View {
     let links: [SavedLink]
-    let onOpen: (SavedLink) -> Void
+    let notes: Int
+    let onOpenLink: (SavedLink) -> Void
+    let onOpenNotes: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        FlowRow(hSpacing: 8, vSpacing: 4) {
             ForEach(links) { link in
-                LinkRow(link: link) { onOpen(link) }
-            }
-        }
-    }
-}
-
-private struct LinkRow: View {
-    let link: SavedLink
-    let onOpen: () -> Void
-    @State private var hovering = false
-
-    private var weeklyOpens: Int {
-        link.recentOpens(since: Date().addingTimeInterval(-7 * 24 * 60 * 60))
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "link")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-            Text(link.title)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            if weeklyOpens > 0 {
-                Text("\(weeklyOpens)")
-                    .font(.system(size: 9, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(hovering ? Color.primary.opacity(0.06) : .clear,
-                    in: RoundedRectangle(cornerRadius: 7))
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: onOpen)
-        .help("\(link.url)\n\(link.totalOpens) opens all time — /rm-link \(link.title) to remove")
-    }
-}
-
-// MARK: - Right rail: scratch notes
-
-/// Notes, newest first — one truncated line each, capped at five.
-///
-/// The cap is structural, not cosmetic: a rail that grows with the note count
-/// pushes Links and Vitrinka off-screen no matter how short each row is. The
-/// overflow row hands the rest to `.notes`, which is also where removal lives —
-/// the row body reads, it doesn't destroy (⌥-click still removes in place).
-struct NotesRail: View {
-    let notes: [SavedNote]
-    let onRemove: (SavedNote) -> Void
-    let onOpenAll: () -> Void
-    /// Ephemeral by design (a note reopens collapsed on the next panel summon),
-    /// but owned by the panel so Esc can fold it — the window's
-    /// `cancelOperation` would otherwise close everything instead.
-    @Binding var expandedID: String?
-
-    static let railCap = 5
-
-    private var shown: ArraySlice<SavedNote> {
-        notes.prefix(Self.railCap)
-    }
-
-    private var overflow: Int {
-        max(0, notes.count - Self.railCap)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(shown) { note in
-                NoteRow(
-                    note: note,
-                    style: .rail,
-                    expanded: expandedID == note.id,
-                    onToggle: {
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            expandedID = expandedID == note.id ? nil : note.id
-                        }
-                    },
-                    onRemove: { onRemove(note) }
-                )
-            }
-            if overflow > 0 {
-                Button(action: onOpenAll) {
-                    HStack(spacing: 4) {
-                        Text("+\(overflow) more")
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 8, weight: .semibold))
-                        Spacer(minLength: 0)
+                Button { onOpenLink(link) } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 7, weight: .semibold))
+                        Text(link.title)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 120, alignment: .leading)
                     }
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Open .notes — every note, searchable")
+                .help(link.url)
+            }
+            if notes > 0 {
+                Button(action: onOpenNotes) {
+                    Text("\(notes) note\(notes == 1 ? "" : "s") ›")
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Every scratch note — .notes")
             }
         }
+        .font(RailRowMetrics.metaFont)
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, RailRowMetrics.inset + 2)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

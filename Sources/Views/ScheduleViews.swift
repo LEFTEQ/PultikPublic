@@ -259,51 +259,30 @@ struct RemindersRail: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(todos.prefix(6)) { todo in
                 ReminderRailRow(todo: todo)
             }
             if todos.count > 6 {
-                Text("+\(todos.count - 6) more — .s")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 8)
+                RailNote("+\(todos.count - 6) more — .s")
             }
         }
     }
 }
 
+/// The panel's one row grammar (`RailRow`, 2026-09-27): the dot says overdue
+/// (red) or due (orange); no tinted slab — colour is the signal, not the fill.
 private struct ReminderRailRow: View {
     let todo: TodoItem
-    @State private var hovering = false
 
     private var overdue: Bool { todo.isOverdue() }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: overdue ? "exclamationmark.circle.fill" : "clock")
-                .font(.system(size: 9))
-                .foregroundStyle(overdue ? Color.red : .orange)
-            Text(todo.name)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            if let at = todo.at {
-                Text(at, format: .dateTime.hour().minute())
-                    .font(.system(size: 9, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(overdue ? AnyShapeStyle(Color.red) : AnyShapeStyle(.tertiary))
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(overdue ? Color.red.opacity(hovering ? 0.14 : 0.08)
-                    : hovering ? Color.primary.opacity(0.06) : .clear,
-                    in: RoundedRectangle(cornerRadius: 7))
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .onTapGesture { todo.open() }
-        .help("\(todo.name)\(overdue ? " — overdue" : " — ripe")\nClick opens it in vitrinka")
+        RailRow(dot: .filled(overdue ? .red : .orange),
+                title: todo.name,
+                meta: todo.at?.formatted(.dateTime.hour().minute()),
+                help: "\(todo.name)\(overdue ? " — overdue" : " — ripe")\nClick opens it in vitrinka",
+                accessibilityLabel: "\(todo.name), \(overdue ? "overdue" : "due")",
+                action: { todo.open() })
     }
 }

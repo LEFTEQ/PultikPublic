@@ -639,6 +639,62 @@ struct CIThroughput: Equatable, Decodable {
     }
 }
 
+// MARK: - Firing alerts (Prometheus + Loki rules)
+
+/// One alert a rule evaluator reports, from Prometheus's `/api/v1/alerts` or
+/// the Loki ruler's `/prometheus/api/v1/alerts` (same shape). Alertmanager
+/// itself is loopback-only on build-server, so these are the rules' own view:
+/// every firing rule, before routing — manual silences are not applied.
+struct FiringAlert: Equatable, Identifiable {
+    enum Source: String, Equatable {
+        case prometheus, loki
+    }
+
+    let name: String
+    let state: String
+    let severity: String?
+    let summary: String?
+    let description: String?
+    let labels: [String: String]
+    let activeAt: Date?
+    let source: Source
+
+    var id: String {
+        ([source.rawValue, name] + labels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" })
+            .joined(separator: "|")
+    }
+
+    /// The rules API's `{status, data: {alerts: [...]}}`; nil when unreadable.
+    static func decode(_ data: Data, source: Source) -> [FiringAlert]? {
+        struct Envelope: Decodable {
+            struct Payload: Decodable { let alerts: [Raw] }
+            struct Raw: Decodable {
+                let labels: [String: String]
+                let annotations: [String: String]?
+                let state: String
+                let activeAt: String?
+            }
+
+            let status: String
+            let data: Payload?
+        }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+              envelope.status == "success", let alerts = envelope.data?.alerts
+        else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        return alerts.map { raw in
+            FiringAlert(name: raw.labels["alertname"] ?? "alert", state: raw.state,
+                        severity: raw.labels["severity"],
+                        summary: raw.annotations?["summary"], description: raw.annotations?["description"],
+                        labels: raw.labels,
+                        activeAt: raw.activeAt.flatMap { formatter.date(from: $0) ?? plain.date(from: $0) },
+                        source: source)
+        }
+    }
+}
+
 // MARK: - Project registry (the on-call layer)
 
 struct ProjectSpec: Codable, Identifiable {

@@ -5,9 +5,10 @@ struct PanelPane: View {
     let store: StatusStore
 
     private static let sections = [
-        ("prod", "Prod issues strip"), ("servers", "Estate widget · servers"),
+        ("prod", "Prod issues (right rail)"), ("firing", "Firing alerts · Prometheus + Loki"),
+        ("servers", "Estate widget · servers"),
         ("services", "Estate widget · services"), ("ci", "CI · GitHub runs"),
-        ("alerts", "Eve alerts"), ("fans", "Fan & Mac strip"),
+        ("alerts", "Eve alerts"), ("fans", "This Mac widget"),
     ]
 
     var body: some View {

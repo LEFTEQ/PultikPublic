@@ -244,7 +244,6 @@ struct StatusPanelView: View {
     /// one column never unfolds its twin in the other. Both live here because
     /// Esc has to be able to fold whichever is open.
     @State private var expandedNoteID: String?
-    @State private var expandedRailNoteID: String?
     /// The note being edited in `.notes` — Esc cancels the edit before it is
     /// allowed to close the panel.
     @State private var editingNoteID: String?
@@ -331,11 +330,13 @@ struct StatusPanelView: View {
     static func paletteMode(in text: String) -> (mode: PaletteMode, filter: String)? {
         guard text.hasPrefix(".") else { return nil }
         let body = text.dropFirst()
-        let token = body.prefix(while: { $0 != " " }).lowercased()
+        // Any whitespace ends the token: `.note` followed by a pasted blob
+        // that starts with a newline is still the notes mode.
+        let token = body.prefix(while: { !$0.isWhitespace }).lowercased()
         guard !token.isEmpty else { return nil }
         let matches = PaletteMode.allCases.filter { $0.rawValue.hasPrefix(token) }
         guard matches.count == 1, let mode = matches.first else { return nil }
-        let rest = body.dropFirst(token.count).trimmingCharacters(in: .whitespaces)
+        let rest = body.dropFirst(token.count).trimmingCharacters(in: .whitespacesAndNewlines)
         return (mode, rest)
     }
 
@@ -346,7 +347,7 @@ struct StatusPanelView: View {
     /// "." (or an ambiguous partial) shows the mode picker instead.
     private var modePickerMatches: [PaletteMode] {
         guard query.hasPrefix("."), activeMode == nil else { return [] }
-        let token = query.dropFirst().prefix(while: { $0 != " " }).lowercased()
+        let token = query.dropFirst().prefix(while: { !$0.isWhitespace }).lowercased()
         return PaletteMode.allCases.filter { token.isEmpty || $0.rawValue.hasPrefix(token) }
     }
 
@@ -430,17 +431,18 @@ struct StatusPanelView: View {
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
     @State private var fanTicking = false
     @State private var presentedGeneration: Int?
-    /// The right rail carries reminders, eve alerts, links and notes; service
-    /// probes moved to the overview column's Estate widget (spec 2026-09-23
-    /// D11), CI and this Mac to its CI and This Mac widgets (2026-09-27).
+    /// The right rail is what needs you (2026-09-27): reminders, production
+    /// issues, firing alerts and eve alerts, with links and notes as one
+    /// reference line at its foot. Service probes live in the Estate widget,
+    /// CI and this Mac in their overview widgets.
     private var showServiceRail: Bool {
-        showAlerts
-            // Links, notes and reminders are local — they must be able to hold
-            // the rail open on their own, or off-mesh they'd vanish with the
-            // probes.
+        needsYou
+            // An answering estate holds the rail open for its all-clear line.
+            || sourcesAnswered
+            // Links and notes are local — they must be able to hold the rail
+            // open on their own, or off-mesh they'd vanish with the probes.
             || !links.links.isEmpty
             || !notes.notes.isEmpty
-            || !reminders.isEmpty
     }
 
     private var panelWidth: CGFloat {
@@ -738,7 +740,6 @@ struct StatusPanelView: View {
         pathTarget = nil
         pathVerbIndex = 0
         expandedNoteID = nil
-        expandedRailNoteID = nil
         editingNoteID = nil
         unreadAlertsSnapshot = []
         // The eve conversation does not survive a dismiss (it never did) —
@@ -769,6 +770,20 @@ struct StatusPanelView: View {
                     RemindersRail(todos: reminders)
                 }
             }
+            if !railProdIssues.isEmpty {
+                RailSection(key: "prod", title: "Prod", count: railProdIssues.count, tone: .red) {
+                    ProdRail(issues: railProdIssues,
+                             isResolved: { resolvedStore.isResolved("prod:\($0.id)") })
+                }
+            }
+            let firing = firingGlance
+            if !firing.rows.isEmpty {
+                RailSection(key: "firing", title: "Firing", count: firing.rows.count,
+                            tone: firing.critical > 0 ? .red : .orange)
+                {
+                    FiringAlertsRail(glance: firing)
+                }
+            }
             if showAlerts {
                 let unread = unreadAlertsSnapshot.union(store.unreadAlertIds)
                 RailSection(key: "alerts", title: "eve alerts",
@@ -778,28 +793,46 @@ struct StatusPanelView: View {
                     AlertsRail(alerts: store.visibleAlerts, unread: unread)
                 }
             }
-            if !links.links.isEmpty {
-                // No count (D7=B): the list renders in full.
-                RailSection(key: "links", title: "Links") {
-                    LinksRail(links: links.ordered) { link in
-                        links.recordOpen(id: link.id)
-                        if let url = URL(string: link.url) {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                }
+            if !needsYou, sourcesAnswered {
+                // An empty rail still says something: the sources answered
+                // and none of them needs you. Off the mesh it says nothing.
+                Text("✓ all clear")
+                    .font(RailRowMetrics.metaFont)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, RailRowMetrics.inset + 2)
+                    .padding(.top, 12)
             }
-            if !notes.notes.isEmpty {
-                RailSection(key: "notes", title: "Notes") {
-                    NotesRail(
-                        notes: notes.ordered,
-                        onRemove: { notes.remove(id: $0.id) },
-                        onOpenAll: { enterMode(.notes) },
-                        expandedID: $expandedRailNoteID
-                    )
-                }
+            if !links.links.isEmpty || !notes.notes.isEmpty {
+                RailFoot(links: links.ordered, notes: notes.notes.count,
+                         onOpenLink: { openLink($0) },
+                         onOpenNotes: { enterMode(.notes) })
             }
         }
+    }
+
+    /// Production issues for the rail — resolved-and-hidden ones gone, never
+    /// narrowed by the palette query (the rail is not a search result).
+    private var railProdIssues: [ProdIssue] {
+        guard store.isSectionVisible("prod") else { return [] }
+        return store.prodIssues.filter { !hiddenResolved.contains("prod:\($0.id)") }
+    }
+
+    /// Firing alerts as the rail shows them — gated here too, so `/hide
+    /// firing` empties the section at once rather than at the next poll.
+    private var firingGlance: AlertGlance {
+        AlertGlance(store.isSectionVisible("firing") ? store.firingAlerts : [])
+    }
+
+    /// Anything in the rail that asks for attention, as opposed to the
+    /// reference line at its foot.
+    private var needsYou: Bool {
+        !reminders.isEmpty || !railProdIssues.isEmpty || showAlerts || !firingGlance.rows.isEmpty
+    }
+
+    /// Prometheus answered this pass (its metrics or probes are in), so an
+    /// empty rail is a real "all clear" rather than an unreachable mesh.
+    private var sourcesAnswered: Bool {
+        !store.serverMetrics.isEmpty || !store.serviceStatuses.isEmpty
     }
 
     private var centerColumn: some View {
@@ -870,11 +903,10 @@ struct StatusPanelView: View {
                 }
             }
 
-            // The pinned strips anchor the BOTTOM of the center column —
-            // prod (Sentry) always in the same place regardless of how the
-            // list above breathes, reference links at the very foot.
-            if activeMode == nil, !showTodos, activeProject == nil, eveAskedPrompt == nil {
-                prodStrip.measuringCentreChrome()
+            // Saved links anchor the BOTTOM of the center column only while
+            // searching — they are search results there; at rest they sit at
+            // the right rail's foot. Prod issues moved to the rail (2026-09-27).
+            if activeMode == nil, !showTodos, activeProject == nil, eveAskedPrompt == nil, searchActive {
                 linksStrip.measuringCentreChrome()
             }
 
@@ -953,6 +985,11 @@ struct StatusPanelView: View {
             guard handleKey(event, synthetic: true) != nil else { return }
             if name == "enter" { submitPalette() }
             if name == "esc" { escapeOneLayer() }
+        case "paste":
+            // ⌘V's real route: the monitor first, then the field editor.
+            guard let event = PanelDriver.keyEvent(named: "v", mods: "cmd"),
+                  handleKey(event, synthetic: true) != nil else { return }
+            (NSApp.keyWindow?.fieldEditor(false, for: nil) as? NSTextView)?.paste(nil)
         case "state":
             guard let path = info["path"] as? String else { return }
             var state: [String: Any] = [
@@ -1001,6 +1038,11 @@ struct StatusPanelView: View {
             TextField(paletteHint, text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 15))
+                // One line, scrolling sideways: a pasted paragraph used to
+                // wrap inside the fixed-height bar with its first line clipped.
+                // Long text is read where it lands (the `.notes` draft row);
+                // ⌘V in `handleKey` keeps its newlines.
+                .lineLimit(1)
                 .focused($paletteFocused)
                 .onSubmit(submitPalette)
                 .onChange(of: query) { _, new in
@@ -1118,7 +1160,8 @@ struct StatusPanelView: View {
             case .issues:
                 if let issue = modeIssues(filter).first { Self.open(issue.url) }
             case .notes:
-                if let note = modeNotes(filter).first { toggleNote(note) }
+                // Text that finds no note is a note to write, not a failed search.
+                if let note = modeNotes(filter).first { toggleNote(note) } else { createNote(filter) }
             case .fans:
                 break // the deck is controls, not a result list — ↵ is a no-op
             case .work, .devbox, .ci, .estate:
@@ -1244,7 +1287,8 @@ struct StatusPanelView: View {
                     PaletteItem(id: "issue:\(issue.id)") { Self.open(issue.url) }
                 }
             case .notes:
-                return modeNotes(filter).map { note in
+                let create = filter.isEmpty ? [] : [PaletteItem(id: Self.noteDraftID) { createNote(filter) }]
+                return create + modeNotes(filter).map { note in
                     PaletteItem(id: "note:\(note.id)", keepsSelection: true) {
                         toggleNote(note)
                     }
@@ -1312,15 +1356,12 @@ struct StatusPanelView: View {
                 toggleNote(note)
             })
         }
-        if store.isSectionVisible("prod") {
-            for issue in filteredProdIssues.prefix(4) {
-                items.append(PaletteItem(id: "prod:\(issue.id)") {
-                    Self.open(issue.issue.permalink)
-                })
+        // The links strip draws only while searching; its rows are selectable
+        // exactly then.
+        if searchActive {
+            for link in filteredLinks.prefix(4) {
+                items.append(PaletteItem(id: "link:\(link.id)") { openLink(link) })
             }
-        }
-        for link in filteredLinks.prefix(4) {
-            items.append(PaletteItem(id: "link:\(link.id)") { openLink(link) })
         }
         return items
     }
@@ -1395,6 +1436,9 @@ struct StatusPanelView: View {
             FanDeckView(fanStore: FanStore.shared, filter: filter) { query = "" }
         case .notes:
             NotesPageView(store: notes, notes: modeNotes(filter),
+                          newNote: filter.isEmpty ? nil : filter,
+                          newNoteID: Self.noteDraftID,
+                          onCreate: { createNote(filter) },
                           selectedID: selectedID,
                           isSelected: { isSelected($0) },
                           expandedID: expandedNoteID,
@@ -1436,6 +1480,20 @@ struct StatusPanelView: View {
 
     private func modeNotes(_ filter: String) -> [SavedNote] {
         notes.ordered.filter { $0.matches(filter) }
+    }
+
+    /// The `.notes` draft row's palette id — the typed or pasted filter,
+    /// offered as a new note above whatever it matched.
+    private static let noteDraftID = "note-draft"
+
+    /// Saves the draft, clears the filter and leaves the new note selected
+    /// on top of the list, so the next ↵ reads it back.
+    private func createNote(_ text: String) {
+        guard let note = notes.add(text) else { return }
+        enterMode(.notes)
+        expandedNoteID = note.id
+        // The query change clears the selection on its way through onChange.
+        DispatchQueue.main.async { selectedID = "note:\(note.id)" }
     }
 
     /// Expand-in-place, everywhere: the note opens where you found it. Second
@@ -1556,8 +1614,10 @@ struct StatusPanelView: View {
             }
             // On a highlighted row, ⇥ is TRIAGE: resolved ↔ unresolved. The
             // row dims now and disappears on the next panel open.
+            // The `.notes` draft row is unsaved text, not an item — there is
+            // nothing to triage, and persisting its id would outlive the draft.
             if let selectedID {
-                ResolvedStore.shared.toggle(selectedID)
+                if selectedID != Self.noteDraftID { ResolvedStore.shared.toggle(selectedID) }
                 return nil
             }
             // Otherwise it completes: the first listed slash verb or mode —
@@ -1581,6 +1641,13 @@ struct StatusPanelView: View {
             // to its Save shortcut) — activating the selected row under a
             // half-typed draft would be Esc's bug in reverse.
             guard editingNoteID == nil else { return event }
+            // ⌘↵ in `.notes` saves the filter as a note even when it also
+            // matches some — bare ↵ reads the top match then.
+            if event.modifierFlags.contains(.command), let (mode, filter) = activeMode,
+               mode == .notes, !filter.isEmpty {
+                createNote(filter)
+                return nil
+            }
             // A path card: ↵ runs the highlighted verb, a chord picks one
             // outright. Handled here so ⌘↵ never reaches the field editor.
             if let target = pathTarget, selectedID == nil {
@@ -1602,10 +1669,28 @@ struct StatusPanelView: View {
                 editingNoteID = nil
                 return nil
             }
-            guard expandedNoteID != nil || expandedRailNoteID != nil else { return event }
+            guard expandedNoteID != nil else { return event }
             withAnimation(.easeOut(duration: 0.16)) {
                 expandedNoteID = nil
-                expandedRailNoteID = nil
+            }
+            return nil
+        case 9 where event.modifierFlags.contains(.command): // ⌘V
+            // The single-line field folds a paste's newlines into spaces, and
+            // a note pasted after `.note` would lose its paragraphs. Multi-line
+            // text is spliced in here; anything else takes the field's paste.
+            guard synthetic || paletteFocused,
+                  let text = NSPasteboard.general.string(forType: .string),
+                  text.contains(where: \.isNewline)
+            else { return event }
+            let editor = NSApp.keyWindow?.fieldEditor(false, for: nil) as? NSTextView
+            let current = query as NSString
+            var range = editor?.selectedRange ?? NSRange(location: current.length, length: 0)
+            if NSMaxRange(range) > current.length { range = NSRange(location: current.length, length: 0) }
+            query = current.replacingCharacters(in: range, with: text)
+            let caret = range.location + (text as NSString).length
+            DispatchQueue.main.async {
+                guard let editor, caret <= (editor.string as NSString).length else { return }
+                editor.selectedRange = NSRange(location: caret, length: 0)
             }
             return nil
         case 8 where event.modifierFlags.contains(.command): // ⌘C
@@ -1802,43 +1887,11 @@ struct StatusPanelView: View {
         DispatchQueue.main.async { paletteFocused = true }
     }
 
-    // MARK: - Prod strip (Sentry)
+    // MARK: - Links strip (search results)
 
-    /// Exists only when production is non-quiet — the calmest possible default.
-    /// Pinned at the BOTTOM of the center column (2026-07-29), so Sentry noise
-    /// never pushes the fixed-order inbox around.
-    @ViewBuilder
-    private var prodStrip: some View {
-        let issues = filteredProdIssues
-        if !issues.isEmpty, store.isSectionVisible("prod") {
-            hairline
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Kicker(text: "▲ Prod", count: issues.count, tone: .red,
-                           action: { enterMode(.prod) },
-                           actionHelp: "Open all production issues")
-                    Spacer()
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-                .padding(.bottom, 2)
-                ForEach(issues.prefix(4)) { prodIssue in
-                    ProdIssueRow(prodIssue: prodIssue,
-                                 selected: isSelected("prod:\(prodIssue.id)"))
-                        .opacity(resolvedStore.isResolved("prod:\(prodIssue.id)") ? 0.35 : 1)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
-            .background(Color.red.opacity(0.06))
-        }
-    }
-
-    // MARK: - Links strip (sticky, prod-strip idiom)
-
-    /// Saved links pinned above the scroll area, same contract as the prod
-    /// strip: exists when there is something to show, capped at four rows,
-    /// narrowed by the palette. A `/add-link` lands here instantly.
+    /// Saved links matching the palette query, pinned at the foot of the
+    /// centre column while searching: capped at four rows. At rest the links
+    /// live at the right rail's foot.
     @ViewBuilder
     private var linksStrip: some View {
         let items = filteredLinks
@@ -1875,17 +1928,6 @@ struct StatusPanelView: View {
     private func openLink(_ link: SavedLink) {
         links.recordOpen(id: link.id)
         Self.open(link.url)
-    }
-
-    private var filteredProdIssues: [ProdIssue] {
-        let visible = store.prodIssues.filter { !hiddenResolved.contains("prod:\($0.id)") }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty, !q.hasPrefix("."), !q.hasPrefix("/") else { return visible }
-        return visible.filter {
-            $0.issue.title.lowercased().contains(q)
-                || $0.project.lowercased().contains(q)
-                || $0.issue.shortId.lowercased().contains(q)
-        }
     }
 
     // MARK: - PR inbox (fixed repo order)
