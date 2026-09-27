@@ -3,7 +3,7 @@ import SwiftUI
 /// The Vitrinka widget at the top of the overview column (spec 2026-09-23
 /// D5–D7, D12): the kicker with the workspace picker and its elsewhere
 /// badge, one counts line, the three rows that need you most, the live
-/// sessions, then recent boards filling whatever height is left. It is the
+/// sessions, then the five newest recent boards, fewer when the column is short. It is the
 /// column's only flexible block — no scroller of its own (the column
 /// scrolls only when this widget's floor cannot fit), no search; the full lists
 /// are the `.work` and `.boards` pages.
@@ -20,9 +20,10 @@ struct VitrinkaWidget: View {
     /// Live sessions beyond this collapse into a note — they are the head
     /// of the widget, and the head is never dropped to make room.
     static let liveLimit = 6
-    /// No column is tall enough for more recent rows than this; the rest
-    /// are never built.
-    static let recentCeiling = 40
+    /// The newest few, not a list (2026-09-27): the widget is a glance, and
+    /// every board is one `all N ›` away. A short column still drops rows
+    /// below this through the budget.
+    static let recentCeiling = 5
 
     private var selected: VitrinkaWorkspaceSnapshot? {
         store.selectedVitrinkaWorkspace

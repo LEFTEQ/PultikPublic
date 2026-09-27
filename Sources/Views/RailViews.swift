@@ -131,178 +131,6 @@ struct ServiceTile: View {
     }
 }
 
-// MARK: - Right rail: CI lanes (BuildServer JIT fleet)
-
-/// One line per lane with something to say — running jobs as filled cells,
-/// a queue, or a controller that is down — CI lanes before deploy bastions
-/// (board order of trust groups), by name inside each, so a row never moves
-/// under an open popover. Idle lanes fold into one count. Bounded whatever
-/// the fleet does (2026-09-23): at most `busyLimit` lanes, the ones with the
-/// most to say, the rest a "+N busy" that opens `.ci`, where every lane and
-/// job is listed (spec 2026-09-09, superseding the 2026-08-27 runner grid).
-struct LaneRail: View {
-    let board: CILaneBoard
-    let onOpen: (String) -> Void
-
-    static let busyLimit = 6
-
-    private var busyLanes: [CILane] {
-        var rank: [String: Int] = [:]
-        for lane in board.lanes where rank[lane.trustGroup] == nil {
-            rank[lane.trustGroup] = rank.count
-        }
-        return board.lanes.filter(\.isActive).sorted {
-            $0.trustGroup == $1.trustGroup ? $0.name < $1.name
-                : rank[$0.trustGroup, default: 0] < rank[$1.trustGroup, default: 0]
-        }
-    }
-
-    /// Past the limit a dead controller always shows, then board order — never
-    /// live job or queue counts, which swap between polls and would move rows
-    /// under an open popover. The rest are "+N busy" into `.ci`.
-    private func shown(_ busy: [CILane]) -> [CILane] {
-        guard busy.count > Self.busyLimit else { return busy }
-        let keep = Set((busy.filter { !$0.up } + busy.filter(\.up))
-            .prefix(Self.busyLimit).map(\.id))
-        return busy.filter { keep.contains($0.id) }
-    }
-
-    var body: some View {
-        let busy = busyLanes
-        let rows = shown(busy)
-        let hidden = busy.filter { lane in !rows.contains { $0.id == lane.id } }
-        let idle = board.lanes.count - busy.count
-        VStack(alignment: .leading, spacing: 3) {
-            if let pool = board.pool {
-                PoolRow(pool: pool)
-            }
-            ForEach(rows) { lane in
-                CILaneGrid(lane: lane, onOpen: onOpen)
-            }
-            if !hidden.isEmpty || idle > 0 {
-                HStack(spacing: 5) {
-                    if !hidden.isEmpty {
-                        // Hidden lanes are the running-only ones unless more
-                        // than `busyLimit` are queued or down — then the whole
-                        // page, not a slice that would miss them.
-                        let runningOnly = hidden.allSatisfy { $0.up && $0.queued == 0 }
-                        Button { onOpen(runningOnly ? "running" : "") } label: {
-                            Text("+\(hidden.count) busy ›")
-                                .foregroundStyle(.secondary)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(runningOnly ? "Every running job — .ci running" : "Every CI lane and job — .ci")
-                    }
-                    if idle > 0 {
-                        Text("\(idle) idle").foregroundStyle(.tertiary)
-                    }
-                }
-                .font(.system(size: 9.5, design: .monospaced))
-            }
-            if !board.elsewhere.isEmpty || board.elsewhereQueued > 0 {
-                ElsewhereRow(jobs: board.elsewhere, queued: board.elsewhereQueued)
-            }
-        }
-    }
-}
-
- /// Jobs the collector saw on lanes that are not ours — GitHub-hosted or an
-/// unmapped label. One dim line so the queue on it is not a mystery.
-private struct ElsewhereRow: View {
-    let jobs: [CIJob]
-    let queued: Int
-    @State private var showPopover = false
-
-    private var summary: String {
-        var parts: [String] = []
-        if !jobs.isEmpty { parts.append("\(jobs.count) running") }
-        if queued > 0 { parts.append("\(queued) queued") }
-        return parts.joined(separator: " · ")
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text("elsewhere")
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
-            Spacer(minLength: 2)
-            Text(summary)
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
-        }
-        .contentShape(Rectangle())
-        .onHover { inside in if inside { showPopover = true } }
-        .popover(isPresented: $showPopover, arrowEdge: .leading) {
-            LanePopover(title: "elsewhere", subtitle: "github-hosted or unmapped lanes",
-                        jobs: jobs, queued: queued)
-        }
-        .accessibilityElement()
-        .accessibilityLabel("Jobs elsewhere, \(summary)")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { showPopover = true }
-    }
-}
-
-/// The jobs on a lane: `repo · workflow › job`, age, each a link to its run.
-private struct LanePopover: View {
-    let title: String
-    let subtitle: String
-    let jobs: [CIJob]
-    let queued: Int
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-            Text(subtitle)
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(.secondary)
-            if !jobs.isEmpty {
-                Divider()
-                ForEach(jobs) { job in
-                    HStack(spacing: 6) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("\(job.repo) · \(job.workflow)")
-                                .font(.system(size: 10))
-                                .lineLimit(1)
-                            Text(job.jobName)
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 6)
-                        if let since = job.since {
-                            Text(since.shortAge)
-                                .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
-                        if let url = job.runURL {
-                            Button {
-                                NSWorkspace.shared.open(url)
-                            } label: {
-                                Image(systemName: "arrow.up.forward.square")
-                                    .font(.system(size: 10))
-                            }
-                            .buttonStyle(.link)
-                            .help("Open run")
-                            .accessibilityLabel("Open run \(job.repo) \(job.workflow) \(job.jobName)")
-                        }
-                    }
-                }
-            }
-            if queued > 0 {
-                Divider()
-                Text("\(queued) queued")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(10)
-        .frame(minWidth: 220, maxWidth: 360, alignment: .leading)
-    }
-}
-
 // MARK: - Right rail: eve alerts
 
 /// Recent eve alerts in the visible lanes — what lands in the Telegram
@@ -496,7 +324,9 @@ struct NotesRail: View {
 /// refused by the box while the branch is alive), hold / unhold. Never
 /// `down`. The icons show only while `revealed`; a running verb's progress
 /// and a failure show regardless, in the same fixed-height slot, so the row
-/// never changes height or count while a verb runs.
+/// never changes height or count while a verb runs. The slot overlays the
+/// row's trailing columns, so whatever it shows sits on its own material
+/// pill; an empty slot draws nothing.
 struct DevboxVerbs: View {
     let workspace: DevboxWorkspace
     let store: StatusStore
@@ -527,11 +357,18 @@ struct DevboxVerbs: View {
             }
         }
         .frame(height: 14)
+        .padding(.horizontal, showsSomething ? 7 : 0)
+        .padding(.vertical, showsSomething ? 2 : 0)
+        .background(showsSomething ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(.clear), in: Capsule())
         .onChange(of: revealed) { _, shown in
             guard !shown else { return }
             confirmingPark = false
             confirmingClear = false
         }
+    }
+
+    private var showsSomething: Bool {
+        busyLabel != nil || lastActionFailed || revealed
     }
 
     @ViewBuilder

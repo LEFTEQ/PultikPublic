@@ -31,13 +31,14 @@ struct DevboxGlance {
     let headroomBytes: Double
     let diskUsedBytes: Double?
     let diskTotalBytes: Double?
-    /// Hot workspaces, heaviest first — the widget's chips.
+    /// Hot workspaces, heaviest first.
     let running: [DevboxWorkspace]
     let parked: Int
     let stale: Int
     let held: Int
     let pressurePercent: Double
     let swapUsedBytes: Double
+    let swapTotalBytes: Double
     let load1: Double
     /// nil without a core count — no ratio is invented.
     let loadPerCore: Double?
@@ -72,6 +73,7 @@ struct DevboxGlance {
         held = workspaces.filter(\.hold).count
         pressurePercent = summary.pressureSome
         swapUsedBytes = max(0, summary.swapTotalBytes - summary.swapFreeBytes)
+        swapTotalBytes = summary.swapTotalBytes
         load1 = summary.load1
         loadPerCore = summary.cpus > 0 ? summary.load1 / Double(summary.cpus) : nil
         if let used = summary.identities?.portsUsed, let total = summary.identities?.portCapacity {
@@ -95,6 +97,12 @@ struct DevboxGlance {
             alerts.append(.slots(used: slotsUsed, total: slotsTotal))
         }
         self.alerts = alerts
+    }
+
+    /// The widget's orange line: every alert its gauges do not already draw.
+    /// Swap has its own gauge, so past its threshold it tints there instead.
+    var bannerAlerts: [DevboxAlert] {
+        alerts.filter { if case .swap = $0 { false } else { true } }
     }
 
     /// "41" / "7.5" — whole gigabytes from ten up, one decimal below.
@@ -172,6 +180,83 @@ struct CIPoolGlance {
 
     private static func gib(_ mib: Int) -> Int {
         Int((Double(mib) / 1024).rounded())
+    }
+}
+
+/// The CI widget's day lines (2026-09-27), from Semafor's `/overview`:
+/// queue wait, throughput against yesterday at the same time, and the hours
+/// so far as a sparkline.
+struct CIThroughputGlance {
+    /// Semafor alerts when a lane's p90 wait stays over two minutes
+    /// (build-server-infra `alerts/semafor.yml`); the day's p95 past the same
+    /// line turns the wait orange.
+    static let slowWaitSeconds: Double = 120
+
+    /// "wait p50 3s · p95 1m22s · 0.3% > 5m"; nil before a job completed today.
+    let wait: String?
+    let waitSlow: Bool
+    /// "640 jobs today"
+    let jobs: String
+    /// "+5%" / "−12%" against yesterday up to the same time; nil when
+    /// yesterday had none to compare with.
+    let delta: String?
+    /// Jobs per local hour from midnight through the current hour — the
+    /// hours still ahead are not zeros, they have not happened.
+    let hours: [Int]
+
+    init(_ throughput: CIThroughput) {
+        if let queue = throughput.queue {
+            var parts = ["wait p50 \(Self.duration(queue.p50))", "p95 \(Self.duration(queue.p95))"]
+            if let share = throughput.over300sShare {
+                parts.append("\(Self.percent(share)) > 5m")
+            }
+            wait = parts.joined(separator: " · ")
+            waitSlow = queue.p95 > Self.slowWaitSeconds
+        } else {
+            wait = nil
+            waitSlow = false
+        }
+        jobs = "\(throughput.jobs.formatted()) jobs today"
+        if throughput.yesterdaySameTime > 0 {
+            let change = (Double(throughput.jobs) / Double(throughput.yesterdaySameTime) - 1) * 100
+            let rounded = Int(change.rounded())
+            delta = rounded < 0 ? "\u{2212}\(-rounded)%" : "+\(rounded)%"
+        } else {
+            delta = nil
+        }
+        let byHour = throughput.hours.sorted { $0.hour < $1.hour }
+        let now = throughput.currentHour ?? 23
+        hours = byHour.filter { $0.hour <= now }.map(\.jobs)
+    }
+
+    /// "3s", "1m22s", "1h4m" — whole seconds, never a fraction.
+    static func duration(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        if total < 60 { return "\(total)s" }
+        if total < 3600 { return total % 60 == 0 ? "\(total / 60)m" : "\(total / 60)m\(total % 60)s" }
+        return "\(total / 3600)h\((total % 3600) / 60)m"
+    }
+
+    /// "0.3%" under ten percent, "12%" from there.
+    static func percent(_ share: Double) -> String {
+        let value = share * 100
+        return value < 10 ? String(format: "%.1f%%", value) : "\(Int(value.rounded()))%"
+    }
+}
+
+/// Semafor's refusal reasons in the words its own admission page uses
+/// (semafor `web/src/routes/admission.tsx` `REASON_LABEL`), so the widget
+/// and the page it links to say the same thing.
+enum CIRefusalReason {
+    static func label(_ reason: String) -> String {
+        switch reason {
+        case "fifo": "FIFO"
+        case "mem_budget": "mem budget"
+        case "io_psi": "IO PSI"
+        case "mem_psi": "mem PSI"
+        case "mem_available": "MemAvailable"
+        default: reason // partition, containers — already words
+        }
     }
 }
 

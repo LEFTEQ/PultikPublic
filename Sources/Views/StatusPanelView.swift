@@ -43,15 +43,6 @@ private struct FooterHeightKey: PreferenceKey {
     }
 }
 
-/// Height of the vitals dock, which sits below the right rail's scroller and
-/// must keep its room when that scroller is capped.
-private struct DockHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 /// Intrinsic heights of the two side columns' scrollers — measured on their
 /// DEFINITE `ScrollColumn` frames, never on the stretched HStack cell. A
 /// stretched cell measures the panel's height, which includes the centre
@@ -387,8 +378,8 @@ struct StatusPanelView: View {
         store.isSectionVisible("devbox") && store.devboxSummary != nil
     }
 
-    /// The right rail's CI section: lanes reporting, or GitHub answering —
-    /// with neither there is nothing true to say, so it hides like any rail
+    /// The overview column's CI widget: lanes reporting, or GitHub answering —
+    /// with neither there is nothing true to say, so it hides like any widget
     /// whose backend is off the mesh.
     private var showCIWidget: Bool {
         let lanes = store.isSectionVisible("runners") && !store.laneBoard.isEmpty
@@ -410,7 +401,7 @@ struct StatusPanelView: View {
     /// overhanging the screen edge; every widget's page stays reachable by
     /// typing its mode.
     private var showLeftRail: Bool {
-        guard showVitrinkaRail || showDevbox || showEstateWidget else { return false }
+        guard showVitrinkaRail || !machineWidgets.isEmpty else { return false }
         let needed: CGFloat = 680 + 280 + (showServiceRail ? 280 : 0)
         return PanelMetrics.shared.maxWidth >= needed
     }
@@ -439,21 +430,17 @@ struct StatusPanelView: View {
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
     @State private var fanTicking = false
     @State private var presentedGeneration: Int?
-    /// The right rail carries reminders, CI, eve alerts, links and notes;
-    /// service probes moved to the overview column's Estate widget (spec
-    /// 2026-09-23 D11). CI came back here the same day (D10, amended).
+    /// The right rail carries reminders, eve alerts, links and notes; service
+    /// probes moved to the overview column's Estate widget (spec 2026-09-23
+    /// D11), CI and this Mac to its CI and This Mac widgets (2026-09-27).
     private var showServiceRail: Bool {
         showAlerts
-            || showCIWidget
             // Links, notes and reminders are local — they must be able to hold
             // the rail open on their own, or off-mesh they'd vanish with the
-            // probes. The vitals dock counts too: this Mac's fans are readable
-            // with no network at all, and the dock is the only thing that
-            // reports them since the fan strip was retired.
+            // probes.
             || !links.links.isEmpty
             || !notes.notes.isEmpty
             || !reminders.isEmpty
-            || (store.isSectionVisible("fans") && !FanStore.shared.fans.isEmpty)
     }
 
     private var panelWidth: CGFloat {
@@ -462,7 +449,6 @@ struct StatusPanelView: View {
 
     /// Measured chrome, subtracted from the screen budget below.
     @State private var footerHeight: CGFloat = 0
-    @State private var dockHeight: CGFloat = 0
     /// Tallest a column may be before it has to scroll: the working area of the
     /// screen the panel is on (`PanelMetrics`), less the footer beneath it.
     /// The floor keeps the hub usable on a very short screen rather than
@@ -476,9 +462,24 @@ struct StatusPanelView: View {
     /// are measured on the scrollers, not the stretched HStack cells.
     @State private var leftColumnHeight: CGFloat = 0
     @State private var rightRailsHeight: CGFloat = 0
-    /// The Devbox and Estate widgets as rendered — what the Vitrinka
-    /// widget's recent boards must leave room for.
+    /// The Devbox, CI, Estate and This Mac widgets as rendered — what the
+    /// Vitrinka widget's recent boards must leave room for.
     @State private var machineWidgetsHeight: CGFloat = 0
+
+    private enum MachineWidget: Hashable {
+        case devbox, ci, estate, mac
+    }
+
+    /// The machine widgets with something to show, in column order.
+    private var machineWidgets: [MachineWidget] {
+        var widgets: [MachineWidget] = []
+        if showDevbox { widgets.append(.devbox) }
+        if showCIWidget { widgets.append(.ci) }
+        if showEstateWidget { widgets.append(.estate) }
+        if MacWidget.isShown(store: store, fanStore: FanStore.shared) { widgets.append(.mac) }
+        return widgets
+    }
+
     /// The centre list keeps its 560pt design cap on a roomy screen and gives
     /// it up only when the screen is shorter than that — or when a side rail
     /// has already made the panel taller: the panel's height is set by its
@@ -487,41 +488,36 @@ struct StatusPanelView: View {
     /// The screen budget still wins over both. The palette and the pinned
     /// strips are stacked outside this frame, so every bound subtracts them
     /// first or the column would overrun the cap it is supposed to obey.
-    /// The overview column (spec 2026-09-23): Vitrinka · Devbox · Estate in
-    /// that fixed order, hairlines only between widgets that draw. The two
-    /// machine widgets are content-sized and measured; the Vitrinka widget
-    /// gets the rest of the column budget and fits its recent boards to it,
-    /// so no split is stored. The body wraps the column in a `ScrollColumn`
-    /// capped at the SAME `columnBudget`: it scrolls only when the machines
-    /// leave Vitrinka below its floor (head + 3 recents). One-way on purpose —
-    /// machines → Vitrinka's budget → content → scroller frame; nothing
-    /// measured on the scroller may feed Vitrinka, or the two would chase.
+    /// The overview column (spec 2026-09-23, 2026-09-27): Vitrinka · Devbox ·
+    /// CI · Estate · This Mac in that fixed order, hairlines only between
+    /// widgets that draw. The machine widgets are content-sized and measured;
+    /// the Vitrinka widget fits its (at most five) recent boards into the
+    /// rest of the column budget, so no split is stored. The body wraps the
+    /// column in a `ScrollColumn` capped at the SAME `columnBudget`: it
+    /// scrolls only when the machines leave Vitrinka below its floor (head +
+    /// 3 recents). One-way on purpose — machines → Vitrinka's budget →
+    /// content → scroller frame; nothing measured on the scroller may feed
+    /// Vitrinka, or the two would chase.
     @ViewBuilder
     private var leftColumn: some View {
+        let machines = machineWidgets
         VStack(spacing: 0) {
             if showVitrinkaRail {
                 // Until the machine widgets have been measured, Vitrinka keeps
                 // its floor: a cold tree's first pass must not fill the whole
                 // budget with recents and hand the window an over-tall fit.
                 VitrinkaWidget(store: store, snapshots: store.vitrinkaWorkspaces,
-                               maxHeight: (showDevbox || showEstateWidget) && machineWidgetsHeight == 0 ? 0
+                               maxHeight: !machines.isEmpty && machineWidgetsHeight == 0 ? 0
                                    : max(0, columnBudget - machineWidgetsHeight
-                                       - (showDevbox || showEstateWidget ? 1 : 0)),
+                                       - (machines.isEmpty ? 0 : 1)),
                                onOpenWork: { enterMode(.work, filter: $0) },
                                onOpenBoards: { enterMode(.boards) })
-                if showDevbox || showEstateWidget { hairline }
+                if !machines.isEmpty { hairline }
             }
             VStack(spacing: 0) {
-                if showDevbox {
-                    DevboxWidget(store: store, onOpen: { enterMode(.devbox, filter: $0) })
-                    if showEstateWidget { hairline }
-                }
-                if showEstateWidget {
-                    // Estate carries no outer padding of its own (it grew out
-                    // of a padded rail section); the column gives it the same
-                    // 10pt the Devbox and Vitrinka widgets keep.
-                    EstateWidget(store: store, onOpen: { enterMode(.estate, filter: $0) })
-                        .padding(10)
+                ForEach(Array(machines.enumerated()), id: \.element) { index, widget in
+                    if index > 0 { hairline }
+                    machineWidget(widget)
                 }
             }
             .background(
@@ -533,10 +529,28 @@ struct StatusPanelView: View {
         }
     }
 
+    @ViewBuilder
+    private func machineWidget(_ widget: MachineWidget) -> some View {
+        switch widget {
+        case .devbox:
+            DevboxWidget(store: store, onOpen: { enterMode(.devbox, filter: $0) })
+        case .ci:
+            CIWidget(store: store, onOpen: { enterMode(.ci, filter: $0) })
+        case .estate:
+            // Estate carries no outer padding of its own (it grew out of a
+            // padded rail section); the column gives it the same 10pt the
+            // other widgets keep.
+            EstateWidget(store: store, onOpen: { enterMode(.estate, filter: $0) })
+                .padding(10)
+        case .mac:
+            MacWidget(store: store, fanStore: FanStore.shared)
+        }
+    }
+
     private var centreCap: CGFloat {
         let budget = max(160, columnBudget - centreChrome)
         let design = min(560, budget)
-        let tallestSide = max(leftColumnHeight, rightRailsHeight + dockHeight)
+        let tallestSide = max(leftColumnHeight, rightRailsHeight)
         return max(design, min(max(0, tallestSide - centreChrome), budget))
     }
 
@@ -565,36 +579,15 @@ struct StatusPanelView: View {
                     .frame(width: 680)
                 if showServiceRail {
                     hairlineV
-                    // The dock is a SIBLING of the ScrollView, not content
-                    // inside it: welded to the column's bottom edge, it must
-                    // not scroll away with the rails stacked above it.
-                    VStack(spacing: 0) {
-                        ScrollColumn(maxHeight: max(120, columnBudget - dockHeight)) {
-                            railsColumn
-                        }
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(key: RightRailsHeightKey.self,
-                                                       value: proxy.size.height)
-                            }
-                        )
-                        Spacer(minLength: 0)
-                        // The dock is welded to the bottom and does not scroll —
-                        // except when it alone would eat the column (a long
-                        // estate on a short screen), where scrolling it beats
-                        // pushing the rails out of the panel entirely. Measured
-                        // AFTER its own cap, so the rails' budget above can
-                        // never be over-drawn.
-                        ScrollColumn(maxHeight: columnBudget - 120) {
-                            VitalsDock(store: store, fanStore: FanStore.shared)
-                        }
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(key: DockHeightKey.self,
-                                                       value: proxy.size.height)
-                            }
-                        )
+                    ScrollColumn(maxHeight: columnBudget) {
+                        railsColumn
                     }
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: RightRailsHeightKey.self,
+                                                   value: proxy.size.height)
+                        }
+                    )
                     .frame(width: 280)
                     .clipped()
                 }
@@ -618,10 +611,6 @@ struct StatusPanelView: View {
         .onPreferenceChange(FooterHeightKey.self) { value in
             let rounded = value.rounded()
             if abs(rounded - footerHeight) >= 1 { footerHeight = rounded }
-        }
-        .onPreferenceChange(DockHeightKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - dockHeight) >= 1 { dockHeight = rounded }
         }
         .onPreferenceChange(LeftColumnHeightKey.self) { value in
             let rounded = value.rounded()
@@ -778,30 +767,6 @@ struct StatusPanelView: View {
                                 ? .red : .orange)
                 {
                     RemindersRail(todos: reminders)
-                }
-            }
-            if showCIWidget {
-                // Back in the rail on user direction (D10, amended): the
-                // header folds it like every rail section — key `runners`
-                // keeps the collapse state it always had — so the page is
-                // an accessory beside it rather than the kicker's action.
-                let ci = CIWidget(store: store, onOpen: { enterMode(.ci, filter: $0) })
-                RailSection(
-                    key: "runners", title: "CI", count: ci.running,
-                    accessory: AnyView(
-                        Button { enterMode(.ci) } label: {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 7, weight: .bold))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 12, height: 12)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("Open every CI job — .ci")
-                        .accessibilityLabel("Open every CI job")
-                    )
-                ) {
-                    ci
                 }
             }
             if showAlerts {

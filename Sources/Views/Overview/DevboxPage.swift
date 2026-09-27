@@ -2,8 +2,8 @@ import SwiftUI
 
 /// The `.devbox` page (spec 2026-09-23 D8 B): every metric of D4 on one strip
 /// with the stale clear beside the title, then one row per workspace grouped
-/// running · parked, held ones pinned in place. Verbs appear on the hovered (or expanded) row in
-/// a fixed trailing slot; a click on a row opens its per-app detail below
+/// running · parked, held ones pinned in place. Verbs appear on the hovered (or expanded) row,
+/// floating over its trailing columns; a click on a row opens its per-app detail below
 /// it. `filter` matches name, project or branch.
 struct DevboxPage: View {
     let store: StatusStore
@@ -150,14 +150,13 @@ struct DevboxPage: View {
 
     private var columnHeader: some View {
         HStack(spacing: DevboxColumn.spacing) {
-            Text("WORKSPACE").frame(width: DevboxColumn.name, alignment: .leading)
+            Text("WORKSPACE").frame(minWidth: DevboxColumn.name, maxWidth: .infinity, alignment: .leading)
             Text("PROJECT · BRANCH").frame(width: DevboxColumn.identity, alignment: .leading)
             Text("APPS").frame(width: DevboxColumn.apps, alignment: .trailing)
             Text("MEM").frame(width: DevboxColumn.memory, alignment: .trailing)
             Text("PEAK").frame(width: DevboxColumn.memory, alignment: .trailing)
             Text("AGE").frame(width: DevboxColumn.age, alignment: .trailing)
                 .help("Running: since created · parked: since parked")
-            Spacer(minLength: 0)
         }
         .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
         .foregroundStyle(.tertiary)
@@ -200,7 +199,8 @@ struct DevboxPage: View {
 }
 
 /// Column widths of the workspace table — the header and every row share
-/// them so the columns line up; the verbs take what is left.
+/// them so the columns line up. The name takes what is left (`name` is its
+/// floor); the verbs take nothing, they overlay the row's trailing edge.
 private enum DevboxColumn {
     static let spacing: CGFloat = 6
     static let name: CGFloat = 160
@@ -210,8 +210,8 @@ private enum DevboxColumn {
     static let age: CGFloat = 44
 }
 
-/// One workspace: dot · name · project/branch · apps · mem · peak · age ·
-/// verbs. Parked rows wear the hollow dot every idle line in the panel wears;
+/// One workspace: dot · name · project/branch · apps · mem · peak · age, the
+/// verbs overlaid. Parked rows wear the hollow dot every idle line in the panel wears;
 /// a stale one's age is orange.
 private struct DevboxTableRow: View {
     let workspace: DevboxWorkspace
@@ -267,7 +267,7 @@ private struct DevboxTableRow: View {
                             .accessibilityLabel("box \(box)")
                     }
                 }
-                .frame(width: DevboxColumn.name, alignment: .leading)
+                .frame(minWidth: DevboxColumn.name, maxWidth: .infinity, alignment: .leading)
                 cell(identity, width: DevboxColumn.identity, alignment: .leading)
                     .truncationMode(.middle)
                 cell(apps, width: DevboxColumn.apps)
@@ -276,11 +276,12 @@ private struct DevboxTableRow: View {
                 cell(workspace.memPeakLabel, width: DevboxColumn.memory)
                     .help(workspace.footprintHelp)
                 cell(age, width: DevboxColumn.age, tone: isStale ? .orange : nil)
-                Spacer(minLength: 4)
-                DevboxVerbs(workspace: workspace, store: store, revealed: hovering || expanded)
             }
             .contentShape(Rectangle())
             .onTapGesture(perform: onToggle)
+            .overlay(alignment: .trailing) {
+                DevboxVerbs(workspace: workspace, store: store, revealed: hovering || expanded)
+            }
             if expanded {
                 DevboxWorkspaceDetail(workspace: workspace)
                     .padding(.leading, RailRowMetrics.indent)

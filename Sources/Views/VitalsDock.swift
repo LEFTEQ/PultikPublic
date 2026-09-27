@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Vitals dock (right rail, welded to the bottom edge)
+// MARK: - This Mac (overview column; the vitals dock until 2026-09-27)
 
 /// Every machine this operator runs, in one place (decisions D1/D2, 2026-08-27).
 ///
@@ -18,41 +18,42 @@ import SwiftUI
 /// the one thing that must be legible without a prior decision about it.
 ///
 /// Since 2026-09-23 (spec D2/D11) the estate tier lives in the overview
-/// column's Estate widget; the dock is this Mac alone.
-struct VitalsDock: View {
+/// column's Estate widget; the dock is this Mac alone. Since 2026-09-27 it
+/// is no dock at all: the This Mac widget closes the overview column, in the
+/// gauge grammar of the Devbox widget above it — the same kind of reading
+/// about the machine under your hands.
+struct MacWidget: View {
     let store: StatusStore
     let fanStore: FanStore
 
-    private var showMac: Bool {
-        store.isSectionVisible("fans") && (fanStore.hottest != nil || !fanStore.fans.isEmpty)
+    /// Host stats need no SMC, so the system row always has something to
+    /// say; only the sensors row waits for a sensor or a fan.
+    static func isShown(store: StatusStore, fanStore _: FanStore) -> Bool {
+        store.isSectionVisible("fans")
     }
 
     var body: some View {
-        if showMac {
-            VStack(alignment: .leading, spacing: 0) {
-                Rectangle().fill(Theme.hairline).frame(height: 1)
-                MacTier(fanStore: fanStore)
-                    .padding(10)
-            }
-            .background(.white.opacity(0.02))
+        if Self.isShown(store: store, fanStore: fanStore) {
+            MacTier(fanStore: fanStore)
+                .padding(10)
         }
     }
 }
 
 // MARK: - Tier 1: this Mac
 
-/// The machine under your hands, in its own grammar: hottest die temp, every
-/// fan, cpu, memory, and thermal pressure when the OS is throttling. This is
-/// the full `FanStrip` reading set in a quarter of the width — nothing was
-/// dropped in the move, which is what made the two-tier shape worth its
-/// hairline.
+/// The machine under your hands, in the Estate widget's row grammar: a
+/// `MachineVitals` row (cpu · memory · disk) like every server's, then a
+/// sensors row — hottest die temp and the fans — in the same columns, and
+/// thermal pressure when the OS is throttling on the tooltip. The full
+/// `FanStrip` reading set; nothing was dropped in any move.
 private struct MacTier: View {
     let fanStore: FanStore
     private let brightness = BrightnessStore.shared
     private let awake = AwakeStore.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Kicker(text: "This Mac")
                 Spacer(minLength: 0)
@@ -73,62 +74,84 @@ private struct MacTier: View {
                         .help("\(fanStore.heldRPM.count) fan(s) pinned to a constant RPM — .fans to release")
                 }
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, RailRowMetrics.inset)
+            .padding(.bottom, 1)
 
-            // ONE line, always. A wrapping dock is not a cosmetic problem:
-            // its height feeds the right rail's scroll budget
-            // (StatusPanelView.columnBudget), so a second row silently steals
-            // a row of rails. Text shrinks to fit rather than wrapping or
-            // truncating — on a many-fan Mac the numbers get smaller, never
-            // clipped, never a second line.
-            HStack(spacing: 9) {
-                if let hottest = fanStore.hottest {
-                    Vital(symbol: "thermometer.medium",
-                          text: String(format: "%.0f°", hottest.celsius),
-                          tone: tempTone(hottest.celsius),
-                          help: "\(hottest.name) — hottest sensor")
-                }
-                if fanStore.fans.count <= Self.maxFanCells {
-                    ForEach(fanStore.fans) { fan in
-                        Vital(symbol: "fanblades", text: "\(fan.currentRPM)",
-                              tone: fanTone(fan), help: fanHelp(fan))
-                    }
-                } else if let fastest = fanStore.fans.max(by: { $0.currentRPM < $1.currentRPM }) {
-                    // Shrinking text alone cannot save a row of eight fans —
-                    // the icons and spacing keep their intrinsic width, so the
-                    // cells at the end would simply be clipped away. One cell
-                    // for the fastest fan and the count says more than four
-                    // half-visible numbers; the full list is on the tooltip.
-                    Vital(symbol: "fanblades",
-                          text: "\(fastest.currentRPM)×\(fanStore.fans.count)",
-                          tone: fanTone(fastest), help: allFansHelp)
-                }
-                if let load = fanStore.cpuLoad {
-                    Vital(symbol: "cpu", text: "\(Int((load * 100).rounded()))%",
-                          tone: percentTone(load * 100), help: "CPU load, all cores")
-                }
-                if let mem = fanStore.memUsedFraction {
-                    // memTone, not percentTone: used-% over-alarms on a healthy
-                    // Mac where inactive pages keep "used" high while kernel
-                    // pressure is nominal.
-                    Vital(symbol: "memorychip", text: "\(Int((mem * 100).rounded()))%",
-                          tone: memTone(fanStore, percent: mem * 100), help: memHelp)
-                }
-                Spacer(minLength: 0)
+            let disk = diskUsage
+            // memTone, not percentTone: used-% over-alarms on a healthy Mac
+            // where inactive pages keep "used" high while kernel pressure is
+            // nominal.
+            MachineVitals(name: "system", cpuCount: ProcessInfo.processInfo.activeProcessorCount,
+                          cpuPercent: fanStore.cpuLoad.map { $0 * 100 },
+                          memoryUsed: fanStore.memUsedBytes, memoryTotal: fanStore.memTotalBytes,
+                          diskUsed: disk?.used, diskTotal: disk?.total,
+                          memoryTone: fanStore.memUsedFraction.map { memTone(fanStore, percent: $0 * 100) })
+                .padding(.horizontal, RailRowMetrics.inset)
+                .padding(.vertical, 3)
+
+            if hasSensors || !thermalHelp.isEmpty {
+                sensors
+                    .padding(.horizontal, RailRowMetrics.inset)
+                    .padding(.vertical, 3)
+                    // The row, not the temperature cell, carries the OS thermal
+                    // state: a machine with no readable sensor has no temperature
+                    // cell to hang it on, and that is exactly a machine whose
+                    // thermal pressure you would want to know about.
+                    .help(thermalHelp)
             }
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
-            .padding(.horizontal, 2)
-            // The tier, not the temperature cell, carries the OS thermal
-            // state: a machine with no readable sensor has no temperature cell
-            // to hang it on, and that is exactly a machine whose thermal
-            // pressure you would want to know about.
-            .help(thermalHelp)
         }
     }
 
-    /// Beyond this the fan cells stop fitting the rail-width line next to the
-    /// temperature, cpu and memory cells.
+    private var hasSensors: Bool {
+        fanStore.hottest != nil || !fanStore.fans.isEmpty
+    }
+
+    /// Temp under cpu, fans under memory and disk — the machine rows'
+    /// columns, so the two rows read as one grid.
+    private var sensors: some View {
+        HStack(spacing: 6) {
+            Text("sensors")
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: MachineVitals.Column.name, alignment: .leading)
+            if let hottest = fanStore.hottest {
+                Vital(symbol: "thermometer.medium",
+                      text: String(format: "%.0f°", hottest.celsius),
+                      tone: tempTone(hottest.celsius), width: MachineVitals.Column.percent,
+                      help: "\(hottest.name) — hottest sensor")
+            }
+            if fanStore.fans.count <= Self.maxFanCells {
+                ForEach(Array(fanStore.fans.enumerated()), id: \.element.id) { index, fan in
+                    Vital(symbol: "fanblades", text: "\(fan.currentRPM)", tone: fanTone(fan),
+                          width: index == 0 ? MachineVitals.Column.size : MachineVitals.Column.percent,
+                          help: fanHelp(fan))
+                }
+            } else if let fastest = fanStore.fans.max(by: { $0.currentRPM < $1.currentRPM }) {
+                // One cell for the fastest fan and the count says more than
+                // half-visible numbers; the full list is on the tooltip.
+                Vital(symbol: "fanblades",
+                      text: "\(fastest.currentRPM)×\(fanStore.fans.count)",
+                      tone: fanTone(fastest), width: MachineVitals.Column.size, help: allFansHelp)
+            }
+            if !hasSensors {
+                // No SMC reading to carry it: the OS thermal state in words.
+                Text(fanStore.thermalState == .fair ? "warm" : "throttling")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.orange)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The startup volume as `FanStore` last sampled it — never read here,
+    /// the body re-evaluates on every fan tick.
+    private var diskUsage: (used: Double, total: Double)? {
+        guard let total = fanStore.diskTotalBytes, total > 0, let free = fanStore.diskFreeBytes else { return nil }
+        return (Double(total - free), Double(total))
+    }
+
+    /// The sensors row has two cells for fans — the memory and disk columns.
     private static let maxFanCells = 2
 
     private func fanHelp(_ fan: Fan) -> String {
@@ -141,11 +164,6 @@ private struct MacTier: View {
     /// less than the individual cells did.
     private var allFansHelp: String {
         fanStore.fans.map(fanHelp).joined(separator: " · ")
-    }
-
-    private var memHelp: String {
-        guard let used = fanStore.memUsedBytes else { return "Memory used" }
-        return String(format: "Memory %.1f / %.0f GB", used / 1e9, fanStore.memTotalBytes / 1e9)
     }
 
     /// The OS thermal state used to have its own cell ("warm"/"hot"). The
