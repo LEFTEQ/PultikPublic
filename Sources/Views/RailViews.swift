@@ -322,9 +322,9 @@ struct RailFoot: View {
 
 /// One workspace's lifecycle verbs (spec 2026-09-14 decisions 6–7, moved
 /// onto the `.devbox` page by spec 2026-09-23 D8): hot — park (two-click),
-/// hold / unhold, Warp; parked — revive, clear (two-click `devbox reap`,
-/// refused by the box while the branch is alive), hold / unhold. Never
-/// `down`. The icons show only while `revealed`; a running verb's progress
+/// Warp; parked — revive; every row — clear (two-click, spec 2026-09-28:
+/// park, drop a stale branch's clean worktree, `devbox reap`; a live branch
+/// is kept), hold / unhold. Never `down`. The icons show only while `revealed`; a running verb's progress
 /// and a failure show regardless, in the same fixed-height slot, so the row
 /// never changes height or count while a verb runs. The slot overlays the
 /// row's trailing columns, so whatever it shows sits on its own material
@@ -341,7 +341,9 @@ struct DevboxVerbs: View {
     /// modal — the panel is a floating HUD and a sheet on it is never right.
     @State private var confirmingPark = false
     @State private var confirmingClear = false
-    @State private var lastActionFailed = false
+    /// What the last verb's failure says — "failed · see log", or a clear's
+    /// "kept · <reason>" — shown for a few seconds in the verb slot.
+    @State private var failure: String?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -350,10 +352,14 @@ struct DevboxVerbs: View {
                 Text(busyLabel)
                     .font(.system(size: 8.5, design: .monospaced))
                     .foregroundStyle(.tertiary)
-            } else if lastActionFailed {
-                Text("failed · see log")
+            } else if let failure {
+                // Capped in characters, not a maxWidth frame: a frame makes
+                // the pill greedy and it would cover the row for a short word.
+                Text(failure.count > 48 ? failure.prefix(47) + "…" : failure)
                     .font(.system(size: 8.5, design: .monospaced))
                     .foregroundStyle(.red)
+                    .lineLimit(1)
+                    .help(failure)
             } else if revealed {
                 lifecycleActions
             }
@@ -370,7 +376,7 @@ struct DevboxVerbs: View {
     }
 
     private var showsSomething: Bool {
-        busyLabel != nil || lastActionFailed || revealed
+        busyLabel != nil || failure != nil || revealed
     }
 
     @ViewBuilder
@@ -390,29 +396,6 @@ struct DevboxVerbs: View {
                     .help(workspace.macPath.map { "Cannot revive from here — \($0) is not on this Mac" }
                         ?? "Cannot revive from here — the box recorded no Mac path")
                     .accessibilityLabel("Revive unavailable")
-            }
-            if confirmingClear {
-                Button {
-                    confirmingClear = false
-                    runAction("clearing") {
-                        await DevboxClient.shared.run(.reap, workspace: workspace.name)
-                    }
-                } label: {
-                    Text("clear?")
-                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.red)
-                }
-                .buttonStyle(.plain)
-                .help("Click again to reap this workspace (devbox reap — fails while its branch is still alive)")
-                .accessibilityLabel("Confirm clear")
-            } else {
-                devboxIconButton("trash", "Clear", "Clear — devbox reap: tear the workspace down; refused while its branch is alive") {
-                    confirmingClear = true
-                    Task {
-                        try? await Task.sleep(for: .seconds(4))
-                        await MainActor.run { confirmingClear = false }
-                    }
-                }
             }
         } else {
             if confirmingPark {
@@ -439,6 +422,7 @@ struct DevboxVerbs: View {
                 }
             }
         }
+        clearAction
         if workspace.hold {
             devboxIconButton("pin.slash", "Unhold", "Unhold — return to auto-parking") {
                 runAction("unholding") {
@@ -459,6 +443,39 @@ struct DevboxVerbs: View {
         }
     }
 
+    /// Every row's teardown (spec 2026-09-28): `DevboxClient.clear` parks,
+    /// drops a stale branch's clean Mac worktree and reaps — or keeps the
+    /// workspace and says why in the failure slot.
+    @ViewBuilder
+    private var clearAction: some View {
+        if confirmingClear {
+            Button {
+                confirmingClear = false
+                runVerb("clearing") {
+                    switch await DevboxClient.shared.clear(workspace) {
+                    case .cleared: nil
+                    case .kept(let reason): "kept · \(reason)"
+                    }
+                }
+            } label: {
+                Text("clear?")
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Click again to clear — a live branch, a hold or a worktree with changes keeps it")
+            .accessibilityLabel("Confirm clear")
+        } else {
+            devboxIconButton("trash", "Clear", "Clear — park, remove the Mac worktree once its branch is gone and it is clean, devbox reap; a live branch is kept") {
+                confirmingClear = true
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    await MainActor.run { confirmingClear = false }
+                }
+            }
+        }
+    }
+
     /// One verb at a time per workspace; the box is refreshed straight after
     /// so the row flips within the same breath, not at the next poll.
     ///
@@ -470,17 +487,31 @@ struct DevboxVerbs: View {
     /// leave the row stuck on "reviving" forever. Concurrency is bounded by
     /// the `busyLabel == nil` guard, so no later action can be stomped.
     private func runAction(_ label: String, _ work: @escaping () async -> Bool) {
+        runVerb(label) { await work() ? nil : "failed · see log" }
+    }
+
+    /// `runAction` for a verb that says why it failed: nil is success, a
+    /// string is what the slot shows.
+    private func runVerb(_ label: String, _ work: @escaping () async -> String?) {
         guard busyLabel == nil else { return }
         busyLabel = label
-        lastActionFailed = false
+        failure = nil
         Task {
-            let ok = await work()
-            await store.refreshDevboxNow()
-            await MainActor.run { busyLabel = nil }
-            guard !ok else { return }
-            await MainActor.run { lastActionFailed = true }
-            try? await Task.sleep(for: .seconds(6))
-            await MainActor.run { lastActionFailed = false }
+            let message = await work()
+            guard let message else {
+                await store.refreshDevboxNow()
+                await MainActor.run { busyLabel = nil }
+                return
+            }
+            // A failure says why at once; the refresh (seconds across every
+            // box) runs behind it rather than eating the time it is shown.
+            await MainActor.run {
+                busyLabel = nil
+                failure = message
+            }
+            Task { await store.refreshDevboxNow() }
+            try? await Task.sleep(for: .seconds(8))
+            await MainActor.run { if failure == message { failure = nil } }
         }
     }
 }
