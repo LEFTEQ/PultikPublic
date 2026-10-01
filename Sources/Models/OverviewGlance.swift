@@ -285,11 +285,9 @@ struct AlertGlance {
                 return (a.activeAt ?? .distantPast) > (b.activeAt ?? .distantPast)
             }
             let first = ordered[0]
-            let context = [first.labels["app"], first.labels["environment"]]
-                .compactMap { $0 }.joined(separator: " · ")
             return Row(name: name, critical: group.contains { $0.severity == "critical" },
                        title: first.summary ?? name, more: group.count - 1,
-                       context: context.isEmpty ? nil : context,
+                       context: first.context,
                        since: first.activeAt, alerts: ordered)
         }
         .sorted { a, b in

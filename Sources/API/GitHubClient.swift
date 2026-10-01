@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum GitHubError: LocalizedError {
     case http(Int, String)
@@ -14,9 +15,45 @@ enum GitHubError: LocalizedError {
     }
 }
 
+struct GitHubPRSearchResult: Sendable {
+    let hits: [ArchivedPR]
+    let complete: Bool
+    let warning: String?
+}
+
 actor GitHubClient {
     private var token: String?
-    private let session = PollingSession.make()
+    private var tokenFetchedAt: Date?
+    private let session: URLSession
+    private let tokenProvider: @Sendable () throws -> String
+    private let queue: GitHubRequestQueue
+    private struct Pending {
+        let id: UUID
+        let task: Task<Data, Error>
+        var subscribers: Set<UUID>
+    }
+    private var pending: [String: Pending] = [:]
+    private(set) var networkRequests = 0
+    private(set) var sharedRequests = 0
+    private(set) var prLookupRequests = 0
+    private(set) var prSearchRequests = 0
+
+    init(session: URLSession = PollingSession.make(),
+         queue: GitHubRequestQueue = GitHubRequestQueue(),
+         tokenProvider: @escaping @Sendable () throws -> String = { try GHToken.fetch() }) {
+        self.session = session
+        self.queue = queue
+        self.tokenProvider = tokenProvider
+    }
+
+    /// Digest only: the disk cache never stores credentials or an auth header.
+    func cacheIdentity() throws -> String {
+        Self.identity(for: try tokenValue())
+    }
+
+    private static func identity(for token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
@@ -32,14 +69,17 @@ actor GitHubClient {
     private static let tokenRetryInterval: TimeInterval = 60
 
     private func tokenValue() throws -> String {
-        if let token { return token }
+        if let token, let tokenFetchedAt,
+           Date().timeIntervalSince(tokenFetchedAt) < Self.tokenRetryInterval { return token }
         if let failure = tokenFailure,
            Date().timeIntervalSince(failure.at) < Self.tokenRetryInterval {
             throw failure.error
         }
         do {
-            let fetched = try GHToken.fetch()
+            let fetched = try tokenProvider()
+            if token != nil, token != fetched { etagCache = GitHubResponseCache() }
             token = fetched
+            tokenFetchedAt = Date()
             tokenFailure = nil
             return fetched
         } catch {
@@ -72,24 +112,104 @@ actor GitHubClient {
 
     /// `cache: false` keeps one-off paths (every distinct search query is one)
     /// out of the bounded ETag cache.
-    private func request(_ path: String, method: String = "GET", cache: Bool = true) async throws -> Data {
+    private func request(_ path: String, method: String = "GET", cache: Bool = true,
+                         priority: GitHubRequestQueue.Priority = .interactive,
+                         polling: Bool? = nil) async throws -> Data {
+        try Task.checkCancellation()
+        guard method == "GET" else {
+            return try await performRequest(path, method: method, cache: cache,
+                                            priority: priority, polling: false, authorization: try tokenValue())
+        }
+        let authorization = try tokenValue()
+        let identity = Self.identity(for: authorization)
+        let key = identity + "|" + path + "|" + String(cache)
+        let subscriber = UUID()
+        let flight: Pending
+        if var existing = pending[key] {
+            existing.subscribers.insert(subscriber)
+            pending[key] = existing
+            flight = existing
+            sharedRequests += 1
+        } else {
+            let task = Task {
+                try await self.performRequest(path, method: method, cache: cache,
+                                              priority: priority, polling: polling ?? cache, authorization: authorization)
+            }
+            flight = Pending(id: UUID(), task: task, subscribers: [subscriber])
+            pending[key] = flight
+        }
+        defer { unsubscribe(key: key, flightID: flight.id, subscriber: subscriber, cancelled: false) }
+        return try await withTaskCancellationHandler {
+            do {
+                let data = try await flight.task.value
+                try Task.checkCancellation()
+                return data
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                throw error
+            }
+        } onCancel: {
+            Task { await self.unsubscribe(key: key, flightID: flight.id, subscriber: subscriber, cancelled: true) }
+        }
+    }
+
+    private func unsubscribe(key: String, flightID: UUID, subscriber: UUID, cancelled: Bool) {
+        guard var flight = pending[key], flight.id == flightID else { return }
+        flight.subscribers.remove(subscriber)
+        if flight.subscribers.isEmpty {
+            pending.removeValue(forKey: key)
+            if cancelled { flight.task.cancel() }
+        } else { pending[key] = flight }
+    }
+
+    private func performRequest(_ path: String, method: String, cache: Bool,
+                                priority: GitHubRequestQueue.Priority, polling: Bool, authorization: String) async throws -> Data {
         let resource = path.hasPrefix("/search/") ? "search" : "core"
-        if let until = budget.admit(resource: resource, polling: method == "GET" && cache, now: Date()) {
+        // Bind the credential before queueing. An account switch while this
+        // request waits must not put the new account's data in the old cache.
+        let slot = UUID()
+        try await queue.acquire(id: slot, resource: resource, priority: priority)
+        do {
+            let data = try await send(path, method: method, cache: cache, resource: resource,
+                                      polling: polling, authorization: authorization)
+            await queue.release(id: slot)
+            return data
+        } catch {
+            await queue.release(id: slot)
+            throw error
+        }
+    }
+
+    private func send(_ path: String, method: String, cache: Bool, resource: String,
+                      polling: Bool, authorization: String) async throws -> Data {
+        try Task.checkCancellation()
+        if let until = budget.admit(resource: resource, polling: polling,
+                                    mutation: method != "GET", now: Date()) {
             throw GitHubError.deferred(until)
         }
         var req = URLRequest(url: URL(string: "https://api.github.com" + path)!)
         req.httpMethod = method
-        req.setValue("Bearer \(try tokenValue())", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         req.cachePolicy = .reloadIgnoringLocalCacheData
         // Hold the exact body whose validator we send across the await.
         // Actor reentrancy lets another response evict or replace this path.
-        let cached = method == "GET" && cache ? etagCache.value(for: path) : nil
+        let cacheKey = Self.identity(for: authorization) + "|" + path
+        let cached = method == "GET" && cache ? etagCache.value(for: cacheKey) : nil
         if let cached {
             req.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
         }
 
+        networkRequests += 1
+        let parts = path.split(separator: "/")
+        if method == "GET", parts.count == 5, parts[3] == "pulls", Int(parts[4]) != nil {
+            prLookupRequests += 1
+        }
+        if resource == "search", let q = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "q" })?.value, q.hasPrefix("is:pr ") {
+            prSearchRequests += 1
+        }
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw GitHubError.http(-1, path)
@@ -105,9 +225,7 @@ actor GitHubClient {
                        remaining: remaining, reset: reset, retryAfter: retryAfter,
                        rateLimited: limited, now: Date())
         if http.statusCode == 429 || limited {
-            if let until = budget.admit(resource: resource, polling: false, now: Date()) {
-                throw GitHubError.deferred(until)
-            }
+            throw GitHubError.deferred(budget.blockedUntil(resource: resource, now: Date()) ?? Date().addingTimeInterval(60))
         }
         if http.statusCode == 304, let cached {
             return cached.data
@@ -117,13 +235,15 @@ actor GitHubClient {
             throw GitHubError.http(http.statusCode, path)
         }
         if method == "GET", cache, let etag = http.value(forHTTPHeaderField: "ETag") {
-            etagCache.insert(.init(etag: etag, data: data), for: path)
+            etagCache.insert(.init(etag: etag, data: data), for: cacheKey)
         }
         return data
     }
 
-    private func fetch<T: Decodable>(_ type: T.Type, _ path: String, cache: Bool = true) async throws -> T {
-        try decoder.decode(T.self, from: try await request(path, cache: cache))
+    private func fetch<T: Decodable>(_ type: T.Type, _ path: String, cache: Bool = true,
+                                     priority: GitHubRequestQueue.Priority = .interactive,
+                                     polling: Bool? = nil) async throws -> T {
+        try decoder.decode(T.self, from: try await request(path, cache: cache, priority: priority, polling: polling))
     }
 
     // MARK: - Reads
@@ -141,12 +261,12 @@ actor GitHubClient {
     }
 
     func workflowRuns(repo: String) async throws -> [WorkflowRun] {
-        try await fetch(WorkflowRunsResponse.self, "/repos/\(repo)/actions/runs?per_page=10").workflowRuns
+        try await fetch(WorkflowRunsResponse.self, "/repos/\(repo)/actions/runs?per_page=10", priority: .background).workflowRuns
     }
 
     /// Latest deployment per environment, each with its most recent status.
     func deployments(repo: String) async throws -> [DeployInfo] {
-        let deployments = try await fetch([Deployment].self, "/repos/\(repo)/deployments?per_page=10")
+        let deployments = try await fetch([Deployment].self, "/repos/\(repo)/deployments?per_page=10", priority: .background)
         let latestPerEnv = Dictionary(grouping: deployments, by: \.environment)
             .compactMap { $0.value.max(by: { $0.createdAt < $1.createdAt }) }
             .sorted { $0.createdAt > $1.createdAt }
@@ -155,7 +275,7 @@ actor GitHubClient {
         for deployment in latestPerEnv.prefix(4) {
             let statuses = try await fetch(
                 [DeploymentStatus].self,
-                "/repos/\(repo)/deployments/\(deployment.id)/statuses?per_page=1"
+                "/repos/\(repo)/deployments/\(deployment.id)/statuses?per_page=1", priority: .background
             )
             let status = statuses.first
             infos.append(DeployInfo(
@@ -168,12 +288,12 @@ actor GitHubClient {
     }
 
     func pullRequests(repo: String) async throws -> [PRInfo] {
-        let prs = try await fetch([PullRequest].self, "/repos/\(repo)/pulls?state=open&per_page=5")
+        let prs = try await fetch([PullRequest].self, "/repos/\(repo)/pulls?state=open&per_page=5", priority: .background)
         var infos: [PRInfo] = []
         for pr in prs {
             let checks = try await fetch(
                 CheckRunsResponse.self,
-                "/repos/\(repo)/commits/\(pr.head.sha)/check-runs?per_page=50"
+                "/repos/\(repo)/commits/\(pr.head.sha)/check-runs?per_page=50", priority: .background
             ).checkRuns
             let state: CheckState
             if checks.isEmpty {
@@ -193,7 +313,7 @@ actor GitHubClient {
     /// Latest APPROVED/CHANGES_REQUESTED/DISMISSED review per reviewer;
     /// changes-requested dominates, any approval counts, otherwise awaiting.
     private func reviewState(repo: String, number: Int) async throws -> ReviewState {
-        let reviews = try await fetch([PRReview].self, "/repos/\(repo)/pulls/\(number)/reviews?per_page=50")
+        let reviews = try await fetch([PRReview].self, "/repos/\(repo)/pulls/\(number)/reviews?per_page=50", priority: .background)
         var latest: [String: String] = [:]
         for review in reviews {
             guard let login = review.user?.login,
@@ -222,22 +342,47 @@ actor GitHubClient {
     /// `advanced_search` repeated `repo:` qualifiers are ANDed (a PR is never
     /// in two repos, so that silently returns nothing), and GitHub documents a
     /// 256-character / five-operator ceiling on `q`.
-    func searchPullRequests(terms: String, repos: [String], limit: Int = 15) async throws -> [ArchivedPR] {
+    func searchPullRequests(terms: String, repos: [String], limit: Int = 15) async throws -> GitHubPRSearchResult {
         let terms = terms.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !terms.isEmpty, !repos.isEmpty else { return [] }
-        let found = try await chunked(repos: repos, what: "PR") { chunk in
-            try await self.search(terms: terms, chunk: chunk, limit: limit)
+        guard !terms.isEmpty, !repos.isEmpty else { return .init(hits: [], complete: true, warning: nil) }
+        var found: [ArchivedPR] = []
+        var warning: String?
+        var failure: Error?
+        for chunk in Self.repoChunks(repos) {
+            try Task.checkCancellation()
+            do {
+                let page = try await search(terms: terms, chunk: chunk, limit: limit)
+                found.append(contentsOf: page.hits)
+                if !page.complete { warning = page.warning }
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                failure = error
+                warning = error.localizedDescription
+                if case GitHubError.deferred = error { break }
+                if case GitHubError.http(let code, _) = error, code == 401 || code == 403 { break }
+            }
         }
-        return Array(found.sorted { $0.updatedAt > $1.updatedAt }.prefix(limit))
+        if found.isEmpty, let failure { throw failure }
+        return .init(hits: Array(found.sorted { $0.updatedAt > $1.updatedAt }.prefix(limit)),
+                     complete: warning == nil, warning: warning)
     }
 
-    private func search(terms: String, chunk: [String], limit: Int) async throws -> [ArchivedPR] {
+    private func search(terms: String, chunk: [String], limit: Int) async throws -> GitHubPRSearchResult {
         let scope = chunk.map { "repo:\($0)" }.joined(separator: " OR ")
         let q = "is:pr (\(scope)) \(terms)"
         let path = "/search/issues?advanced_search=true&sort=updated&order=desc"
             + "&per_page=\(limit)&q=\(Self.encode(q))"
-        return try await fetch(PRSearchResponse.self, path, cache: false)
-            .items.map(ArchivedPR.init(item:))
+        let response = try await fetch(PRSearchResponse.self, path, cache: false)
+        return .init(hits: response.items.map(ArchivedPR.init(item:)),
+                     complete: response.incompleteResults != true,
+                     warning: response.incompleteResults == true ? "GitHub returned partial search results" : nil)
+    }
+
+    func archivePage(repo: String, page: Int) async throws -> [ArchivedPR] {
+        let prs = try await fetch([PRLookup].self,
+            "/repos/\(repo)/pulls?state=all&sort=updated&direction=desc&per_page=100&page=\(page)",
+            priority: .background)
+        return prs.map { ArchivedPR(lookup: $0, repoSlug: repo) }
     }
 
     /// One search per repo chunk, run concurrently and merged. A partial answer
@@ -300,15 +445,16 @@ actor GitHubClient {
     func recentIssues(repos: [String], limit: Int = 20) async throws -> [ArchivedIssue] {
         guard !repos.isEmpty else { return [] }
         let found = try await chunked(repos: repos, what: "recent issue") { chunk in
-            try await self.issueSearch(q: Self.scope(chunk), limit: limit)
+            try await self.issueSearch(q: Self.scope(chunk), limit: limit, priority: .background, polling: true)
         }
         return Array(found.sorted { $0.updatedAt > $1.updatedAt }.prefix(limit))
     }
 
-    private func issueSearch(q: String, limit: Int) async throws -> [ArchivedIssue] {
+    private func issueSearch(q: String, limit: Int, priority: GitHubRequestQueue.Priority = .interactive,
+                             polling: Bool = false) async throws -> [ArchivedIssue] {
         let path = "/search/issues?advanced_search=true&sort=updated&order=desc"
             + "&per_page=\(limit)&q=\(Self.encode(q))"
-        return try await fetch(IssueSearchResponse.self, path, cache: false)
+        return try await fetch(IssueSearchResponse.self, path, cache: false, priority: priority, polling: polling)
             .items.compactMap(ArchivedIssue.init(item:))
     }
 
@@ -357,33 +503,30 @@ actor GitHubClient {
     /// full-text search will reliably surface. Misses (404) are expected: the
     /// number only exists in some of the repos. Same all-failed `failure`
     /// contract as `lookupIssues`.
-    func lookupPullRequests(number: Int, repos: [String]) async -> (hits: [ArchivedPR], failure: ProbeFailure?) {
-        await withTaskGroup(of: (hit: ArchivedPR?, failure: ProbeFailure?).self) { group in
-            for repo in repos {
-                group.addTask {
-                    do {
-                        let pr = try await self.fetch(
-                            PRLookup.self, "/repos/\(repo)/pulls/\(number)", cache: false
-                        )
-                        return (ArchivedPR(lookup: pr, repoSlug: repo), nil)
-                    } catch GitHubError.http(404, _) {
-                        return (nil, nil) // no such PR in this repo
-                    } catch {
-                        NSLog("pultik: PR #%d lookup on %@ failed: %@",
-                              number, repo, error.localizedDescription)
-                        return (nil, .classify(error))
-                    }
-                }
+    func lookupPullRequests(number: Int, repos: [String]) async throws
+        -> (hits: [ArchivedPR], confirmedRepos: [String], warning: String?, failure: ProbeFailure?) {
+        var found: [ArchivedPR] = []
+        var confirmed: [String] = []
+        var warning: String?
+        var failure: ProbeFailure?
+        for repo in repos {
+            try Task.checkCancellation()
+            do {
+                let pr = try await fetch(PRLookup.self, "/repos/\(repo)/pulls/\(number)", cache: false)
+                found.append(ArchivedPR(lookup: pr, repoSlug: repo))
+                confirmed.append(repo)
+            } catch is CancellationError { throw CancellationError() }
+            catch GitHubError.http(404, _) { confirmed.append(repo) }
+            catch {
+                warning = error.localizedDescription
+                failure = .classify(error)
+                NSLog("pultik: PR #%d lookup on %@ failed: %@", number, repo, error.localizedDescription)
+                // A known deadline applies to every remaining repo too.
+                if case GitHubError.deferred = error { break }
+                if case GitHubError.http(let code, _) = error, code == 401 || code == 403 { break }
             }
-            var found: [ArchivedPR] = []
-            var failures: [ProbeFailure] = []
-            for await result in group {
-                if let hit = result.hit { found.append(hit) }
-                if let failure = result.failure { failures.append(failure) }
-            }
-            return (found.sorted { $0.updatedAt > $1.updatedAt },
-                    failures.count == repos.count ? failures.first : nil)
         }
+        return (found.sorted { $0.updatedAt > $1.updatedAt }, confirmed, warning, failure)
     }
 
     /// Six repos per query: five `OR`s is GitHub's documented operator ceiling,

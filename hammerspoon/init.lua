@@ -650,4 +650,8 @@ end
 Organize = dofile(packageDir .. "/organize.lua")
 Organize.start({ arrange = arrangeScreen })
 
+-- Optional native cmux grids; existing global window shortcuts stay independent.
+CmuxGrid = dofile(packageDir .. "/cmux.lua")
+CmuxGrid.start()
+
 hs.alert.show("Hammerspoon: Pultík package loaded")

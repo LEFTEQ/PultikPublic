@@ -49,6 +49,9 @@ fifth key to give.
 | `⌃⌥` + `A S D` | Same thirds, bottom half (landscape) / right half (portrait) |
 | `⌃⌥` + `M , . -` | Full-height quarter columns 1–4 — but only where the grid has fewer than 3 rows; on the portrait 3×3 these keys are the grid's third row instead. They stay *quarters* on the 5×2, so there they no longer line up with grid columns |
 | `⌃⌥` + `↩` | Maximize (fills the screen frame, not native fullscreen) |
+| `⌘N` inside supported cmux | Open a fresh terminal grid: landscape 4×2, XDR 5×2, portrait 3×4 (columns × rows) |
+| `⌃⌥⇧` + `↩` inside supported cmux | Toggle native pane expansion; press again to restore the grid |
+| `⇧⌥` + `W A S D` inside cmux | Split above / left / below / right and focus the new pane (physical keys, Czech-layout safe) |
 | `⌃⌥` + arrows | Half the screen on the side the arrow points to |
 | `⌥⌘` + `←` `→` | Move the focused window one desktop over on its display, and follow it |
 | `⇧⌥⌘` + arrows | Push the focused window to the neighbouring display |
@@ -60,6 +63,21 @@ fifth key to give.
 Bare F-keys are safe to bind here because `com.apple.keyboard.fnState = 1` (the F-row
 sends real F1/F2, not brightness), and every system binding on those keycodes requires
 `⌘fn`, which Carbon matches exactly.
+
+The cmux grid shortcuts require the `cmux-grid` applet installed at
+`~/.local/bin/cmux-grid`, cmux 0.64.25+ restarted after updating, and cmux Settings →
+Socket Control → Automation mode. Without the applet or on older cmux versions,
+Cmd+N retains native behavior. The adapter chooses the terminal grid when a new
+workspace opens; moving the outer window does not rearrange existing terminals.
+Directional splitting uses the cmux app's CLI directly and works without the
+grid applet. It resolves the focused workspace and pane for every invocation;
+outside cmux these keys retain their normal behavior. `cmux.lua` is shipped in
+both source-linked installs and the embedded installer package, so reinstalling
+Pultík retains these bindings. Personal navigation settings in
+`~/.config/cmux/cmux.json` are not modified by this module.
+The portrait **terminal** grid is 3×4; the existing macOS **window** grid below
+remains 3×3. Ctrl+Option+Enter continues maximizing the outer window in every app.
+Decision record: `docs/specs/2026-09-21-cmux-grid-decisions.md` in the source repo.
 
 Grid shape is resolved per display, on every keypress:
 
@@ -243,4 +261,3 @@ Four traps when testing this way:
   app, wedging an otherwise instant enumeration. `visibleWindows()` + `isStandard()` +
   `screen()` + `frame()` over 31 windows costs ~0.06s; adding titles hung twice. Keep
   them out of any hot path.
-

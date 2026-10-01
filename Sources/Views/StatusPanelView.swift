@@ -640,6 +640,11 @@ struct StatusPanelView: View {
             if session.isPresented { panelDidPresent() }
         }
         .onChange(of: session.generation) { panelDidPresent() }
+        // A critical landing while the panel is open is on screen already —
+        // the Firing rail has no unread styling to carry it, so it is seen.
+        .onChange(of: store.firingAlerts) {
+            if session.isPresented, store.isSectionVisible("firing") { store.markFiringSeen() }
+        }
         .onChange(of: session.isPresented) { _, presented in
             if !presented { panelDidDismiss() }
         }
@@ -668,6 +673,7 @@ struct StatusPanelView: View {
             unreadAlertsSnapshot = store.unreadAlertIds
             store.markAlertsSeen()
         }
+        if store.isSectionVisible("firing") { store.markFiringSeen() }
         // Focus once the panel is key; a zero-delay hop is enough. The tree
         // outlives the summon now, so a dismiss inside those 50 ms would
         // otherwise re-focus a hidden palette — and leave the binding already
@@ -999,6 +1005,11 @@ struct StatusPanelView: View {
                 "commandNotice": commandNotice?.text ?? NSNull(),
                 "activeMode": activeMode?.mode.rawValue ?? NSNull(),
                 "eveAskedPrompt": eveAskedPrompt ?? NSNull(),
+                "prSearchIDs": store.searchMatches.map(\.id),
+                "prSearchError": store.searchError ?? NSNull(),
+                "prSearchPartial": store.searchIsPartial,
+                "prSearchMilliseconds": store.localSearchMilliseconds,
+                "prIsSearching": store.isSearching,
             ]
             if let target = pathTarget {
                 state["pathTarget"] = [
@@ -1012,7 +1023,15 @@ struct StatusPanelView: View {
             } else {
                 state["pathTarget"] = NSNull()
             }
-            PanelDriver.write(state: state, to: path)
+            Task { @MainActor in
+                let counts = await store.githubRequestCounts()
+                state["githubNetworkRequests"] = counts.network
+                state["githubSharedRequests"] = counts.shared
+                state["githubPRLookups"] = counts.lookups
+                state["githubPRSearches"] = counts.searches
+                state["prAllSearchIDs"] = store.searchResults.map(\.id)
+                PanelDriver.write(state: state, to: path)
+            }
         default:
             break
         }
@@ -2052,7 +2071,7 @@ struct StatusPanelView: View {
         let matches = store.searchMatches
         if searchActive, store.isSearching || !matches.isEmpty || store.searchError != nil {
             HStack(spacing: 6) {
-                Kicker(text: "All PRs on GitHub", count: matches.count,
+                Kicker(text: store.searchIsPartial ? "Saved PRs · partial coverage" : "PR search", count: matches.count,
                        action: { OverviewURL.open(OverviewURL.githubPulls) },
                        actionRole: .link,
                        actionHelp: "Open the GitHub pull-request overview")
@@ -2063,6 +2082,12 @@ struct StatusPanelView: View {
                         .frame(height: 10)
                 }
                 Spacer()
+                if let fetchedAt = store.searchFetchedAt {
+                    Text(fetchedAt, style: .relative)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .help("Cached PR metadata; last fetched \(fetchedAt.formatted())")
+                }
                 if let error = store.searchError {
                     Text(error)
                         .font(.system(size: 10))

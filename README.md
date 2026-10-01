@@ -38,6 +38,13 @@ The CLI's download/publishing endpoint is a placeholder too; set `PULTIK_BASE`
 to your own compatible service. There is no bundled public release installer.
 
 Settings live in `~/Library/Application Support/Pultik/settings.json`.
+PR search keeps bounded metadata in `~/Library/Caches/Pultik/GitHub/`, separated
+by credential identity. Saved matches render before network work and remain available
+during throttling; query results and confirmed number misses suppress repeat requests.
+Recent history warms gradually, so an unseen historical PR still needs a first fetch.
+Requests share a paced queue with foreground priority. Run the focused Foundation
+contracts with `bash tools/test-foundation.sh` without launching a native app host.
+
 The current implementation persists optional Sentry/Eve token overrides in that
 local JSON file; do not commit or share it. An empty override falls back to the
 existing local credential sources. The public tree contains no runtime settings.

@@ -10,10 +10,10 @@ package main
 //  2. walking up from the running binary (source bootstrap runs from the repo),
 //  3. the already-installed symlink, when it still points at a live checkout,
 //  4. otherwise the embedded copies materialized under Application Support.
-// organize.lua always ships beside init.lua: init.lua dofile()s its resolved
+// Modules always ship beside init.lua: init.lua dofile()s its resolved
 // sibling, so a target directory with only one file is a broken install.
 
-//go:generate cp ../../hammerspoon/init.lua ../../hammerspoon/organize.lua installassets/hammerspoon/
+//go:generate cp ../../hammerspoon/init.lua ../../hammerspoon/organize.lua ../../hammerspoon/cmux.lua installassets/hammerspoon/
 
 import (
 	"fmt"
@@ -22,7 +22,7 @@ import (
 	"strings"
 )
 
-var hammerspoonFiles = []string{"init.lua", "organize.lua"}
+var hammerspoonFiles = []string{"init.lua", "organize.lua", "cmux.lua"}
 
 func hammerspoonLinkPath() (string, error) {
 	home, err := os.UserHomeDir()

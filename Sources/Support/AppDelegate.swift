@@ -109,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
         let awake = AwakeStore.shared.isAwake
         let iconState = (store.aggregate, TodoStore.shared.openTodos.count,
-                         store.unreadAlertCount, store.unreadCriticalAlert, awake,
+                         store.badgeAlertCount, store.badgeAlertCritical, awake,
                          button.effectiveAppearance.name.rawValue)
         if lastIconState.map({ $0 != iconState }) ?? true {
             button.image = MenuBarIconView.render(iconState.0, todoCount: iconState.1,
@@ -117,13 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                   awake: iconState.4)
             lastIconState = iconState
         }
-        // The icon draws the unread count and critical state; the tooltip and
+        // The icon draws the unread count and critical state — unread eve
+        // alerts plus unseen firing criticals, one bell; the tooltip and
         // a11y label are the only places a VoiceOver user can reach them.
-        let unread = store.unreadAlertCount
+        let unread = store.badgeAlertCount
         let description = (unread == 0
             ? "Pultík — command center (⌥Space)"
             : "Pultík — \(unread) unread alert\(unread == 1 ? "" : "s")"
-                + "\(store.unreadCriticalAlert ? ", critical" : "") (⌥Space)")
+                + "\(store.badgeAlertCritical ? ", critical" : "") (⌥Space)")
             + (awake ? " — Never Sleep on" : "")
         button.toolTip = description
         button.setAccessibilityLabel(description)
@@ -188,6 +189,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await store.refreshIfStale() }
     }
 
+    /// A notification click: the panel opens (never toggles shut) with
+    /// `rail` unfolded, so a firing critical is on screen when it lands.
+    func showPanel(unfolding rail: String) {
+        store.setRail(rail, collapsed: false)
+        guard panel?.isVisible != true else { return }
+        togglePanel(nil)
+    }
+
     func closePanel() {
         guard let panel, panel.isVisible else { return }
         panel.close()
@@ -217,6 +226,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "refreshing": store.isRefreshing,
             "todoCount": TodoStore.shared.openTodos.count,
             "inboxCount": store.inbox.count,
+            "badgeAlertCount": store.badgeAlertCount,
+            "badgeAlertCritical": store.badgeAlertCritical,
+            "unseenFiringCount": store.unseenFiringCount,
         ], to: path)
     }
 
