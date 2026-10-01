@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// What the HUD shows: section visibility and the eve alert lanes.
+/// What the HUD shows: section visibility, firing-alert notifications and
+/// the eve alert lanes.
 struct PanelPane: View {
     let store: StatusStore
 
@@ -24,6 +25,19 @@ struct PanelPane: View {
                 Text("Sections")
             } footer: {
                 Text("Hidden sections stop rendering — they keep polling, so switching one back on shows current data straight away.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Notify when a critical alert fires or resolves", isOn: Binding(
+                    get: { store.notifyFiring },
+                    set: { store.setNotifyFiring($0) }
+                ))
+            } header: {
+                Text("Firing alerts")
+            } footer: {
+                Text("Warnings stay in the rail. Muted, criticals still badge the menu-bar icon until the panel shows them.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

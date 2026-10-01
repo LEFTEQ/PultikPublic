@@ -32,13 +32,15 @@ actor MetricsClient {
     /// Both rule evaluators' alerts (the right rail's alert rows). nil when
     /// Prometheus does not answer; a Loki that does not answer drops only its
     /// own alerts, logged — the rail still shows what Prometheus knows.
-    func firingAlerts() async -> [FiringAlert]? {
+    /// `answered` says which evaluators replied, so the notification watch
+    /// never reads a silent Loki as its rules resolving.
+    func firingAlerts() async -> (alerts: [FiringAlert], answered: Set<FiringAlert.Source>)? {
         guard let prometheus = await alerts(at: base.appending(path: "api/v1/alerts"), source: .prometheus) else {
             return nil
         }
         let loki = await alerts(at: lokiBase.appending(path: "prometheus/api/v1/alerts"), source: .loki)
         if loki == nil { NSLog("pultik: loki ruler alerts unavailable") }
-        return prometheus + (loki ?? [])
+        return (prometheus + (loki ?? []), loki == nil ? [.prometheus] : [.prometheus, .loki])
     }
 
     private func alerts(at url: URL, source: FiringAlert.Source) async -> [FiringAlert]? {

@@ -54,6 +54,11 @@ struct Preferences: Codable {
 
     static let defaultAlertLanes = ["incidents", "exampleapp_prod_alerts", "priority"]
 
+    /// A critical Prometheus/Loki rule starting or stopping fires a macOS
+    /// notification (warnings never do). Off mutes only the notification —
+    /// the rail and the icon's badge still show it.
+    var notifyFiring: Bool = true
+
     /// Every lane eve routes to a Telegram forum topic today — the Settings
     /// toggle list. An unknown lane in the feed still shows once toggled in
     /// via settings.json; this is UI vocabulary, not a filter whitelist.
@@ -350,6 +355,7 @@ struct Preferences: Codable {
             ?? Preferences.defaultRepoOrder
         visibleAlertLanes = try container.decodeIfPresent([String].self, forKey: .visibleAlertLanes)
             ?? Preferences.defaultAlertLanes
+        notifyFiring = try container.decodeIfPresent(Bool.self, forKey: .notifyFiring) ?? true
         activeFanCurve = try container.decodeIfPresent(String.self, forKey: .activeFanCurve)
         fanCurves = try container.decodeIfPresent([String: [CurvePoint]].self, forKey: .fanCurves)
             ?? [:]

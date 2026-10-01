@@ -12,7 +12,10 @@ final class StatusStore {
 
     var repos: [RepoStatus] = []
     var pinned: [String] {
-        didSet { mutate { $0.pinnedRepos = pinned } }
+        didSet {
+            mutate { $0.pinnedRepos = pinned }
+            search(searchQuery)
+        }
     }
 
     /// Read cache for the ~30 settings this store surfaces. It is a snapshot
@@ -39,7 +42,11 @@ final class StatusStore {
     var serviceStatuses: [ServiceStatus] = []
     /// Every alert the Prometheus and Loki rule evaluators report, fetched in
     /// the Prometheus pass; empty off-mesh or with `firing` hidden.
-    var firingAlerts: [FiringAlert] = []
+    /// Every write re-renders the icon: its badge counts unseen criticals,
+    /// and an emptied list (off-mesh, hidden) must clear it too.
+    var firingAlerts: [FiringAlert] = [] {
+        didSet { if firingAlerts != oldValue { onChange?() } }
+    }
     var laneBoard = CILaneBoard()
     /// Semafor's `/overview`, refreshed at most every `throughputInterval`
     /// inside the pool's breaker; nil whenever Semafor is not answering.
@@ -79,6 +86,13 @@ final class StatusStore {
     var globalError: String?
 
     private let client = GitHubClient()
+    private var prIndex = GitHubPRIndex()
+    private let prIndexDisk = GitHubPRIndexDisk()
+    private var prIndexIdentity: String?
+    private var prIndexLoad: (identity: String, task: Task<GitHubPRIndex, Never>)?
+    private var prIndexRevision = 0
+    private var archiveCursor = 0
+    private var archiveAttemptedAt: Date?
     /// Circuit breaker in front of every remote host Pultík polls — including
     /// GitHub, which won't ban the machine but will happily let a broken token
     /// burn the hourly budget a hundred requests at a time.
@@ -98,12 +112,19 @@ final class StatusStore {
     // genuinely new visible-lane alerts, first load silent. Read-state proper
     // (the unread badge) is AlertSeenStore, which persists.
     private var notifiedAlertIds: Set<Int>?
+    /// Critical firing-alert transitions — this app run only, first answer
+    /// silent; the badge's seen-state is FiringSeenStore, which persists.
+    private var firingWatch = FiringWatch()
     private var pollTask: Task<Void, Never>?
 
     init() {
         let prefs = Preferences.load()
         preferences = prefs
         pinned = prefs.pinnedRepos
+        Task {
+            do { try await ensurePRIndex() }
+            catch { NSLog("pultik: PR cache identity unavailable: %@", error.localizedDescription) }
+        }
     }
 
     var aggregate: AggregateState {
@@ -183,8 +204,65 @@ final class StatusStore {
     var searchResults: [ArchivedPR] = []
     var isSearching = false
     var searchError: String?
+    var searchFetchedAt: Date?
+    var searchIsPartial = false
+    private(set) var localSearchMilliseconds: Double = 0
     private var searchTask: Task<Void, Never>?
     private var searchQuery = ""
+    private var searchScope = ""
+
+    #if DEBUG
+    func githubRequestCounts() async -> (network: Int, shared: Int, lookups: Int, searches: Int) {
+        (await client.networkRequests, await client.sharedRequests,
+         await client.prLookupRequests, await client.prSearchRequests)
+    }
+    #endif
+
+    private func ensurePRIndex() async throws {
+        let identity = try await client.cacheIdentity()
+        guard prIndexIdentity != identity else { return }
+        if prIndexLoad?.identity != identity {
+            if prIndexIdentity != nil {
+                searchTask?.cancel()
+                searchScope = ""
+                repos = []
+            }
+            prIndex = GitHubPRIndex()
+            searchResults = []
+            searchFetchedAt = nil
+            prIndexIdentity = nil
+            let disk = prIndexDisk
+            prIndexLoad = (identity, Task { await disk.load(identity: identity) })
+        }
+        guard let load = prIndexLoad else { return }
+        let index = await load.task.value
+        guard prIndexLoad?.identity == identity else { return }
+        prIndex = index
+        prIndexIdentity = identity
+        prIndexLoad = nil
+        if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
+        if searchScope.isEmpty, searchQuery.count >= 2 { search(searchQuery) }
+    }
+
+    private func persistPRIndex() {
+        guard let identity = prIndexIdentity else { return }
+        prIndexRevision += 1
+        let revision = prIndexRevision
+        let index = prIndex
+        let disk = prIndexDisk
+        Task { await disk.save(index, identity: identity, revision: revision) }
+    }
+
+    @discardableResult
+    private func showLocalPRs(query: String, repos: [String]) -> GitHubPRIndex.Answer {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let answer = prIndex.answer(query: query, repos: repos, now: Date())
+        searchResults = answer.hits
+        searchFetchedAt = answer.fetchedAt
+        searchIsPartial = !answer.isFresh
+        localSearchMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        return answer
+    }
 
     /// Every repo a search may reach: the pinned ones first, then the project
     /// registry's — a project repo is "active" even when it isn't pinned to
@@ -199,67 +277,85 @@ final class StatusStore {
     /// live in the inbox, so the archive section shows what the inbox can't.
     var searchMatches: [ArchivedPR] {
         let onDashboard = Set(inbox.map { "\($0.repoSlug)#\($0.info.pr.number)".lowercased() })
-        return searchResults.filter { !onDashboard.contains($0.id.lowercased()) }
+        return searchResults.filter { prIndex.contains(repo: $0.repoSlug, in: searchableRepos)
+            && !onDashboard.contains($0.id.lowercased()) }
     }
 
-    /// Debounced GitHub-wide PR search, driven by the palette on every
-    /// keystroke. Nothing is fetched until typing settles and the query is
-    /// worth a request — an empty palette never spends an API call, which is
-    /// why closed PRs are absent until you actually look for one.
+    /// Answer locally before debounce or breaker admission. Fresh complete
+    /// queries spend zero calls; remote work fills coverage without blanking rows.
     func search(_ raw: String) {
         let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         // Sentry rides the same keystrokes but keeps its own task and state —
         // GitHub being slow or erroring must not delay or blank prod hits.
         searchSentry(query)
-        guard query != searchQuery else { return }
+        let repos = searchableRepos
+        let scope = GitHubPRIndex.key(query: query, repos: repos)
+        guard query != searchQuery || scope != searchScope else { return }
         searchQuery = query
+        searchScope = scope
         searchTask?.cancel()
-
-        // The breaker holds for typing too — a keystroke-driven search is the
-        // fastest way to turn one refused request into fifty.
-        guard query.count >= 2, !gate.isPaused(.github) else {
+        searchError = nil
+        guard query.count >= 2 else {
             searchResults = []
-            searchError = nil
+            searchFetchedAt = nil
+            searchIsPartial = false
+            isSearching = false
+            return
+        }
+        let cached = showLocalPRs(query: query, repos: repos)
+        guard !cached.isFresh else { isSearching = false; return }
+        guard !gate.isPaused(.github) else {
+            searchError = "GitHub paused; saved results remain available"
             isSearching = false
             return
         }
 
         isSearching = true
         searchTask = Task { [client] in
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            let repos = searchableRepos
+            defer { if !Task.isCancelled, scope == searchScope { isSearching = false } }
             do {
-                let found: [ArchivedPR]
+                try await Task.sleep(for: .milliseconds(350))
+                try await ensurePRIndex()
+                guard !Task.isCancelled, scope == searchScope else { return }
+                let local = showLocalPRs(query: query, repos: repos)
+                if local.isFresh { isSearching = false; return }
+                let identity = prIndexIdentity
+                let found: GitHubPRSearchResult
                 if let number = Self.typedNumber(in: query) {
-                    let lookup = await client.lookupPullRequests(number: number, repos: repos)
-                    // The lookups swallow per-repo errors internally — the
-                    // all-repos failure signal is the breaker's only view.
+                    let missing = prIndex.reposNeedingLookup(number: number, repos: repos, now: Date())
+                    let lookup = try await client.lookupPullRequests(number: number, repos: missing)
+                    guard !Task.isCancelled, scope == searchScope, identity == prIndexIdentity,
+                          try await client.cacheIdentity() == identity else { return }
+                    prIndex.rememberLookup(number: number, repos: lookup.confirmedRepos, hits: lookup.hits, now: Date())
                     if let failure = lookup.failure { gate.failed(.github, failure) }
-                    found = lookup.hits
+                    let combined = prIndex.answer(query: query, repos: repos, now: Date()).hits
+                    found = .init(hits: combined, complete: lookup.warning == nil, warning: lookup.warning)
                 } else {
                     found = try await client.searchPullRequests(terms: query, repos: repos)
                 }
-                guard !Task.isCancelled, query == searchQuery else { return }
-                searchResults = found
-                searchError = nil
+                guard !Task.isCancelled, scope == searchScope, identity == prIndexIdentity,
+                      try await client.cacheIdentity() == identity else { return }
+                prIndex.remember(query: query, repos: repos, hits: found.hits, complete: found.complete, now: Date())
+                showLocalPRs(query: query, repos: repos)
+                searchError = found.warning
+                persistPRIndex()
+            } catch is CancellationError {
+                return
             } catch {
                 guard !Task.isCancelled else { return }
                 // A palette failure is a host failure like any other — feed
                 // the breaker, or a refusal first seen here never opens it
                 // and every further keystroke keeps knocking.
                 gate.failed(.github, .classify(error))
-                guard query == searchQuery else { return }
-                searchResults = []
+                guard scope == searchScope else { return }
                 searchError = error.localizedDescription
             }
-            isSearching = false
         }
     }
 
     /// "520" and "#520" mean item number 520; anything else is full text.
     private static func typedNumber(in query: String) -> Int? {
-        Int(query.hasPrefix("#") ? String(query.dropFirst()) : query)
+        GitHubPRIndex.number(in: query)
     }
 
     // MARK: - Sentry search (palette full text)
@@ -360,7 +456,7 @@ final class StatusStore {
         issueQuery = query
         issueSearchTask?.cancel()
 
-        guard query.count >= 2, !gate.isPaused(.github) else {
+        guard query.count >= 2 else {
             issueResults = []
             issueSearchError = nil
             isSearchingIssues = false
@@ -369,6 +465,12 @@ final class StatusStore {
         if let cached = cachedIssues(query) {
             issueResults = cached
             issueSearchError = nil
+            isSearchingIssues = false
+            return
+        }
+        guard !gate.isPaused(.github) else {
+            issueResults = []
+            issueSearchError = "GitHub paused; cached queries remain available"
             isSearchingIssues = false
             return
         }
@@ -532,17 +634,33 @@ final class StatusStore {
             onRefreshComplete?()
         }
 
+        // No pinned repos skips GitHub only — every other rail (firing
+        // notifications included) still polls.
         let slugs = pinned
-        guard !slugs.isEmpty else {
+        if slugs.isEmpty {
             repos = []
             lastRefresh = Date()
-            return
+        } else {
+            await refreshGitHub(slugs)
         }
 
+        await refreshEve()
+        await refreshInfraMetrics()
+        await refreshVitrinka()
+        await refreshDevbox()
+        await refreshSentryIfStale()
+        await refreshIssuesIfStale()
+    }
+
+    private func refreshGitHub(_ slugs: [String]) async {
         // Load missing repos first, then rotate one repo per tick. A single
         // active workflow must not trigger a full-estate refresh every 30s.
         // Small estates also get a five-minute floor per repository.
+        do { try await ensurePRIndex() }
+        catch { NSLog("pultik: PR cache identity unavailable: %@", error.localizedDescription) }
         await gated(.github, probe: { [client] in await client.probeHealth() }) {
+            if let failure = await refreshPRArchiveIfNeeded() { return failure }
+            let identity = prIndexIdentity
             let known = Set(repos.map(\.slug))
             var selected = slugs.filter { !known.contains($0) }
             if selected.isEmpty {
@@ -578,6 +696,11 @@ final class StatusStore {
                 }
                 return selected.compactMap { collected[$0] }
             }
+            if let current = try? await client.cacheIdentity(), current != identity || identity != prIndexIdentity {
+                do { try await ensurePRIndex() }
+                catch { NSLog("pultik: PR cache identity changed during refresh: %@", error.localizedDescription) }
+                return nil
+            }
 
             for result in statuses where result.status.error != nil {
                 NSLog("pultik: %@ error: %@", result.status.slug, result.status.error ?? "")
@@ -594,6 +717,13 @@ final class StatusStore {
                 }
             }
             repos = slugs.compactMap { merged[$0] }
+            if prIndexIdentity != nil {
+                let now = Date()
+                for status in fetched where status.error == nil {
+                    prIndex.ingest(status.prs.map { ArchivedPR(pr: $0.pr, repoSlug: status.slug, fetchedAt: now) }, now: now)
+                }
+                persistPRIndex()
+            }
             notifyTransitions(repos)
             // Stamped HERE, not once per poll: while GitHub is paused the
             // inbox is not refreshing, and a footer reading "just now" over
@@ -614,13 +744,32 @@ final class StatusStore {
             guard fetched.allSatisfy({ $0.error != nil }) else { return nil }
             return statuses.compactMap(\.failure).first ?? .unreachable("no answer from GitHub")
         }
+    }
 
-        await refreshEve()
-        await refreshInfraMetrics()
-        await refreshVitrinka()
-        await refreshDevbox()
-        await refreshSentryIfStale()
-        await refreshIssuesIfStale()
+    private func refreshPRArchiveIfNeeded() async -> ProbeFailure? {
+        if let at = archiveAttemptedAt, Date().timeIntervalSince(at) < 30 { return nil }
+        let scope = searchableRepos
+        guard !scope.isEmpty else { return nil }
+        archiveAttemptedAt = Date() // failed pages back off too
+        do {
+            try await ensurePRIndex()
+            let identity = prIndexIdentity
+            for _ in scope.indices {
+                let repo = scope[archiveCursor % scope.count]
+                archiveCursor = (archiveCursor + 1) % scope.count
+                guard let page = prIndex.archivePage(repo: repo, now: Date()) else { continue }
+                let hits = try await client.archivePage(repo: repo, page: page)
+                guard identity == prIndexIdentity, try await client.cacheIdentity() == identity else { return nil }
+                prIndex.rememberPage(repo: repo, page: page, hits: hits, now: Date())
+                persistPRIndex()
+                if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
+                return nil
+            }
+        } catch {
+            NSLog("pultik: PR archive refresh failed: %@", error.localizedDescription)
+            return .classify(error)
+        }
+        return nil
     }
 
     private nonisolated static func fetchRepo(
@@ -843,6 +992,82 @@ final class StatusStore {
         return nil
     }
 
+    // MARK: - Firing alerts (Prometheus + Loki rules, WG mesh)
+
+    /// Firing criticals the panel has not shown yet — the icon's bell counts
+    /// them with the unread eve alerts. Warnings never badge.
+    var unseenFiringCount: Int {
+        FiringWatch.criticals(firingAlerts)
+            .filter { !FiringSeenStore.shared.isSeen(FiringWatch.episodeKey($0)) }.count
+    }
+
+    /// The icon's one alert indicator: unread eve alerts plus unseen firing
+    /// criticals, red whenever either carries a critical.
+    var badgeAlertCount: Int { unreadAlertCount + unseenFiringCount }
+    var badgeAlertCritical: Bool { unreadCriticalAlert || unseenFiringCount > 0 }
+
+    /// Panel opened with the Firing section visible: every critical it
+    /// shows counts as seen and leaves the badge.
+    func markFiringSeen() {
+        FiringSeenStore.shared.markSeen(FiringWatch.criticals(firingAlerts).map(FiringWatch.episodeKey))
+        onChange?()
+    }
+
+    /// One answered fetch: shown in the rail, watched for critical
+    /// transitions (notified unless muted), seen-state pruned. nil —
+    /// Prometheus silent — empties the rail but tells the watch nothing, so
+    /// an outage never announces a wave of resolves.
+    private func applyFiring(_ fetched: (alerts: [FiringAlert], answered: Set<FiringAlert.Source>)?) {
+        guard let fetched else {
+            firingAlerts = []
+            return
+        }
+        firingAlerts = fetched.alerts
+        let notices = firingWatch.update(fetched.alerts, answered: fetched.answered)
+        if preferences.notifyFiring {
+            for notice in notices {
+                Notifier.send(title: notice.title, body: notice.body, url: Notifier.firingPanelURL)
+            }
+        }
+        if fetched.answered == [.prometheus, .loki] {
+            FiringSeenStore.shared.prune(keeping: Set(FiringWatch.criticals(fetched.alerts).map(FiringWatch.episodeKey)))
+        }
+    }
+
+    var notifyFiring: Bool {
+        preferences.notifyFiring
+    }
+
+    /// Settings ▸ Panel: mute critical-firing notifications. The watch keeps
+    /// running, so un-muting announces only what changes from then on.
+    func setNotifyFiring(_ on: Bool) {
+        mutate { $0.notifyFiring = on }
+    }
+
+    #if DEBUG
+    /// `tools/panel-drive.sh firing …`: made-up alerts appended to every
+    /// answered fetch until cleared, so notifications, the badge and the
+    /// rail can be exercised without a real rule firing.
+    private var debugFiring: [FiringAlert] = []
+
+    func debugSetFiring(_ spec: String) {
+        debugFiring = spec.split(separator: ",").map { item in
+            let parts = item.split(separator: ":", maxSplits: 1).map(String.init)
+            let (severity, name) = parts.count == 2 ? (parts[0], parts[1]) : ("critical", parts[0])
+            return FiringAlert(name: name, state: "firing", severity: severity,
+                               summary: "\(name) (injected by panel-drive)", description: nil,
+                               labels: ["alertname": name, "severity": severity,
+                                        "app": "pultik", "environment": "debug"],
+                               activeAt: Date(), source: .prometheus)
+        }
+        Task {
+            let fetched = await MetricsClient.shared.firingAlerts()
+            applyFiring((alerts: (fetched?.alerts ?? []) + debugFiring,
+                         answered: fetched?.answered ?? [.prometheus, .loki]))
+        }
+    }
+    #endif
+
     // MARK: - Infra metrics (mesh Prometheus)
 
     /// A dozen PromQL queries per refresh — by far the widest fan-out Pultík
@@ -871,7 +1096,16 @@ final class StatusStore {
                 return .unreachable("no answer from Prometheus")
             }
 
-            firingAlerts = isSectionVisible("firing") ? await MetricsClient.shared.firingAlerts() ?? [] : []
+            if isSectionVisible("firing") {
+                let fetched = await MetricsClient.shared.firingAlerts()
+                #if DEBUG
+                applyFiring(fetched.map { (alerts: $0.alerts + debugFiring, answered: $0.answered) })
+                #else
+                applyFiring(fetched)
+                #endif
+            } else {
+                firingAlerts = []
+            }
 
             if isSectionVisible("runners") {
                 laneBoard = await MetricsClient.shared.laneBoard()

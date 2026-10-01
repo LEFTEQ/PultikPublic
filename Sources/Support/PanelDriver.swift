@@ -14,7 +14,8 @@ import Foundation
 /// (the clipboard through the field editor), `key`
 /// (`key` = enter|tab|up|down|left|right|esc, `mods` = comma list of
 /// cmd|opt|shift|ctrl), `capture` (`path` → PNG), `state` (`path` → JSON of
-/// the palette state the view reports).
+/// the palette state the view reports), `firing` (`text` = comma list of
+/// made-up alert names, `warning:Name` for a warning, empty clears).
 @MainActor
 enum PanelDriver {
     static let channel = Notification.Name("dev.example.pultik.debug")
@@ -49,6 +50,12 @@ enum PanelDriver {
         case "metrics":
             guard let path = info["path"] else { return }
             app.debugWriteMetrics(to: path)
+        case "firing":
+            StatusStore.shared.debugSetFiring(info["text"] ?? "")
+        case "github-pause":
+            ProbeGate.shared.failed(.github, .unreachable("Debug verification pause"))
+        case "github-resume":
+            ProbeGate.shared.succeeded(.github)
         case "query", "key", "paste", "state":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:

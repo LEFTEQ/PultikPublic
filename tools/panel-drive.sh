@@ -11,7 +11,10 @@
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette state as JSON (prints it)
 #   tools/panel-drive.sh metrics [/tmp/mem.json]   # footprint + summon time, also hidden
+#   tools/panel-drive.sh github-pause             # simulate a GitHub breaker pause (Debug only)
+#   tools/panel-drive.sh github-resume            # clear that Debug pause
 #   tools/panel-drive.sh frame                     # any build: window inside its screen? exit 1 if not
+#   tools/panel-drive.sh firing 'DiskFull,warning:Slow'  # inject firing alerts (critical unless prefixed); '' clears
 #
 # Launch the app first, e.g.
 #   PULTIK_KEEP_PANEL_OPEN=1 /tmp/pultik-dd/Build/Products/Debug/Pultik.app/Contents/MacOS/Pultik &
@@ -19,7 +22,7 @@ set -euo pipefail
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  open|close) ;;
+  open|close|github-pause|github-resume) ;;
   query) PD_TEXT="${1-}" ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}" ;;
@@ -27,7 +30,8 @@ case "$cmd" in
   state) PD_PATH="${1:-/tmp/pultik-panel-state.json}" ;;
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
   frame) ;;
-  *) sed -n '2,16p' "$0"; exit 2 ;;
+  firing) PD_TEXT="${1-}" ;;
+  *) sed -n '2,17p' "$0"; exit 2 ;;
 esac
 
 post() {
@@ -66,7 +70,7 @@ case "$cmd" in
                        top: primary - (v.origin.y + v.size.height), bottom: primary - v.origin.y });
       }
       JSON.stringify(ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1, 0)))
-        .filter(w => /pult/i.test(w.kCGWindowOwnerName || "") && w.kCGWindowBounds.Height > 200)
+        .filter(w => /pult/i.test(w.kCGWindowOwnerName || "") && w.kCGWindowBounds.Height > 80)
         .map(w => {
           const b = w.kCGWindowBounds, cx = b.X + b.Width / 2;
           const s = screens.find(s => cx >= s.left && cx < s.right && b.Y >= s.top && b.Y < s.bottom) || screens[0];

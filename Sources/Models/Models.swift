@@ -45,6 +45,7 @@ struct PullRequest: Decodable, Identifiable {
     let htmlUrl: String
     let draft: Bool?
     let head: Head
+    let updatedAt: Date?
 
     struct Head: Decodable {
         let sha: String
@@ -78,6 +79,7 @@ struct DiscoveredRepo: Decodable {
 
 struct PRSearchResponse: Decodable {
     let items: [PRSearchItem]
+    let incompleteResults: Bool?
 }
 
 /// One /search/issues hit, restricted to `is:pr`.
@@ -106,21 +108,24 @@ struct PRLookup: Decodable {
     let draft: Bool?
     let mergedAt: Date?
     let updatedAt: Date
+    let head: PullRequest.Head?
 }
 
-enum PROutcome {
+enum PROutcome: String, Codable, Sendable {
     case merged, closed, open, draft
 }
 
 /// A PR found by searching GitHub — any state, any active repo, pinned or not.
 /// Deliberately thinner than `PRInfo`: history needs no checks or reviews.
-struct ArchivedPR: Identifiable {
+struct ArchivedPR: Identifiable, Codable, Sendable {
     let repoSlug: String
     let number: Int
     let title: String
     let url: String
     let outcome: PROutcome
     let updatedAt: Date
+    var branch: String?
+    let sourceRepoSlug: String?
 
     var id: String {
         "\(repoSlug)#\(number)"
@@ -140,6 +145,8 @@ struct ArchivedPR: Identifiable {
             state: item.state, mergedAt: item.pullRequest?.mergedAt, draft: item.draft
         )
         updatedAt = item.updatedAt
+        branch = nil
+        sourceRepoSlug = nil
     }
 
     init(lookup: PRLookup, repoSlug: String) {
@@ -153,6 +160,19 @@ struct ArchivedPR: Identifiable {
             state: lookup.state, mergedAt: lookup.mergedAt, draft: lookup.draft
         )
         updatedAt = lookup.updatedAt
+        branch = lookup.head?.ref
+        sourceRepoSlug = self.repoSlug.lowercased() == repoSlug.lowercased() ? nil : repoSlug
+    }
+
+    init(pr: PullRequest, repoSlug: String, fetchedAt: Date) {
+        self.repoSlug = repoSlug
+        number = pr.number
+        title = pr.title
+        url = pr.htmlUrl
+        outcome = pr.draft == true ? .draft : .open
+        updatedAt = pr.updatedAt ?? fetchedAt
+        branch = pr.head.ref
+        sourceRepoSlug = nil
     }
 
     /// A merged PR is `state: "closed"` too — merged_at is the only tell.
@@ -662,6 +682,13 @@ struct FiringAlert: Equatable, Identifiable {
     var id: String {
         ([source.rawValue, name] + labels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" })
             .joined(separator: "|")
+    }
+
+    /// `app · environment`, when labelled — the rail row's and the
+    /// notification's context.
+    var context: String? {
+        let parts = [labels["app"], labels["environment"]].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// The rules API's `{status, data: {alerts: [...]}}`; nil when unreadable.

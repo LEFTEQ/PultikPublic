@@ -1,10 +1,39 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestPublicMirrorIncludesHammerspoonPackage(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "mirror", "manifest.json"))
+	if os.IsNotExist(err) {
+		t.Skip("private mirror manifest is absent in the public checkout")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Include []string `json:"include"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	included := make(map[string]bool, len(manifest.Include))
+	for _, path := range manifest.Include {
+		included[path] = true
+	}
+	for _, name := range hammerspoonFiles {
+		for _, dir := range []string{"hammerspoon", "tools/pultik/installassets/hammerspoon"} {
+			path := dir + "/" + name
+			if !included[path] {
+				t.Errorf("public mirror omits required Hammerspoon module %s", path)
+			}
+		}
+	}
+}
 
 // The test binary lives in a go-build temp dir, so the executable-walk leg of
 // repo detection finds nothing; with HOME isolated and PULTIK_REPO unset the
