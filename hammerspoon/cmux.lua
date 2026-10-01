@@ -7,6 +7,21 @@ local task, watcher, gridKey, zoomKey
 local splitKeys, splitTask = {}, nil
 local pendingSplits = {}
 
+-- Drain both pipes while cmux runs; waiting until exit can block the CLI.
+-- Keep streamed output so identify's JSON and command errors remain available.
+local function commandTask(path, callback, arguments)
+  local stdout, stderr = {}, {}
+  return hs.task.new(path, function(code, out, err)
+    table.insert(stdout, out)
+    table.insert(stderr, err)
+    callback(code, table.concat(stdout), table.concat(stderr))
+  end, function(_, out, err)
+    table.insert(stdout, out)
+    table.insert(stderr, err)
+    return true
+  end, arguments)
+end
+
 local function isCmux()
   local app = hs.application.frontmostApplication()
   return app and app:bundleID() == bundleID
@@ -25,7 +40,7 @@ function M.newWorkspace()
   if not window then hs.alert.show("cmux: no focused window"); return end
   local screen = window:screen()
   local frame = screen:fullFrame()
-  task = hs.task.new(binary, function(code, stdout, stderr)
+  task = commandTask(binary, function(code, stdout, stderr)
     task = nil
     if code ~= 0 then
       local message = stderr ~= "" and stderr or stdout
@@ -62,7 +77,7 @@ function M.split(direction)
     fail("cmux CLI is missing from the installed app"); return
   end
   -- Resolve the focused UI, never a caller workspace inherited by Hammerspoon.
-  splitTask = hs.task.new(cmuxCLI, function(code, stdout, stderr)
+  splitTask = commandTask(cmuxCLI, function(code, stdout, stderr)
     splitTask = nil
     if code ~= 0 then fail(stderr ~= "" and stderr or stdout); return end
     local state = hs.json.decode(stdout)
@@ -70,7 +85,7 @@ function M.split(direction)
     if not focused or not focused.workspace_ref or not focused.surface_ref or not focused.window_ref then
       fail("No focused terminal found"); return
     end
-    splitTask = hs.task.new(cmuxCLI, function(splitCode, output, errors)
+    splitTask = commandTask(cmuxCLI, function(splitCode, output, errors)
       splitTask = nil
       if splitCode ~= 0 then fail(errors ~= "" and errors or output); return end
       if #pendingSplits > 0 then
