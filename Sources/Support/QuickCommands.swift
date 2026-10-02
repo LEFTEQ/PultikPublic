@@ -117,8 +117,9 @@ struct QuickCommand: Identifiable {
     @MainActor
     private static func adHocBrightness(_ q: String) -> [QuickCommand] {
         guard let percent = BrightnessQuery.parse(q) else { return [] }
-        let scale = BrightnessStore.shared.externalScale
-        let external = scale == 100 ? "" : " · third-party monitors \(percent * scale / 100)%"
+        let offset = BrightnessStore.shared.externalOffset
+        let external = offset == 0 ? ""
+            : " · third-party monitors \(BrightnessStore.externalPercent(percent, offset: offset))%"
         return [QuickCommand(
             id: "brightness:\(percent)",
             title: "Displays: \(percent)%",

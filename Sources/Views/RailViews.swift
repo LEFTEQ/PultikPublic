@@ -322,9 +322,8 @@ struct RailFoot: View {
 
 /// One workspace's lifecycle verbs (spec 2026-09-14 decisions 6–7, moved
 /// onto the `.devbox` page by spec 2026-09-23 D8): hot — park (two-click),
-/// Warp; parked — revive; every row — clear (two-click, spec 2026-09-28:
-/// park, drop a stale branch's clean worktree, `devbox reap`; a live branch
-/// is kept), hold / unhold. Never `down`. The icons show only while `revealed`; a running verb's progress
+/// Warp; parked — revive; every row — Clear this (changes preview),
+/// hold / unhold. The icons show only while `revealed`; a running verb's progress
 /// and a failure show regardless, in the same fixed-height slot, so the row
 /// never changes height or count while a verb runs. The slot overlays the
 /// row's trailing columns, so whatever it shows sits on its own material
@@ -333,6 +332,7 @@ struct DevboxVerbs: View {
     let workspace: DevboxWorkspace
     let store: StatusStore
     let revealed: Bool
+    let onClear: () -> Void
     /// A lifecycle verb is in flight (park ~2 s, revive ~16 s, cold up
     /// minutes). The slot says which, and refuses a second click meanwhile.
     @State private var busyLabel: String?
@@ -340,7 +340,6 @@ struct DevboxVerbs: View {
     /// click arms, the second within a few seconds runs. Inline rather than a
     /// modal — the panel is a floating HUD and a sheet on it is never right.
     @State private var confirmingPark = false
-    @State private var confirmingClear = false
     /// What the last verb's failure says — "failed · see log", or a clear's
     /// "kept · <reason>" — shown for a few seconds in the verb slot.
     @State private var failure: String?
@@ -371,7 +370,6 @@ struct DevboxVerbs: View {
         .onChange(of: revealed) { _, shown in
             guard !shown else { return }
             confirmingPark = false
-            confirmingClear = false
         }
     }
 
@@ -443,37 +441,10 @@ struct DevboxVerbs: View {
         }
     }
 
-    /// Every row's teardown (spec 2026-09-28): `DevboxClient.clear` parks,
-    /// drops a stale branch's clean Mac worktree and reaps — or keeps the
-    /// workspace and says why in the failure slot.
+    /// The page retains the preview and result independently of the row.
     @ViewBuilder
     private var clearAction: some View {
-        if confirmingClear {
-            Button {
-                confirmingClear = false
-                runVerb("clearing") {
-                    switch await DevboxClient.shared.clear(workspace) {
-                    case .cleared: nil
-                    case .kept(let reason): "kept · \(reason)"
-                    }
-                }
-            } label: {
-                Text("clear?")
-                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.red)
-            }
-            .buttonStyle(.plain)
-            .help("Click again to clear — a live branch, a hold or a worktree with changes keeps it")
-            .accessibilityLabel("Confirm clear")
-        } else {
-            devboxIconButton("trash", "Clear", "Clear — park, remove the Mac worktree once its branch is gone and it is clean, devbox reap; a live branch is kept") {
-                confirmingClear = true
-                Task {
-                    try? await Task.sleep(for: .seconds(4))
-                    await MainActor.run { confirmingClear = false }
-                }
-            }
-        }
+        devboxIconButton("trash", "Clear this", "Clear this — preview local changes and choose what to keep", action: onClear)
     }
 
     /// One verb at a time per workspace; the box is refreshed straight after
