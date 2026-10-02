@@ -15,6 +15,10 @@
 #   tools/panel-drive.sh github-resume            # clear that Debug pause
 #   tools/panel-drive.sh frame                     # any build: window inside its screen? exit 1 if not
 #   tools/panel-drive.sh firing 'DiskFull,warning:Slow'  # inject firing alerts (critical unless prefixed); '' clears
+#   tools/panel-drive.sh clear-preview '<workspace>' # open the Clear this preview
+#   tools/panel-drive.sh clear-action '<action>'     # keep|backup|discard|clear|inspect|refresh|show-log|show-changes|close
+#   PULTIK_DEVBOX_EXECUTABLE can select a test CLI in Debug; a disposable
+#   PULTIK_CLEAR_FIXTURE_PATH enables the clear-fixture preview for native QA.
 #
 # Launch the app first, e.g.
 #   PULTIK_KEEP_PANEL_OPEN=1 /tmp/pultik-dd/Build/Products/Debug/Pultik.app/Contents/MacOS/Pultik &
@@ -23,7 +27,7 @@ set -euo pipefail
 cmd="${1:-}"; shift || true
 case "$cmd" in
   open|close|github-pause|github-resume) ;;
-  query) PD_TEXT="${1-}" ;;
+  query|clear-preview|clear-action) PD_TEXT="${1-}" ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}" ;;
   capture) PD_PATH="${1:?png path}" ;;

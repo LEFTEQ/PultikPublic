@@ -12,7 +12,7 @@ struct DisplaysPane: View {
     private let store = BrightnessStore.shared
     @State private var presets = BrightnessStore.shared.presets
     @State private var nightShiftNow = NightShift.isEnabled
-    @State private var externalScale = BrightnessStore.shared.externalScale
+    @State private var externalOffset = BrightnessStore.shared.externalOffset
 
     var body: some View {
         Form {
@@ -43,20 +43,20 @@ struct DisplaysPane: View {
                     .foregroundStyle(.secondary)
             }
 
-            // Spec 2026-09-13 decision 2: third-party monitors run brighter
-            // than Apple panels at the same percent, so they get a fraction of
-            // every applied level. Drag previews on the LG, the drop persists.
+            // Spec 2026-10-01: third-party monitors run brighter than Apple
+            // panels at the same percent, so they run a fixed number of points
+            // darker, floored. Drag previews on the LG, the drop persists.
             Section {
                 HStack {
                     Slider(value: Binding(
-                        get: { Double(externalScale) },
-                        set: { externalScale = Int($0.rounded()); store.setExternalScale(externalScale, persist: false) }
-                    ), in: 10...100, step: 1, onEditingChanged: { editing in
-                        if !editing { store.setExternalScale(externalScale, persist: true) }
+                        get: { Double(externalOffset) },
+                        set: { externalOffset = Int($0.rounded()); store.setExternalOffset(externalOffset, persist: false) }
+                    ), in: 0...50, step: 1, onEditingChanged: { editing in
+                        if !editing { store.setExternalOffset(externalOffset, persist: true) }
                     })
-                    .accessibilityLabel("Third-party monitor scale")
-                    .accessibilityValue("\(externalScale) percent")
-                    Text("\(externalScale)%")
+                    .accessibilityLabel("Third-party monitor offset")
+                    .accessibilityValue("\(externalOffset) points darker")
+                    Text(externalOffset == 0 ? "0" : "−\(externalOffset)")
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .frame(width: 44, alignment: .trailing)
@@ -64,7 +64,7 @@ struct DisplaysPane: View {
             } header: {
                 Text("Third-party monitors")
             } footer: {
-                Text("Monitors driven over DDC get this share of every level — a preset or a typed one at 50% puts them at \(50 * externalScale / 100)%. Apple displays always get the full level.")
+                Text("Monitors driven over DDC run this many points darker than every level, never below \(BrightnessStore.externalFloor)% — a preset or a typed level of 70% puts them at \(BrightnessStore.externalPercent(70, offset: externalOffset))%, 20% at \(BrightnessStore.externalPercent(20, offset: externalOffset))%. Apple displays always get the full level.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -100,7 +100,7 @@ struct DisplaysPane: View {
         .onAppear {
             presets = store.presets
             nightShiftNow = NightShift.isEnabled
-            externalScale = store.externalScale
+            externalOffset = store.externalOffset
         }
         .onChange(of: store.isApplying) { _, applying in
             if !applying { nightShiftNow = NightShift.isEnabled }

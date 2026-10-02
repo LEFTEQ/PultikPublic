@@ -121,11 +121,12 @@ struct Preferences: Codable {
     /// absolute brightness percent + Night Shift per named preset, edited in
     /// Settings ▸ Displays. Nil = `DisplayPreset.defaults`.
     var displayPresets: [DisplayPreset]?
-    /// Third-party (DDC) monitors get `preset × this percent`
-    /// (docs/specs/2026-09-13-brightness-set-and-external-scale-decisions.md):
-    /// 80 puts the LG at 40 % when a preset says 50 %. Nil = 100, no scaling.
-    /// Apple panels are never scaled.
-    var externalBrightnessScale: Int?
+    /// Third-party (DDC) monitors run this many points darker than every level,
+    /// never below 10 % (docs/specs/2026-10-01-external-brightness-offset-decisions.md):
+    /// 20 puts the LG at 50 % when a preset says 70 %. Nil = 0, no offset.
+    /// Apple panels never get it. The 2026-09-13 `externalBrightnessScale`
+    /// multiplier it replaced is ignored and dropped on the next save.
+    var externalBrightnessOffset: Int?
     /// RETIRED 2026-09-06 by `displayPresets`; migrated into the Dim preset
     /// by `migrateDisplayPresets()` and then dropped from the file.
     var dimBrightness: Double?
@@ -372,7 +373,7 @@ struct Preferences: Codable {
         vitrinkaWorkspace = try container.decodeIfPresent(String.self, forKey: .vitrinkaWorkspace)
         workspaces = try container.decodeIfPresent(WorkspacesConfig.self, forKey: .workspaces)
         displayPresets = try container.decodeIfPresent([DisplayPreset].self, forKey: .displayPresets)
-        externalBrightnessScale = try container.decodeIfPresent(Int.self, forKey: .externalBrightnessScale)
+        externalBrightnessOffset = try container.decodeIfPresent(Int.self, forKey: .externalBrightnessOffset)
         dimBrightness = try container.decodeIfPresent(Double.self, forKey: .dimBrightness)
         neverSleep = try container.decodeIfPresent(Bool.self, forKey: .neverSleep)
     }

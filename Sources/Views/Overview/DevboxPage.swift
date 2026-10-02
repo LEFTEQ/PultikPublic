@@ -11,6 +11,7 @@ struct DevboxPage: View {
     let onBack: () -> Void
 
     @State private var expanded: Set<String> = []
+    @State private var clearing: DevboxWorkspace?
 
     private var workspaces: [DevboxWorkspace] {
         let needle = filter.trimmingCharacters(in: .whitespaces)
@@ -49,6 +50,22 @@ struct DevboxPage: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 12)
         }
+        .popover(item: $clearing) { workspace in
+            DevboxClearPopover(workspace: workspace, store: store) { clearing = nil }
+        }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: PanelDriver.paletteNotification)) { note in
+            guard note.userInfo?["cmd"] as? String == "clear-preview", let name = note.userInfo?["text"] as? String else { return }
+            clearing = store.devboxWorkspaces.first { $0.name == name }
+            // An explicitly supplied disposable source exercises the same
+            // native flow without inventing a runtime on a live guest.
+            if name == "clear-fixture", let path = ProcessInfo.processInfo.environment["PULTIK_CLEAR_FIXTURE_PATH"] {
+                clearing = DevboxWorkspace(name: name, project: "pultik", branch: "qa-clear", portBase: nil,
+                                           created: nil, apps: [], stats: [], memoryBytes: 0, cpuPercent: 0,
+                                           declaredSources: [], state: "parked", macPath: path)
+            }
+        }
+        #endif
     }
 
     private var header: some View {
@@ -172,7 +189,7 @@ struct DevboxPage: View {
                 .padding(.top, 8)
                 .padding(.bottom, 2)
             ForEach(rows) { workspace in
-                DevboxTableRow(workspace: workspace, store: store,
+                DevboxTableRow(workspace: workspace, store: store, onClear: { clearing = workspace },
                                expanded: expanded.contains(workspace.id),
                                onToggle: { toggle(workspace.id) })
             }
@@ -216,6 +233,7 @@ private enum DevboxColumn {
 private struct DevboxTableRow: View {
     let workspace: DevboxWorkspace
     let store: StatusStore
+    let onClear: () -> Void
     let expanded: Bool
     let onToggle: () -> Void
     @State private var hovering = false
@@ -280,7 +298,7 @@ private struct DevboxTableRow: View {
             .contentShape(Rectangle())
             .onTapGesture(perform: onToggle)
             .overlay(alignment: .trailing) {
-                DevboxVerbs(workspace: workspace, store: store, revealed: hovering || expanded)
+                DevboxVerbs(workspace: workspace, store: store, revealed: hovering || expanded, onClear: onClear)
             }
             if expanded {
                 DevboxWorkspaceDetail(workspace: workspace)

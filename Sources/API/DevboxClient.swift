@@ -42,11 +42,7 @@ actor DevboxClient {
 
     // MARK: - Process plumbing
 
-    private struct Result {
-        let ok: Bool
-        let stdout: String
-        let stderr: String
-    }
+    private typealias Result = DevboxClearCommandResult
 
     /// Process pipe readers run concurrently so neither child pipe can fill
     /// while the other is being drained. The box is lock-protected because
@@ -160,7 +156,8 @@ actor DevboxClient {
     /// Nonisolated: it touches no actor state, and one box's 30-second poll
     /// must never queue another box's behind it on this actor.
     private nonisolated func execute(
-        _ process: Process, timeout: Int, outputLimit: Int = 4 * 1024 * 1024
+        _ process: Process, timeout: Int, outputLimit: Int = 4 * 1024 * 1024,
+        retainFailureOutput: Bool = false
     ) -> Result {
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
@@ -230,7 +227,7 @@ actor DevboxClient {
             // Callers intentionally trust a complete payload over a nonzero
             // exit status. A timed-out/truncated payload is never complete,
             // so withhold it rather than letting that rule accept a prefix.
-            stdout: timedOut.get() || streamFailed
+            stdout: !retainFailureOutput && (timedOut.get() || streamFailed)
                 ? ""
                 : String(decoding: capturedOut.data, as: UTF8.self),
             stderr: timedOut.get()
@@ -313,10 +310,16 @@ actor DevboxClient {
     /// driver owns token minting and passes credentials only for the lifetime
     /// of its SSH connection; Pultík never reads or stores them.
     private nonisolated func localDevbox(
-        _ arguments: [String], timeout: Int, currentDirectory: URL? = nil
+        _ arguments: [String], timeout: Int, currentDirectory: URL? = nil,
+        retainFailureOutput: Bool = false
     ) -> Result {
-        let executable = FileManager.default.homeDirectoryForCurrentUser
+        var executable = FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "bin/devbox")
+        #if DEBUG
+        if let path = ProcessInfo.processInfo.environment["PULTIK_DEVBOX_EXECUTABLE"], path.hasPrefix("/") {
+            executable = URL(filePath: path)
+        }
+        #endif
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             return Result(ok: false, stdout: "", stderr: "~/bin/devbox is missing or not executable")
         }
@@ -324,7 +327,7 @@ actor DevboxClient {
         process.executableURL = executable
         process.arguments = arguments
         if let currentDirectory { process.currentDirectoryURL = currentDirectory }
-        return execute(process, timeout: timeout)
+        return execute(process, timeout: timeout, retainFailureOutput: retainFailureOutput)
     }
 
     // MARK: - Box discovery (one devbox over several guests)
@@ -862,16 +865,9 @@ actor DevboxClient {
 
     // MARK: - ws-v2 lifecycle (park / hold / unhold / up)
 
-    /// Which Mac-side verbs the card may run. `down` is deliberately absent:
-    /// parking is the reversible stop. `reap` is the one teardown the HUD
-    /// offers (2026-09-14; every row's "clear" since 2026-09-28, see
-    /// `clear(_:)`): it refuses a workspace whose branch is still alive, so
-    /// the worst a stray click can do is fail loudly. The forced-command
-    /// dispatcher behind `ssh()` does not know these verbs, and adding them
-    /// there would hand the dashboard key a lifecycle it does not need — the
-    /// Mac-side driver already owns `up` for the same reason (it syncs and
-    /// mints), so the cheap verbs ride the same executable, and reap rides
-    /// it through `clear(_:)`.
+    /// Mac-side lifecycle verbs. Parking is reversible; operator clearing
+    /// has its own preview and data-preserving command below. The dashboard's
+    /// forced-command key stays read-only; mutations use the Mac driver.
     enum WorkspaceVerb: String {
         case park, hold, unhold
     }
@@ -892,123 +888,75 @@ actor DevboxClient {
         return result.ok
     }
 
-    /// What a row's Clear ended with: gone, or kept with the reason devbox
-    /// (or git) gave, cut to the phrase a row can show.
-    enum ClearOutcome: Sendable {
-        case cleared
-        case kept(String)
-    }
-
-    /// A row's "clear" (spec 2026-09-28): tear one workspace down from
-    /// whatever state its row is in, as far as devbox allows. `devbox reap`
-    /// is both the probe and the authority — a refusal changes nothing — so
-    /// a live branch is kept before anything moves. A dead or stale branch
-    /// on a running row is parked first: reap refuses a running stack, and
-    /// parking pauses the sync before its Mac root goes away. A stale one's
-    /// lingering Mac worktree is then removed with a plain `git worktree
-    /// remove`, which itself refuses modified or untracked files, and reap
-    /// decides again. Held rows are kept: the hold is the user's own "keep".
-    func clear(_ workspace: DevboxWorkspace) async -> ClearOutcome {
+    /// Explicit operator clear. Source removal is separately selected after
+    /// inspecting changes; the runtime command always preserves guest data.
+    func clear(_ workspace: DevboxWorkspace, preview: DevboxClearPreview,
+               source: DevboxClearSourceAction = .keep) async -> DevboxClearReport {
         guard DevboxName.isValid(workspace.name) else {
-            NSLog("pultik: refusing devbox clear — unsafe workspace name")
-            return .kept("unsafe workspace name")
+            return .failure("Unsafe workspace name")
         }
-        let probe = reap(workspace.name)
-        if probe.ok { return .cleared }
-        let stale = probe.code == "WS_NOT_DEAD" && probe.fix?.contains("worktree remove") == true
-        let running = workspace.state == "running"
-        let blockedByRunning = probe.code == "WS_REAP_FAILED" && running
-            && probe.detail.contains("not parked/stopped")
-        guard stale || blockedByRunning else { return .kept(probe.reason) }
-        if workspace.hold { return .kept("held — unhold first") }
-        if running, !(await run(.park, workspace: workspace.name)) {
-            return .kept("park failed · see log")
-        }
-        if stale {
-            guard let macPath = workspace.macPath else { return .kept("no Mac worktree recorded") }
-            if let refusal = removeWorktree(macPath) { return .kept(refusal) }
-        }
-        let second = reap(workspace.name)
-        return second.ok ? .cleared : .kept(second.reason)
-    }
-
-    /// One `devbox reap --json <ws>` verdict: the envelope's first
-    /// diagnostic, whether or not it reaped.
-    private struct ReapVerdict {
-        let ok: Bool
-        let code: String?
-        let detail: String
-        let fix: String?
-
-        /// "pultik-x: branch still on origin, no merged PR (worktree … exists)
-        /// — merge or delete …" → "branch still on origin, no merged PR".
-        var reason: String {
-            var text = Substring(detail)
-            if let colon = text.range(of: ": ") { text = text[colon.upperBound...] }
-            for stop in [" (", " — ", "; "] {
-                if let cut = text.range(of: stop) { text = text[..<cut.lowerBound] }
+        if source != .keep {
+            let current = await clearPreview(workspace)
+            guard current.complete, current.canRemove, current.fingerprint == preview.fingerprint else {
+                return .failure("Local work changed or could not be inspected. Refresh the changes preview before removing its worktree.", log: current.log)
             }
-            return text.isEmpty ? "reap failed · see log" : String(text)
         }
+        let arguments = workspaceArguments("clear", workspace)
+        let result = localDevbox(arguments, timeout: 300, retainFailureOutput: true)
+        let report = DevboxClearReport.command(arguments, ok: result.ok, stdout: result.stdout, stderr: result.stderr)
+        guard report.ok, source != .keep else { return report }
+        let policy = clearWorktree
+        return await Task.detached { policy.remove(preview, source: source, after: report) }.value
     }
 
-    private struct ReapEnvelope: Decodable {
-        let ok: Bool
-        let diagnostics: [Diagnostic]?
-
-        struct Diagnostic: Decodable {
-            let code: String
-            let detail: String?
-            let fix: String?
-        }
+    private func workspaceArguments(_ verb: String, _ workspace: DevboxWorkspace) -> [String] {
+        var arguments = [verb, workspace.name, "--json"]
+        if let box = workspace.box { arguments += ["--box", box.name] }
+        if let project = workspace.project, DevboxName.isValid(project) { arguments += ["--project", project] }
+        return arguments
     }
 
-    private func reap(_ workspace: String) -> ReapVerdict {
-        let result = localDevbox(["reap", "--json", workspace], timeout: 300)
-        guard let envelope = try? JSONDecoder().decode(ReapEnvelope.self, from: Data(result.stdout.utf8)) else {
-            NSLog("pultik: devbox reap %@ gave no envelope: %@", workspace,
-                  result.stderr.isEmpty ? String(result.stdout.prefix(200)) : result.stderr)
-            return ReapVerdict(ok: false, code: nil, detail: "", fix: nil)
-        }
-        let diagnostic = envelope.diagnostics?.first
-        let verdict = ReapVerdict(ok: envelope.ok && result.ok, code: diagnostic?.code,
-                                  detail: diagnostic?.detail ?? "", fix: diagnostic?.fix)
-        if !verdict.ok {
-            NSLog("pultik: devbox reap %@ kept it: %@", workspace, verdict.detail)
-        }
-        return verdict
+    /// Typed recovery only: never execute a diagnostic's arbitrary shell text.
+    func inspectClear(_ workspace: DevboxWorkspace, releaseHold: Bool) async -> DevboxClearReport {
+        guard DevboxName.isValid(workspace.name) else { return .failure("Unsafe workspace name") }
+        let arguments = workspaceArguments(releaseHold ? "unhold" : "status", workspace)
+        let result = localDevbox(arguments, timeout: 90, retainFailureOutput: true)
+        return .command(arguments, ok: result.ok, stdout: result.stdout, stderr: result.stderr)
     }
 
-    /// Remove a stale workspace's linked Mac worktree from its main clone —
-    /// the command devbox's own stale verdict names. No `--force`: git
-    /// refuses a worktree with modified or untracked files, or a locked one,
-    /// and that refusal is the answer. The branch ref stays in the clone, so
-    /// no commit is lost. nil when removed; git's reason otherwise.
-    private nonisolated func removeWorktree(_ macPath: String) -> String? {
-        guard let directory = DevboxLauncher.localDirectory(macPath) else {
-            return "worktree not on this Mac"
-        }
-        let common = git(["-C", directory.path, "rev-parse", "--path-format=absolute", "--git-common-dir"], timeout: 30)
-        let commonDir = URL(filePath: common.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
-        let clone = commonDir.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
-        guard common.ok, commonDir.lastPathComponent == ".git", clone.path != directory.path else {
-            return "not a linked worktree"
-        }
-        let removal = git(["-C", clone.path, "worktree", "remove", directory.path], timeout: 120)
-        guard removal.ok else {
-            NSLog("pultik: git worktree remove %@ refused: %@", directory.path, removal.stderr)
-            let line = removal.stderr.split(separator: "\n").first.map(String.init) ?? ""
-            let reason = line.replacingOccurrences(of: "fatal: ", with: "")
-            return reason.isEmpty ? "worktree remove failed · see log" : reason
-        }
-        return nil
+    nonisolated func clearPreview(_ workspace: DevboxWorkspace) async -> DevboxClearPreview {
+        await Task.detached { self.buildClearPreview(workspace) }.value
     }
 
-    private nonisolated func git(_ arguments: [String], timeout: Int) -> Result {
-        let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/git")
-        process.arguments = arguments
-        return execute(process, timeout: timeout)
+    private nonisolated func buildClearPreview(_ workspace: DevboxWorkspace) -> DevboxClearPreview {
+        guard let rawPath = workspace.macPath,
+              let directory = DevboxLauncher.localDirectory(rawPath, quiet: true) else {
+            var result = DevboxClearPreview(path: workspace.macPath, status: "", diff: "", commits: "", canRemove: false, complete: false,
+                                      explanation: "Local source is unavailable on this Mac. Clear this keeps it and archives the guest source.", fingerprint: "", log: "")
+            result.additionalSources = workspace.sources.compactMap { source in
+                DevboxLauncher.localDirectory(source.path, quiet: true).map(previewWorktree)
+            }
+            return result
+        }
+        var result = previewWorktree(directory)
+        result.additionalSources = workspace.sources.compactMap { source in
+            guard let other = DevboxLauncher.localDirectory(source.path, quiet: true), other.path != directory.path else { return nil }
+            return previewWorktree(other)
+        }
+        return result
+    }
+
+    private nonisolated func previewWorktree(_ directory: URL) -> DevboxClearPreview {
+        clearWorktree.inspect(directory)
+    }
+
+    private nonisolated var clearWorktree: DevboxClearWorktree {
+        DevboxClearWorktree { executable, arguments, timeout in
+            let process = Process()
+            process.executableURL = URL(filePath: executable)
+            process.arguments = arguments
+            return self.execute(process, timeout: timeout, retainFailureOutput: true)
+        }
     }
 
     /// `devbox gc --retire-stale` — the rail-level "clear": reap every

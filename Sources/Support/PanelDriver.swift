@@ -56,7 +56,7 @@ enum PanelDriver {
             ProbeGate.shared.failed(.github, .unreachable("Debug verification pause"))
         case "github-resume":
             ProbeGate.shared.succeeded(.github)
-        case "query", "key", "paste", "state":
+        case "query", "key", "paste", "state", "clear-preview", "clear-action":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:
             NSLog("pultik: debug driver ignored %@", String(describing: info))

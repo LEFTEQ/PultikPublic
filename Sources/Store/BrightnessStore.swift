@@ -48,24 +48,36 @@ final class BrightnessStore {
     /// Trailing write for a drag that never sends a drop — see `previewPresets`.
     private var persistDebounce: Task<Void, Never>?
 
-    /// Percent third-party (DDC) monitors get of any applied level (spec
-    /// 2026-09-13 decision 2); Apple panels are never scaled. Cached like
-    /// `presets` — read at palette-match time, so it must never hit the disk.
-    private(set) var externalScale: Int
+    /// Points third-party (DDC) monitors run darker than any applied level
+    /// (spec 2026-10-01); Apple panels never get it. Cached like `presets` —
+    /// read at palette-match time, so it must never hit the disk.
+    private(set) var externalOffset: Int
 
     /// What the displays were last asked for — a preset or an ad-hoc level —
-    /// so a scale change can re-land it instead of waiting for the next apply.
+    /// so an offset change can re-land it instead of waiting for the next apply.
     private var lastApplied: Preset?
 
     private init() {
         let prefs = Preferences.load()
         presets = prefs.displayPresets ?? Preset.defaults
-        externalScale = Self.clampScale(prefs.externalBrightnessScale ?? 100)
+        externalOffset = Self.clampOffset(prefs.externalBrightnessOffset ?? 0)
     }
 
-    /// 10…100: a 0 would make every external monitor a black rectangle
-    /// regardless of preset, which is what `screens off` is for.
-    private static func clampScale(_ percent: Int) -> Int { min(max(percent, 10), 100) }
+    /// 0…50 points: past half, the floor would hold every level from 60 down.
+    private static func clampOffset(_ points: Int) -> Int { min(max(points, 0), 50) }
+
+    /// Lowest level the offset can take a DDC monitor to — the offset alone
+    /// must never black it out; that is what `screens off` is for.
+    nonisolated static let externalFloor = 10
+
+    /// The DDC monitors' percent for a `percent` level (spec 2026-10-01):
+    /// `offset` points darker, never below `externalFloor`, and never
+    /// brighter than the Apple panels, so a level under the floor passes
+    /// through unchanged. 70 → 50, 20 → 10, 5 → 5 at an offset of 20.
+    nonisolated static func externalPercent(_ percent: Int, offset: Int) -> Int {
+        let level = min(max(percent, 0), 100)
+        return min(level, max(level - offset, externalFloor))
+    }
 
     var activeIndex: Int? { presets.firstIndex { $0.id == activeID } }
 
@@ -125,9 +137,9 @@ final class BrightnessStore {
         if activeID != preset.id { activeID = preset.id }
         lastApplied = preset
         isApplying = true
-        let scale = externalScale
+        let offset = externalOffset
         Task.detached(priority: .userInitiated) {
-            Self.push(preset, externalScale: scale)
+            Self.push(preset, externalOffset: offset)
             for (keyboard, level) in keyboardsToRestore { KeyboardBacklight.setBrightness(level, of: keyboard) }
             await MainActor.run { self.finishPass() }
         }
@@ -147,17 +159,17 @@ final class BrightnessStore {
     /// displays were last asked for, so the LG moves as the slider does;
     /// `persist` is false mid-drag and true on the drop (spec 2026-09-10
     /// decision 1 applies here too).
-    func setExternalScale(_ percent: Int, persist: Bool) {
-        let clamped = Self.clampScale(percent)
-        if externalScale != clamped {
-            externalScale = clamped
+    func setExternalOffset(_ points: Int, persist: Bool) {
+        let clamped = Self.clampOffset(points)
+        if externalOffset != clamped {
+            externalOffset = clamped
             if let lastApplied { apply(preset: lastApplied) }
         }
         guard persist else { return }
-        Preferences.update { $0.externalBrightnessScale = clamped == 100 ? nil : clamped }
+        Preferences.update { $0.externalBrightnessOffset = clamped == 0 ? nil : clamped }
     }
 
-    private nonisolated static func push(_ preset: Preset, externalScale: Int) {
+    private nonisolated static func push(_ preset: Preset, externalOffset: Int) {
         switch preset.nightShift {
         case .on: NightShift.setEnabled(true)
         case .off: NightShift.setEnabled(false)
@@ -166,7 +178,7 @@ final class BrightnessStore {
         for display in DisplayServices.controllableDisplays() {
             DisplayServices.setBrightness(preset.level, of: display)
         }
-        let external = preset.level * Double(externalScale) / 100
+        let external = Double(externalPercent(preset.brightness, offset: externalOffset)) / 100
         for display in DDCDisplays.displays() {
             DDCDisplays.setBrightness(external, of: display)
         }

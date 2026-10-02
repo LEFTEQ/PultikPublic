@@ -6,10 +6,10 @@ harness=$(mktemp -d "${TMPDIR:-/tmp}/pultik-foundation.XXXXXX")
 trap 'rm -rf "$harness"' EXIT
 mkdir -p "$harness/Sources/Pultik" "$harness/Tests/PultikTests"
 sources=(Sources/Models/Models.swift Sources/Models/OverviewGlance.swift
-  Sources/Models/DevboxBoxes.swift Sources/Models/FiringWatch.swift Sources/API/PollingSession.swift
-  Sources/Support/GHToken.swift Sources/Support/ProbeGate.swift)
+  Sources/Models/DevboxBoxes.swift Sources/Models/DevboxClear.swift Sources/Models/FiringWatch.swift Sources/API/PollingSession.swift
+  Sources/Support/GHToken.swift Sources/Support/ProbeGate.swift Sources/Support/DevboxClearWorktree.swift)
 tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/DevboxBoxesTests.swift
-  Tests/FiringWatchTests.swift)
+  Tests/FiringWatchTests.swift Tests/DevboxClearTests.swift Tests/DevboxClearWorktreeTests.swift)
 for file in "${sources[@]}" "$repo"/Sources/API/GitHub*.swift; do
   [[ "$file" = /* ]] || file="$repo/$file"
   cp "$file" "$harness/Sources/Pultik/"
