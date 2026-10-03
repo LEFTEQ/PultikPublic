@@ -216,8 +216,9 @@ final class StatusPanel: NSPanel {
     /// Spotlight-style: horizontally centered on the focused screen, top at
     /// ~20% down. `NSScreen.main` is the screen holding the key window — the
     /// one the user is working on — falling back to the mouse's screen.
-    func showCentered() {
-        let screen = NSScreen.main
+    /// Native test summons can supply a preferred screen explicitly.
+    func showCentered(on preferredScreen: NSScreen? = nil) {
+        let screen = preferredScreen ?? NSScreen.main
             ?? NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             ?? NSScreen.screens.first
         guard let screen else { return }
@@ -340,6 +341,8 @@ final class StatusPanel: NSPanel {
     }
 
     private func present() {
+        // A visible panel was only repositioned; keep its one dismiss monitor.
+        guard !isVisible else { return }
         previousApp = NSWorkspace.shared.frontmostApplication
         makeKeyAndOrderFront(nil)
 

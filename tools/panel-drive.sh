@@ -3,7 +3,7 @@
 # focus. Talks to Sources/Support/PanelDriver.swift over a distributed
 # notification; the Release app has no listener.
 #
-#   tools/panel-drive.sh open                      # summon (⌥Space path)
+#   tools/panel-drive.sh open                      # prefer connected Studio Display
 #   tools/panel-drive.sh close
 #   tools/panel-drive.sh query '<text>'            # set the palette text
 #   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V)
@@ -69,8 +69,8 @@ case "$cmd" in
       const primary = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
       const screens = [];
       for (let i = 0; i < $.NSScreen.screens.count; i++) {
-        const v = $.NSScreen.screens.objectAtIndex(i).visibleFrame;
-        screens.push({ left: v.origin.x, right: v.origin.x + v.size.width,
+        const screen = $.NSScreen.screens.objectAtIndex(i), v = screen.visibleFrame;
+        screens.push({ name: ObjC.unwrap(screen.localizedName), left: v.origin.x, right: v.origin.x + v.size.width,
                        top: primary - (v.origin.y + v.size.height), bottom: primary - v.origin.y });
       }
       JSON.stringify(ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1, 0)))
@@ -79,7 +79,7 @@ case "$cmd" in
           const b = w.kCGWindowBounds, cx = b.X + b.Width / 2;
           const s = screens.find(s => cx >= s.left && cx < s.right && b.Y >= s.top && b.Y < s.bottom) || screens[0];
           return { left: b.X, right: b.X + b.Width, top: b.Y, bottom: b.Y + b.Height,
-                   screen: { left: s.left, right: s.right, top: s.top, bottom: s.bottom },
+                   screen: { name: s.name, left: s.left, right: s.right, top: s.top, bottom: s.bottom },
                    inside: b.X >= s.left && b.X + b.Width <= s.right
                        && b.Y >= s.top && b.Y + b.Height <= s.bottom };
         }));
