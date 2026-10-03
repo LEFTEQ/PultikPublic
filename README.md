@@ -45,6 +45,11 @@ Recent history warms gradually, so an unseen historical PR still needs a first f
 Requests share a paced queue with foreground priority. Run the focused Foundation
 contracts with `bash tools/test-foundation.sh` without launching a native app host.
 
+Native Debug checks use `tools/panel-drive.sh`. Its `open` command and the
+`PULTIK_OPEN_PANEL=<delay-seconds>` launch hook prefer a connected Studio Display,
+falling back to the focused screen. `frame` reports the monitor name and bounds.
+Ordinary hotkey and menu-bar summons continue to follow the user's screen.
+
 The current implementation persists optional Sentry/Eve token overrides in that
 local JSON file; do not commit or share it. An empty override falls back to the
 existing local credential sources. The public tree contains no runtime settings.

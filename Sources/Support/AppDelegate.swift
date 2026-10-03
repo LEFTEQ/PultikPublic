@@ -88,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { [weak self] in
                 guard let self else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + max(0.25, delay)) { [weak self] in
-                    self?.togglePanel(nil)
+                    self?.debugShowPanel()
                 }
                 await self.store.debugRefreshDevbox()
                 self.store.startPolling()
@@ -222,6 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "footprintBytes": info.phys_footprint,
             "panelResident": panel != nil,
             "presented": panelSession.isPresented,
+            "panelScreen": panel?.screen?.localizedName ?? "",
             "summonMilliseconds": debugLastSummonMilliseconds,
             "refreshing": store.isRefreshing,
             "todoCount": TodoStore.shared.openTodos.count,
@@ -232,10 +233,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ], to: path)
     }
 
-    /// PanelDriver `open`: the ⌥Space path, without the hotkey.
+    /// Test summons prefer Studio Display, including an already-visible panel.
+    /// Ordinary hotkey and status-item summons still follow the user's screen.
     func debugShowPanel() {
-        guard panel?.isVisible != true else { return }
-        togglePanel(nil)
+        let started = ProcessInfo.processInfo.systemUptime
+        let panel = warmPanel()
+        if !panel.isVisible { panelSession.markPresented() }
+        let screens = NSScreen.screens
+        let preferredScreen = PanelTestDisplay.preferredIndex(in: screens.map(\.localizedName))
+            .map { screens[$0] }
+        panel.showCentered(on: preferredScreen)
+        debugLastSummonMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000
+        Task { await store.refreshIfStale() }
     }
 
     /// PanelDriver `capture`: the panel's own window to a PNG.
