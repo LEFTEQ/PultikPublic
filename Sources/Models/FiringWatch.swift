@@ -37,6 +37,13 @@ struct FiringWatch {
 
     /// One firing episode of an instance — what the panel marks seen, so a
     /// rule that resolves and fires again is unseen again.
+    /// Deployments with a firing alert announced here and not yet resolved —
+    /// what the prod board adopts when Hlídač comes back, so their red is not
+    /// announced twice.
+    var announcedDeployments: Set<String> {
+        Set((live ?? [:]).values.filter { notified.contains($0.id) }.compactMap { $0.labels["deployment"] })
+    }
+
     static func episodeKey(_ alert: FiringAlert) -> String {
         "\(alert.id)@\(alert.activeAt?.timeIntervalSince1970 ?? 0)"
     }
@@ -44,7 +51,10 @@ struct FiringWatch {
     /// `answered` = the evaluators that replied this poll. A silent one (the
     /// Loki ruler drops out on its own) keeps its last alerts, so its outage
     /// never reads as every one of its rules resolving.
+    /// `quiet` = alerts another watch announces (the prod board, while Hlídač
+    /// answers): tracked, never spoken — so their resolve stays silent too.
     mutating func update(_ alerts: [FiringAlert], answered: Set<FiringAlert.Source>,
+                         quiet: (FiringAlert) -> Bool = { _ in false },
                          now: Date = Date()) -> [Notice]
     {
         var current = Dictionary(Self.criticals(alerts).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -57,6 +67,11 @@ struct FiringWatch {
             return []
         }
         live = current
+        // Hand-off: an alert announced here that the prod board now owns
+        // resolves there (ProdTransitions adopted it), never here as well.
+        for alert in previous.values where quiet(alert) {
+            notified.remove(alert.id)
+        }
 
         let gone = previous.values.filter { current[$0.id] == nil }
         for alert in gone { leftAt[alert.id] = now }
@@ -68,7 +83,7 @@ struct FiringWatch {
         let candidates = current.values.filter { previous[$0.id] == nil || held.contains($0.id) }
         held = Set(candidates.filter { leftAt[$0.id] != nil }.map(\.id))
         let fired = candidates
-            .filter { leftAt[$0.id] == nil }
+            .filter { leftAt[$0.id] == nil && !quiet($0) }
             .sorted { ($0.activeAt ?? .distantPast, $0.id) < ($1.activeAt ?? .distantPast, $1.id) }
         notified.formUnion(fired.map(\.id))
 

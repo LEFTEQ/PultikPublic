@@ -1,0 +1,1032 @@
+{
+  "generatedAt": "2026-10-02T18:41:00Z",
+  "sources": {
+    "prometheus": {
+      "ok": true,
+      "since": null,
+      "error": null
+    },
+    "alertmanager": {
+      "ok": true,
+      "since": null,
+      "error": null
+    },
+    "sentry": {
+      "ok": true,
+      "since": null,
+      "error": null
+    }
+  },
+  "deployments": [
+    {
+      "key": "exampleapp-prod",
+      "project": "exampleapp",
+      "title": "ExampleApp prod",
+      "tier": "critical",
+      "verdict": "ok",
+      "blindSince": null,
+      "emergency": false,
+      "checks": [
+        {
+          "id": "api",
+          "title": "API",
+          "status": 1,
+          "value": "182 ms",
+          "page": true
+        },
+        {
+          "id": "web",
+          "title": "exampleapp.app",
+          "status": 1,
+          "value": "ok",
+          "page": false
+        },
+        {
+          "id": "modules",
+          "title": "Modules",
+          "status": 1,
+          "value": "9/9",
+          "page": false
+        },
+        {
+          "id": "deps",
+          "title": "Dependencies",
+          "status": 1,
+          "value": "7/7",
+          "page": false
+        },
+        {
+          "id": "edge5xx",
+          "title": "Edge 5xx",
+          "status": 1,
+          "value": "0.0%",
+          "page": false
+        },
+        {
+          "id": "backup",
+          "title": "Backup",
+          "status": 1,
+          "value": "16 h",
+          "page": false
+        }
+      ],
+      "logs": {
+        "hours": [
+          {
+            "start": "2026-10-01T19:00:00Z",
+            "error": 0,
+            "warn": 30
+          },
+          {
+            "start": "2026-10-01T20:00:00Z",
+            "error": 0,
+            "warn": 28
+          },
+          {
+            "start": "2026-10-01T21:00:00Z",
+            "error": 0,
+            "warn": 25
+          },
+          {
+            "start": "2026-10-01T22:00:00Z",
+            "error": 0,
+            "warn": 22
+          },
+          {
+            "start": "2026-10-01T23:00:00Z",
+            "error": 0,
+            "warn": 20
+          },
+          {
+            "start": "2026-10-02T00:00:00Z",
+            "error": 0,
+            "warn": 18
+          },
+          {
+            "start": "2026-10-02T01:00:00Z",
+            "error": 0,
+            "warn": 22
+          },
+          {
+            "start": "2026-10-02T02:00:00Z",
+            "error": 0,
+            "warn": 35
+          },
+          {
+            "start": "2026-10-02T03:00:00Z",
+            "error": 0,
+            "warn": 48
+          },
+          {
+            "start": "2026-10-02T04:00:00Z",
+            "error": 0,
+            "warn": 52
+          },
+          {
+            "start": "2026-10-02T05:00:00Z",
+            "error": 0,
+            "warn": 47
+          },
+          {
+            "start": "2026-10-02T06:00:00Z",
+            "error": 0,
+            "warn": 40
+          },
+          {
+            "start": "2026-10-02T07:00:00Z",
+            "error": 0,
+            "warn": 38
+          },
+          {
+            "start": "2026-10-02T08:00:00Z",
+            "error": 0,
+            "warn": 36
+          },
+          {
+            "start": "2026-10-02T09:00:00Z",
+            "error": 0,
+            "warn": 41
+          },
+          {
+            "start": "2026-10-02T10:00:00Z",
+            "error": 0,
+            "warn": 44
+          },
+          {
+            "start": "2026-10-02T11:00:00Z",
+            "error": 0,
+            "warn": 39
+          },
+          {
+            "start": "2026-10-02T12:00:00Z",
+            "error": 0,
+            "warn": 33
+          },
+          {
+            "start": "2026-10-02T13:00:00Z",
+            "error": 0,
+            "warn": 30
+          },
+          {
+            "start": "2026-10-02T14:00:00Z",
+            "error": 0,
+            "warn": 27
+          },
+          {
+            "start": "2026-10-02T15:00:00Z",
+            "error": 0,
+            "warn": 25
+          },
+          {
+            "start": "2026-10-02T16:00:00Z",
+            "error": 0,
+            "warn": 24
+          },
+          {
+            "start": "2026-10-02T17:00:00Z",
+            "error": 0,
+            "warn": 22
+          },
+          {
+            "start": "2026-10-02T18:00:00Z",
+            "error": 0,
+            "warn": 12
+          }
+        ],
+        "today": {
+          "error": 0,
+          "warn": 818
+        },
+        "yesterday": {
+          "error": 0,
+          "warn": 852
+        }
+      },
+      "edge": {
+        "today": {
+          "5xx": 0,
+          "429": 340
+        }
+      },
+      "sentry": [
+        {
+          "id": "4821",
+          "shortId": "EXAMPLEAPP-API-7K",
+          "title": "TypeError: Cannot read properties of undefined (reading 'jobId')",
+          "project": "exampleapp-api",
+          "environment": "production",
+          "count": 14,
+          "users": 3,
+          "firstSeen": "2026-10-02T18:03:00Z",
+          "lastSeen": "2026-10-02T18:29:00Z",
+          "permalink": "https://sentry.ops.example.invalid/organizations/sentry/issues/4821/",
+          "isNew": true
+        }
+      ],
+      "alerts": [],
+      "pool": null,
+      "links": [
+        {
+          "title": "Grafana",
+          "url": "https://grafana.ops.example.invalid/d/exampleapp-prod"
+        }
+      ]
+    },
+    {
+      "key": "eve-exampleapp-prod",
+      "project": "eve",
+      "title": "eve · ExampleApp",
+      "tier": "critical",
+      "verdict": "degraded",
+      "blindSince": null,
+      "emergency": false,
+      "checks": [
+        {
+          "id": "claude-pool",
+          "title": "Claude pool",
+          "status": 0.5,
+          "value": "1/2",
+          "page": false
+        },
+        {
+          "id": "codex-pool",
+          "title": "Codex pool",
+          "status": 0.5,
+          "value": "2/4",
+          "page": false
+        },
+        {
+          "id": "any-pool",
+          "title": "Any pool",
+          "status": 1,
+          "value": "3 usable",
+          "page": true
+        },
+        {
+          "id": "chat",
+          "title": "Chat",
+          "status": 1,
+          "value": "12/12",
+          "page": true
+        },
+        {
+          "id": "canary",
+          "title": "Canary",
+          "status": 1,
+          "value": "4.1 s · 3m",
+          "page": true
+        },
+        {
+          "id": "backup",
+          "title": "Backup",
+          "status": 1,
+          "value": "16.2 h",
+          "page": false
+        }
+      ],
+      "logs": {
+        "hours": [
+          {
+            "start": "2026-10-01T19:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-01T20:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-01T21:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-01T22:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-01T23:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T00:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T01:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T02:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T03:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T04:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T05:00:00Z",
+            "error": 0,
+            "warn": 2
+          },
+          {
+            "start": "2026-10-02T06:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T07:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T08:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T09:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T10:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T11:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T12:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T13:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T14:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T15:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T16:00:00Z",
+            "error": 0,
+            "warn": 0
+          },
+          {
+            "start": "2026-10-02T17:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T18:00:00Z",
+            "error": 0,
+            "warn": 0
+          }
+        ],
+        "today": {
+          "error": 0,
+          "warn": 10
+        },
+        "yesterday": {
+          "error": 0,
+          "warn": 7
+        }
+      },
+      "edge": null,
+      "sentry": [],
+      "alerts": [],
+      "pool": {
+        "pools": [
+          {
+            "gateway": "anthropic",
+            "usable": 1,
+            "total": 2,
+            "accounts": [
+              {
+                "id": "claude-1",
+                "state": "usable",
+                "cooldownUntil": null,
+                "demotedUntil": null,
+                "windows": [
+                  {
+                    "name": "five_hour",
+                    "usedRatio": 0.42,
+                    "resetsAt": "2026-10-02T20:51:00Z"
+                  },
+                  {
+                    "name": "seven_day",
+                    "usedRatio": 0.61,
+                    "resetsAt": "2026-10-09T12:00:00Z"
+                  },
+                  {
+                    "name": "fable_weekly",
+                    "usedRatio": 0.62,
+                    "resetsAt": "2026-10-09T12:00:00Z"
+                  }
+                ],
+                "turns24h": 212,
+                "observedAt": "2026-10-02T18:35:00Z"
+              },
+              {
+                "id": "claude-2",
+                "state": "cooling",
+                "cooldownUntil": "2026-10-02T19:14:00Z",
+                "demotedUntil": null,
+                "windows": [
+                  {
+                    "name": "five_hour",
+                    "usedRatio": 1.0,
+                    "resetsAt": "2026-10-02T19:14:00Z"
+                  },
+                  {
+                    "name": "seven_day",
+                    "usedRatio": 0.74,
+                    "resetsAt": "2026-10-08T09:00:00Z"
+                  },
+                  {
+                    "name": "fable_weekly",
+                    "usedRatio": 0.79,
+                    "resetsAt": "2026-10-08T09:00:00Z"
+                  }
+                ],
+                "turns24h": 188,
+                "observedAt": "2026-10-02T18:35:00Z"
+              }
+            ]
+          },
+          {
+            "gateway": "codex",
+            "usable": 2,
+            "total": 4,
+            "accounts": [
+              {
+                "id": "codex-a",
+                "state": "usable",
+                "cooldownUntil": null,
+                "demotedUntil": null,
+                "windows": [
+                  {
+                    "name": "five_hour",
+                    "usedRatio": 0.23,
+                    "resetsAt": "2026-10-02T20:10:00Z"
+                  },
+                  {
+                    "name": "seven_day",
+                    "usedRatio": 0.4,
+                    "resetsAt": "2026-10-06T00:00:00Z"
+                  }
+                ],
+                "turns24h": 96,
+                "observedAt": "2026-10-02T18:39:00Z"
+              },
+              {
+                "id": "codex-b",
+                "state": "usable",
+                "cooldownUntil": null,
+                "demotedUntil": null,
+                "windows": [
+                  {
+                    "name": "five_hour",
+                    "usedRatio": 0.51,
+                    "resetsAt": "2026-10-02T21:45:00Z"
+                  },
+                  {
+                    "name": "seven_day",
+                    "usedRatio": 0.63,
+                    "resetsAt": "2026-10-06T00:00:00Z"
+                  }
+                ],
+                "turns24h": 71,
+                "observedAt": "2026-10-02T18:32:00Z"
+              },
+              {
+                "id": "codex-c",
+                "state": "cooling",
+                "cooldownUntil": "2026-10-02T18:58:00Z",
+                "demotedUntil": null,
+                "windows": [
+                  {
+                    "name": "five_hour",
+                    "usedRatio": 1.0,
+                    "resetsAt": "2026-10-02T18:58:00Z"
+                  },
+                  {
+                    "name": "seven_day",
+                    "usedRatio": 0.88,
+                    "resetsAt": "2026-10-05T00:00:00Z"
+                  }
+                ],
+                "turns24h": 54,
+                "observedAt": "2026-10-02T18:00:00Z"
+              },
+              {
+                "id": "codex-d",
+                "state": "logged_out",
+                "cooldownUntil": null,
+                "demotedUntil": null,
+                "windows": [],
+                "turns24h": 0,
+                "observedAt": null
+              }
+            ]
+          }
+        ],
+        "canary": {
+          "lastSuccess": "2026-10-02T18:38:00Z",
+          "durationSeconds": 4.1,
+          "consecutiveFailures": 0
+        },
+        "failoversToday": 3,
+        "backupTurnsToday": 0
+      },
+      "links": [
+        {
+          "title": "Grafana",
+          "url": "https://grafana.ops.example.invalid/d/eve-prod"
+        }
+      ]
+    },
+    {
+      "key": "booking-sk",
+      "project": "booking",
+      "title": "Booking SK",
+      "tier": "critical",
+      "verdict": "degraded",
+      "blindSince": null,
+      "emergency": false,
+      "checks": [
+        {
+          "id": "api",
+          "title": "API",
+          "status": 1,
+          "value": "210 ms",
+          "page": true
+        },
+        {
+          "id": "tenants",
+          "title": "Tenants",
+          "status": 1,
+          "value": "2/2",
+          "page": false
+        },
+        {
+          "id": "scheduler",
+          "title": "Scheduler",
+          "status": 1,
+          "value": "13 s",
+          "page": true
+        },
+        {
+          "id": "queues",
+          "title": "Queues",
+          "status": 1,
+          "value": "ok",
+          "page": false
+        },
+        {
+          "id": "failed-work",
+          "title": "Failed work",
+          "status": 1,
+          "value": "0",
+          "page": false
+        },
+        {
+          "id": "backup",
+          "title": "Backup",
+          "status": 1,
+          "value": "17.9 h",
+          "page": false
+        }
+      ],
+      "logs": {
+        "hours": [
+          {
+            "start": "2026-10-01T19:00:00Z",
+            "error": 0,
+            "warn": 3
+          },
+          {
+            "start": "2026-10-01T20:00:00Z",
+            "error": 0,
+            "warn": 2
+          },
+          {
+            "start": "2026-10-01T21:00:00Z",
+            "error": 0,
+            "warn": 2
+          },
+          {
+            "start": "2026-10-01T22:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-01T23:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T00:00:00Z",
+            "error": 0,
+            "warn": 1
+          },
+          {
+            "start": "2026-10-02T01:00:00Z",
+            "error": 0,
+            "warn": 4
+          },
+          {
+            "start": "2026-10-02T02:00:00Z",
+            "error": 0,
+            "warn": 9
+          },
+          {
+            "start": "2026-10-02T03:00:00Z",
+            "error": 1,
+            "warn": 12
+          },
+          {
+            "start": "2026-10-02T04:00:00Z",
+            "error": 0,
+            "warn": 11
+          },
+          {
+            "start": "2026-10-02T05:00:00Z",
+            "error": 0,
+            "warn": 10
+          },
+          {
+            "start": "2026-10-02T06:00:00Z",
+            "error": 0,
+            "warn": 9
+          },
+          {
+            "start": "2026-10-02T07:00:00Z",
+            "error": 0,
+            "warn": 8
+          },
+          {
+            "start": "2026-10-02T08:00:00Z",
+            "error": 0,
+            "warn": 9
+          },
+          {
+            "start": "2026-10-02T09:00:00Z",
+            "error": 0,
+            "warn": 10
+          },
+          {
+            "start": "2026-10-02T10:00:00Z",
+            "error": 0,
+            "warn": 11
+          },
+          {
+            "start": "2026-10-02T11:00:00Z",
+            "error": 1,
+            "warn": 9
+          },
+          {
+            "start": "2026-10-02T12:00:00Z",
+            "error": 0,
+            "warn": 8
+          },
+          {
+            "start": "2026-10-02T13:00:00Z",
+            "error": 0,
+            "warn": 7
+          },
+          {
+            "start": "2026-10-02T14:00:00Z",
+            "error": 0,
+            "warn": 7
+          },
+          {
+            "start": "2026-10-02T15:00:00Z",
+            "error": 0,
+            "warn": 6
+          },
+          {
+            "start": "2026-10-02T16:00:00Z",
+            "error": 0,
+            "warn": 5
+          },
+          {
+            "start": "2026-10-02T17:00:00Z",
+            "error": 0,
+            "warn": 4
+          },
+          {
+            "start": "2026-10-02T18:00:00Z",
+            "error": 0,
+            "warn": 4
+          }
+        ],
+        "today": {
+          "error": 2,
+          "warn": 163
+        },
+        "yesterday": {
+          "error": 5,
+          "warn": 171
+        }
+      },
+      "edge": {
+        "today": {
+          "5xx": 4,
+          "429": 2
+        }
+      },
+      "sentry": [
+        {
+          "id": "3310",
+          "shortId": "BOOKING-BACK-2F1",
+          "title": "Stancl\\Tenancy\\Exceptions\\TenantCouldNotBeIdentifiedOnDomainException",
+          "project": "booking-back",
+          "environment": "sk",
+          "count": 558,
+          "users": 3,
+          "firstSeen": "2026-09-14T08:12:00Z",
+          "lastSeen": "2026-10-02T16:41:00Z",
+          "permalink": "https://sentry.ops.example.invalid/organizations/sentry/issues/3310/",
+          "isNew": false
+        }
+      ],
+      "alerts": [
+        {
+          "name": "BookingSkIntentBacklog",
+          "severity": "warning",
+          "summary": "Booking intent backlog > 5 min",
+          "activeAt": "2026-10-02T18:35:00Z",
+          "emergency": false,
+          "url": "http://192.0.2.10:9090/alerts?search=BookingSkIntentBacklog"
+        }
+      ],
+      "pool": null,
+      "links": [
+        {
+          "title": "Grafana",
+          "url": "https://grafana.ops.example.invalid/d/booking-sk"
+        }
+      ]
+    },
+    {
+      "key": "booking-cz",
+      "project": "booking",
+      "title": "Booking CZ",
+      "tier": "critical",
+      "verdict": "unmonitored",
+      "blindSince": null,
+      "emergency": false,
+      "checks": [],
+      "logs": {
+        "hours": null,
+        "today": null,
+        "yesterday": null
+      },
+      "edge": null,
+      "sentry": [
+        {
+          "id": "2977",
+          "shortId": "BOOKING-BACK-1ZQ",
+          "title": "NotificationChannels\\Telegram\\Exceptions\\CouldNotSendNotification",
+          "project": "booking-back",
+          "environment": "production",
+          "count": 411,
+          "users": 0,
+          "firstSeen": "2026-08-30T10:00:00Z",
+          "lastSeen": "2026-10-02T08:41:00Z",
+          "permalink": "https://sentry.ops.example.invalid/organizations/sentry/issues/2977/",
+          "isNew": false
+        },
+        {
+          "id": "3402",
+          "shortId": "BOOKING-BACK-2H8",
+          "title": "GuzzleHttp\\Exception\\ClientException",
+          "project": "booking-back",
+          "environment": "production",
+          "count": 2,
+          "users": 0,
+          "firstSeen": "2026-10-01T19:41:00Z",
+          "lastSeen": "2026-10-01T21:41:00Z",
+          "permalink": "https://sentry.ops.example.invalid/organizations/sentry/issues/3402/",
+          "isNew": false
+        }
+      ],
+      "alerts": [],
+      "pool": null,
+      "links": []
+    },
+    {
+      "key": "vitrinka",
+      "project": "vitrinka",
+      "title": "vitrinka",
+      "tier": "watch",
+      "verdict": "down",
+      "blindSince": null,
+      "emergency": false,
+      "checks": [
+        {
+          "id": "app",
+          "title": "boards.example.invalid",
+          "status": 1,
+          "value": "ok",
+          "page": false
+        },
+        {
+          "id": "edge5xx",
+          "title": "Edge 5xx",
+          "status": 1,
+          "value": "0.3%",
+          "page": false
+        },
+        {
+          "id": "p99",
+          "title": "p99",
+          "status": 0,
+          "value": "10.2 s",
+          "page": false
+        }
+      ],
+      "logs": {
+        "hours": [
+          {
+            "start": "2026-10-01T19:00:00Z",
+            "error": 30,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-01T20:00:00Z",
+            "error": 28,
+            "warn": 14
+          },
+          {
+            "start": "2026-10-01T21:00:00Z",
+            "error": 31,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-01T22:00:00Z",
+            "error": 29,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-01T23:00:00Z",
+            "error": 33,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T00:00:00Z",
+            "error": 35,
+            "warn": 17
+          },
+          {
+            "start": "2026-10-02T01:00:00Z",
+            "error": 38,
+            "warn": 18
+          },
+          {
+            "start": "2026-10-02T02:00:00Z",
+            "error": 40,
+            "warn": 17
+          },
+          {
+            "start": "2026-10-02T03:00:00Z",
+            "error": 42,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T04:00:00Z",
+            "error": 44,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-02T05:00:00Z",
+            "error": 41,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T06:00:00Z",
+            "error": 39,
+            "warn": 17
+          },
+          {
+            "start": "2026-10-02T07:00:00Z",
+            "error": 37,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T08:00:00Z",
+            "error": 36,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-02T09:00:00Z",
+            "error": 38,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T10:00:00Z",
+            "error": 40,
+            "warn": 17
+          },
+          {
+            "start": "2026-10-02T11:00:00Z",
+            "error": 39,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T12:00:00Z",
+            "error": 37,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-02T13:00:00Z",
+            "error": 36,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T14:00:00Z",
+            "error": 35,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-02T15:00:00Z",
+            "error": 34,
+            "warn": 14
+          },
+          {
+            "start": "2026-10-02T16:00:00Z",
+            "error": 33,
+            "warn": 15
+          },
+          {
+            "start": "2026-10-02T17:00:00Z",
+            "error": 32,
+            "warn": 16
+          },
+          {
+            "start": "2026-10-02T18:00:00Z",
+            "error": 30,
+            "warn": 14
+          }
+        ],
+        "today": {
+          "error": 890,
+          "warn": 382
+        },
+        "yesterday": {
+          "error": 861,
+          "warn": 377
+        }
+      },
+      "edge": {
+        "today": {
+          "5xx": 37,
+          "429": 12
+        }
+      },
+      "sentry": [],
+      "alerts": [
+        {
+          "name": "VitrinkaP99Critical",
+          "severity": "critical",
+          "summary": "vitrinka p99 10s on /w/{id}/api/v1/projects",
+          "activeAt": "2026-10-02T06:41:00Z",
+          "emergency": false,
+          "url": "http://192.0.2.10:9090/alerts?search=VitrinkaP99Critical"
+        }
+      ],
+      "pool": null,
+      "links": [
+        {
+          "title": "Grafana",
+          "url": "https://grafana.ops.example.invalid/d/vitrinka"
+        }
+      ]
+    }
+  ]
+}

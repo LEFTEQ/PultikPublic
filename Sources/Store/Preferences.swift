@@ -39,6 +39,11 @@ struct Preferences: Codable {
     var services: [NamedRef] = Preferences.defaultServices
     /// The on-call registry: what each product is made of.
     var projects: [ProjectSpec] = Preferences.defaultProjects
+    /// Hlídač, the prod digest API on BuildServer (decision D13). Nil = the
+    /// default endpoint; set only to point a build at a staging Hlídač.
+    var hlidacURL: String?
+
+    static let defaultHlidacURL = "https://hlidac.ops.example.invalid"
     /// Fixed main-list order: repos whose slug contains one of these names
     /// (case-insensitive) come first, in exactly this sequence; everything
     /// else follows by recency. Predictability over cleverness.
@@ -239,6 +244,11 @@ struct Preferences: Codable {
         /// BuildServer and served from AppServer). Drives the services rail's
         /// host grouping; nil files the service under "elsewhere".
         var host: String?
+        /// Services only: the blackbox job to read, when one instance is
+        /// probed by several (`https://exampleapp.app` is in both blackbox-http and
+        /// blackbox-ssl; an eve gateway's `/ready` is both "logged in" and
+        /// "usable"). Nil = any non-ssl job, worst value wins.
+        var job: String?
         var id: String { ref }
     }
 
@@ -261,17 +271,43 @@ struct Preferences: Codable {
     static let retiredSSHAliases = ["devops": "build-server-admin"]
 
     /// `host` is where the service RUNS, verified against cadvisor rather than
-    /// guessed from the probe URL: exampleapp-prod's api containers and vitrinka's
-    /// blue/green pair are on AppServer, booking.example.invalid is served by WebServer's
-    /// deployik, and the probed `eve-exampleapp-prod` API container is on BuildServer
-    /// even though its gateway/chat/litellm tier lives on AppServer.
+    /// guessed from the probe URL: exampleapp-prod's api containers, vitrinka's
+    /// blue/green pair, Booking SK and the eve exampleapp-prod stack are all on
+    /// AppServer. Every ref is a live `probe_success` instance (checked
+    /// 2026-10-03); `retiredServiceRefs` moves saved files off the dead ones.
     static let defaultServices = [
         NamedRef(name: "exampleapp-prod", ref: "https://api.example.invalid/api/v1/health", host: "AppServer"),
-        NamedRef(name: "vitrinka-prod", ref: "https://boards.example.invalid", host: "AppServer"),
-        NamedRef(name: "eve-exampleapp-prod", ref: "http://eve-exampleapp-prod:3141/eve/v1/health", host: "BuildServer"),
-        NamedRef(name: "exampleapp-dev", ref: "https://api.app.dev.example.invalid/api/v1/health", host: "BuildServer"),
-        NamedRef(name: "booking-prod", ref: "https://booking.example.invalid", host: "WebServer"),
+        NamedRef(name: "vitrinka-prod", ref: "https://boards.example.invalid/healthz", host: "AppServer"),
+        NamedRef(name: "eve-exampleapp-prod", ref: "http://eve-exampleapp-prod-anthropic-gateway:3121/ready",
+                 host: "AppServer", job: "eve-prod-gateway-pool"),
+        NamedRef(name: "exampleapp-dev", ref: "http://exampleapp-dev-api:3111/api/v1/health", host: "BuildServer"),
+        NamedRef(name: "booking-sk", ref: "https://api-sk.booking.me/up", host: "AppServer"),
     ]
+
+    /// Saved service refs whose probe no longer exists — or never meant what
+    /// the tile said — keyed on the old ref, with the tile names that ref
+    /// shipped under and what replaces it: `eve-exampleapp-prod:3141` has no
+    /// series since prod moved to AppServer, `booking.example.invalid` is the marketing
+    /// site (green while the API is down), `boards.example.invalid` is Deployik's
+    /// landing page, and exampleapp-dev is probed inside BuildServer under its
+    /// container name. Only a tile still carrying a shipped name is retired,
+    /// so a deliberately re-added `booking.example.invalid` tile under a name of its own
+    /// survives every later load.
+    static let retiredServiceRefs: [String: (names: Set<String>, replacement: NamedRef)] = Dictionary(
+        uniqueKeysWithValues: [
+            ("http://eve-exampleapp-prod:3141/eve/v1/health", ["eve-exampleapp-prod", "assistant-service"], "eve-exampleapp-prod"),
+            ("https://booking.example.invalid", ["booking-prod"], "booking-sk"),
+            ("https://boards.example.invalid", ["vitrinka-prod"], "vitrinka-prod"),
+            ("https://api.app.dev.example.invalid/api/v1/health", ["exampleapp-dev"], "exampleapp-dev"),
+        ].compactMap { old, names, name in
+            defaultServices.first { $0.name == name }.map { (old, (names: Set(names), replacement: $0)) }
+        }
+    )
+
+    /// Service names that changed with their ref; `projects[].services`
+    /// points by name, so the rename follows there — only for a name that
+    /// no longer names any tile, so it can never fight a deliberate one.
+    static let renamedServices = ["booking-prod": "booking-sk", "assistant-service": "eve-exampleapp-prod"]
 
     static let defaultProjects = [
         ProjectSpec(
@@ -284,17 +320,19 @@ struct Preferences: Codable {
                 .init(title: "Sentry", url: "https://sentry.ops.example.invalid/organizations/sentry/projects/exampleapp-api/"),
                 .init(title: "Grafana", url: "https://grafana.ops.example.invalid"),
                 .init(title: "Admin dev", url: "https://admin.app.dev.example.invalid"),
-            ]
+            ],
+            prod: defaultProdPointers["exampleapp"]
         ),
         ProjectSpec(
             key: "booking", title: "Booking",
             repos: ["Booking/Booking", "Booking/BookingBack", "Booking/Integrations", "Booking/booking.web"],
             sentryProjects: ["booking-back", "booking", "booking-onboarding"],
-            services: ["booking-prod"],
+            services: ["booking-sk"],
             links: [
                 .init(title: "booking.example.invalid", url: "https://booking.example.invalid"),
                 .init(title: "Sentry", url: "https://sentry.ops.example.invalid/organizations/sentry/projects/booking-back/"),
-            ]
+            ],
+            prod: defaultProdPointers["booking"]
         ),
         ProjectSpec(
             key: "eve", title: "eve",
@@ -304,12 +342,14 @@ struct Preferences: Codable {
             links: [
                 .init(title: "Console", url: "https://eve.ops.example.invalid"),
                 .init(title: "Grafana", url: "https://grafana.ops.example.invalid"),
-            ]
+            ],
+            prod: defaultProdPointers["eve"]
         ),
         ProjectSpec(
             key: "vitrinka", title: "vitrinka",
             repos: ["example-org/vitrinka"],
-            links: [.init(title: "boards.example.invalid", url: "https://boards.example.invalid")]
+            links: [.init(title: "boards.example.invalid", url: "https://boards.example.invalid")],
+            prod: defaultProdPointers["vitrinka"]
         ),
         ProjectSpec(
             key: "example", title: "example",
@@ -320,6 +360,45 @@ struct Preferences: Codable {
             ]
         ),
     ]
+
+    /// The prod board's deployments per project key (decision D1: deployment
+    /// under project). Tiers and order follow the 2026-10-02 decision log;
+    /// Booking CZ stays on the board as "not monitored" (D15).
+    static let defaultProdPointers: [String: [ProdPointer]] = [
+        "exampleapp": [ProdPointer(key: "exampleapp-prod", title: "ExampleApp prod", tier: "critical", order: 1)],
+        "eve": [ProdPointer(key: "eve-exampleapp-prod", title: "eve · ExampleApp", tier: "critical", order: 2)],
+        "booking": [
+            ProdPointer(key: "booking-sk", title: "Booking SK", tier: "critical", order: 3),
+            ProdPointer(key: "booking-cz", title: "Booking CZ", tier: "critical", order: 4),
+        ],
+        "vitrinka": [ProdPointer(key: "vitrinka", title: "vitrinka", tier: "watch", order: 5)],
+    ]
+
+    /// Every prod pointer across projects, in board order: explicit `order`
+    /// first, then the order projects list them.
+    /// Board order; the first pointer per key wins (`prodPointerIssues`
+    /// names the rest, so a doubled key is visible rather than drawn twice).
+    var prodPointers: [ProdPointer] {
+        var seen = Set<String>()
+        return orderedProdPointers.filter { seen.insert($0.key).inserted }
+    }
+
+    /// One config-issue line per duplicated prod key.
+    var prodPointerIssues: [String] {
+        var seen = Set<String>()
+        var reported = Set<String>()
+        return orderedProdPointers.compactMap { pointer in
+            guard !seen.insert(pointer.key).inserted, reported.insert(pointer.key).inserted else { return nil }
+            return "projects[].prod: \(pointer.key) appears more than once — the first wins"
+        }
+    }
+
+    private var orderedProdPointers: [ProdPointer] {
+        projects.flatMap { $0.prod ?? [] }
+            .enumerated()
+            .sorted { ($0.element.order ?? Int.max, $0.offset) < ($1.element.order ?? Int.max, $1.offset) }
+            .map(\.element)
+    }
 
     static let directory = FileManager.default
         .homeDirectoryForCurrentUser
@@ -346,12 +425,15 @@ struct Preferences: Codable {
             ?? Preferences.defaultSentryProjects
         hotkey = try container.decodeIfPresent(String.self, forKey: .hotkey) ?? HotKey.defaultSpec
         hiddenSections = try container.decodeIfPresent([String].self, forKey: .hiddenSections) ?? []
-        servers = try container.decodeIfPresent([NamedRef].self, forKey: .servers)
+        // Lossy: one malformed entry is skipped and reported (ConfigIssueSink),
+        // never a reason to lose the whole estate.
+        servers = try container.decodeIfPresent(LossyArray<NamedRef>.self, forKey: .servers)?.elements
             ?? Preferences.defaultServers
-        services = try container.decodeIfPresent([NamedRef].self, forKey: .services)
+        services = try container.decodeIfPresent(LossyArray<NamedRef>.self, forKey: .services)?.elements
             ?? Preferences.defaultServices
-        projects = try container.decodeIfPresent([ProjectSpec].self, forKey: .projects)
+        projects = try container.decodeIfPresent(LossyArray<ProjectSpec>.self, forKey: .projects)?.elements
             ?? Preferences.defaultProjects
+        hlidacURL = try container.decodeIfPresent(String.self, forKey: .hlidacURL)
         repoOrder = try container.decodeIfPresent([String].self, forKey: .repoOrder)
             ?? Preferences.defaultRepoOrder
         visibleAlertLanes = try container.decodeIfPresent([String].self, forKey: .visibleAlertLanes)
@@ -393,21 +475,48 @@ struct Preferences: Codable {
     }
 
     static func load() -> Preferences {
-        if let data = try? Data(contentsOf: fileURL) {
-            do {
-                var loaded = try JSONDecoder().decode(Preferences.self, from: data)
-                if loaded.applyMigrations() { loaded.save() }
-                return loaded
-            } catch {
-                // Never silently discard a file we could not parse: keep a copy
-                // so nothing is lost, and surface it.
-                NSLog("pultik: settings.json unreadable (%@) — backing up", error.localizedDescription)
-                try? FileManager.default.moveItem(
-                    at: fileURL,
-                    to: directory.appending(path: "settings.corrupt.json")
-                )
-            }
+        loadSnapshot().value
+    }
+
+    /// The last clean decode and the stamp of the app's own last write —
+    /// shared by every store, so a malformed edit falls back to the copy
+    /// already in use rather than to defaults or the Hubbar file.
+    static let memory = SettingsMemory<Preferences>()
+
+    /// settings.json's last clean bytes, for a launch whose file no longer
+    /// decodes (`SettingsFile.persist`).
+    static let lastGoodURL = directory.appending(path: "settings.lastgood.json")
+
+    /// `load()` plus what it saw: the decode issues to show as one orange row
+    /// each, and whether the file may be written back (`SettingsFile.snapshot`
+    /// owns the policy; never moved aside, never replaced by a legacy file).
+    static func loadSnapshot() -> SettingsSnapshot<Preferences> {
+        guard let snapshot = SettingsFile.snapshot(
+            at: fileURL, lastGoodURL: lastGoodURL, memory: memory, fallback: { Preferences() }
+        ) else {
+            let fallback = loadAbsent()
+            memory.remember(fallback)
+            return SettingsSnapshot(value: fallback, issues: [], writable: true, needsSave: false)
         }
+        if snapshot.needsSave { snapshot.value.save() }
+        if !snapshot.writable {
+            NSLog("pultik: settings.json not clean (%@) — running on the last good copy, not writing",
+                  snapshot.issues.joined(separator: "; "))
+        }
+        return snapshot
+    }
+
+    /// Every Sentry project the estate names: the global list plus each
+    /// project's own, de-duplicated in order — the one list the rail and the
+    /// `.p` archive both sweep.
+    var allSentryProjects: [String] {
+        var seen = Set<String>()
+        return (sentryProjects + projects.flatMap(\.sentryProjects)).filter { seen.insert($0).inserted }
+    }
+
+    /// settings.json does not exist — the only case the legacy locations may
+    /// seed it from.
+    private static func loadAbsent() -> Preferences {
         // One-time migration from the Hubbar-era file (pre-rename).
         if let data = try? Data(contentsOf: legacyFileURL),
            var migrated = try? JSONDecoder().decode(Preferences.self, from: data) {
@@ -430,14 +539,69 @@ struct Preferences: Codable {
     /// Every in-place rewrite a decoded settings file may need, in one place so
     /// each `load()` path gets all of them and none can drift. Returns whether
     /// anything changed, so a file is only rewritten when it actually needs it.
-    private mutating func applyMigrations() -> Bool {
+    mutating func applyMigrations() -> Bool {
         // Deliberately not short-circuited: every migration must run.
         let retired = retireDeadSSHAliases()
         let servers = migrateServerEstate()
         let services = migrateServiceEstate()
         let presets = migrateDisplayPresets()
         let repos = migrateRepoSlugs()
-        return retired || servers || services || presets || repos
+        let probes = migrateRetiredServiceRefs()
+        let prod = seedProdPointers()
+        return retired || servers || services || presets || repos || probes || prod
+    }
+
+    /// The 2026-10-03 prod-watch pass, step 1: saved tiles that probe a dead
+    /// or misleading target move to the live probe (`retiredServiceRefs`),
+    /// and `projects[].services` follows the renamed tiles. One-shot by
+    /// construction: a retired tile no longer carries its old ref, and a tile
+    /// re-added under a name of its own is never matched again.
+    private mutating func migrateRetiredServiceRefs() -> Bool {
+        var changed = false
+        for index in services.indices {
+            guard let retired = Self.retiredServiceRefs[services[index].ref],
+                  retired.names.contains(services[index].name) else { continue }
+            let replacement = retired.replacement
+            let old = services[index]
+            // A file already carrying the replacement keeps one tile, not two.
+            if services.contains(where: { $0.ref == replacement.ref }) {
+                services[index].ref = ""
+            } else {
+                services[index] = replacement
+            }
+            changed = true
+            NSLog("pultik: service '%@' (%@) retired — now '%@' (%@)",
+                  old.name, old.ref, replacement.name, replacement.ref)
+        }
+        services.removeAll { $0.ref.isEmpty }
+        let tiles = Set(services.map(\.name))
+        for index in projects.indices {
+            let renamed = projects[index].services.map { name in
+                guard !tiles.contains(name), let next = Self.renamedServices[name], tiles.contains(next)
+                else { return name }
+                return next
+            }
+            if renamed != projects[index].services {
+                projects[index].services = renamed
+                changed = true
+                NSLog("pultik: project '%@' services follow the tile rename", projects[index].key)
+            }
+        }
+        return changed
+    }
+
+    /// Step 2: projects that never had `prod` pointers get the shipped ones
+    /// once. Nil means never set; an empty list is a deliberate "none" and
+    /// is left alone, so this cannot re-seed on every load.
+    private mutating func seedProdPointers() -> Bool {
+        var changed = false
+        for index in projects.indices where projects[index].prod == nil {
+            guard let pointers = Self.defaultProdPointers[projects[index].key] else { continue }
+            projects[index].prod = pointers
+            changed = true
+            NSLog("pultik: project '%@' gets its prod board pointers", projects[index].key)
+        }
+        return changed
     }
 
     /// The 2026-09-08 org rename: the GitHub org `example-org` became
@@ -571,8 +735,10 @@ struct Preferences: Codable {
             changed = true
         }
 
-        if !services.contains(where: { $0.ref == "https://boards.example.invalid" }),
-           let template = Self.defaultServices.first(where: { $0.ref == "https://boards.example.invalid" }) {
+        // By name since 2026-10-03: the tile's ref moved to boards.example.invalid
+        // (`retiredServiceRefs`), and the old marketing ref must not re-add it.
+        if !services.contains(where: { $0.name == "vitrinka-prod" }),
+           let template = Self.defaultServices.first(where: { $0.name == "vitrinka-prod" }) {
             // Beside its estate-mate rather than appended: the rail groups by
             // host, and an append would read as a stray until the next sort.
             let anchor = services.firstIndex { $0.host == "AppServer" }
@@ -633,7 +799,16 @@ struct Preferences: Codable {
     /// a launch-time snapshot until 2026-09-10, so a pinned-repo change could
     /// undo a brightness or fan-curve edit made minutes earlier.
     static func update(_ mutate: (inout Preferences) -> Void) {
-        var prefs = load()
+        let snapshot = loadSnapshot()
+        // A file that does not decode cleanly is someone's edit in progress:
+        // saving the in-memory copy over it would erase that edit, or the
+        // entries a lossy decode skipped. The change is logged and dropped;
+        // the read cache still applies it until reload.
+        guard snapshot.writable else {
+            NSLog("pultik: settings.json not clean — change not saved until it decodes again")
+            return
+        }
+        var prefs = snapshot.value
         mutate(&prefs)
         prefs.save()
     }
@@ -643,9 +818,24 @@ struct Preferences: Codable {
             try FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(self).write(to: Self.fileURL, options: .atomic)
+            let data = try encoder.encode(self)
+            try data.write(to: Self.fileURL, options: .atomic)
+            Self.memory.remember(self)
+            Self.memory.lastWritten = SettingsFile.stamp(of: Self.fileURL)
+            SettingsFile.persist(data, lastGoodURL: Self.lastGoodURL, source: Self.fileURL, memory: Self.memory)
         } catch {
             NSLog("pultik: failed to save settings: %@", error.localizedDescription)
         }
+    }
+}
+
+extension Preferences: SettingsDocument {
+    /// The lossy lists are projects (with their links and prod pointers),
+    /// services and servers — each restored from the last clean copy by the
+    /// identity its entries are keyed on.
+    mutating func restoreSkipped(_ skipped: [SkippedEntry], from lastGood: Preferences) {
+        projects.restoreSkipped(skipped, from: lastGood.projects)
+        services.restore(skipped, list: "services", from: lastGood.services, id: \.ref)
+        servers.restore(skipped, list: "servers", from: lastGood.servers, id: \.ref)
     }
 }

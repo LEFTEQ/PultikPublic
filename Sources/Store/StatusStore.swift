@@ -48,6 +48,33 @@ final class StatusStore {
         didSet { if firingAlerts != oldValue { onChange?() } }
     }
     var laneBoard = CILaneBoard()
+    /// Hlídač's last answer (docs/specs/2026-10-03-prod-watch-contracts.md
+    /// §5), kept through an outage so a blind card still shows what it last
+    /// knew. Every change re-renders the icon: its health dots read it.
+    var prodDigest: HlidacDigest? {
+        didSet { if prodDigest != oldValue { onChange?() } }
+    }
+    /// Set at the first failed fast-lane call and cleared by the next answer;
+    /// while set, every prod card reads "blind since HH:MM", never green.
+    var prodUnreachableSince: Date? {
+        didSet { if prodUnreachableSince != oldValue { onChange?() } }
+    }
+    /// Deployments whose red an open panel has already shown — the menu
+    /// bar's red dot stops pulsing for those (`markProdSeen`).
+    var prodSeenRed: Set<String> = [] {
+        didSet { if prodSeenRed != oldValue { onChange?() } }
+    }
+    /// settings.json problems, one orange row each: entries a lossy decode
+    /// skipped, or the whole file failing while the last good copy runs.
+    var configIssues: [String] = []
+    private var prodTask: Task<Void, Never>?
+    private var isRefreshingProd = false
+    private var settingsWatcher: DispatchSourceFileSystemObject?
+    private var settingsSeenStamp: SettingsFile.Stamp?
+    /// False while settings.json does not decode cleanly: the read cache is
+    /// the last good copy (or defaults), so nothing may act on its absences.
+    private var settingsWritable = true
+    private var settingsReload: Task<Void, Never>?
     /// Semafor's `/overview`, refreshed at most every `throughputInterval`
     /// inside the pool's breaker; nil whenever Semafor is not answering.
     var ciThroughput: CIThroughput?
@@ -118,9 +145,13 @@ final class StatusStore {
     private var pollTask: Task<Void, Never>?
 
     init() {
-        let prefs = Preferences.load()
+        let snapshot = Preferences.loadSnapshot()
+        let prefs = snapshot.value
         preferences = prefs
         pinned = prefs.pinnedRepos
+        configIssues = snapshot.issues
+        settingsWritable = snapshot.writable
+        settingsSeenStamp = SettingsFile.stamp(of: Preferences.fileURL)
         Task {
             do { try await ensurePRIndex() }
             catch { NSLog("pultik: PR cache identity unavailable: %@", error.localizedDescription) }
@@ -570,6 +601,18 @@ final class StatusStore {
 
     func startPolling() {
         guard pollTask == nil else { return }
+        startWatchingSettings()
+        // The prod fast lane runs on its own loop so a slow GitHub fan-out can
+        // never delay prod detection (decision log: one request, every 15 s).
+        prodTask = Task {
+            while !Task.isCancelled {
+                await refreshProd()
+                // One stat: the directory watch misses in-place writes (an
+                // editor that truncates and rewrites keeps the inode).
+                settingsDirectoryChanged()
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
         pollTask = Task {
             while !Task.isCancelled {
                 await refresh()
@@ -577,6 +620,143 @@ final class StatusStore {
                 try? await Task.sleep(for: interval)
             }
         }
+    }
+
+    // MARK: - Prod watch (Hlídač)
+
+    /// The prod board's cards in board order — settings pointers over
+    /// Hlídač's verdicts, blind while Hlídač is not answering.
+    var prodGlance: ProdGlance {
+        ProdGlance.make(pointers: preferences.prodPointers, digest: prodDigest,
+                        unreachableSince: prodUnreachableSince, now: Date())
+    }
+
+    /// The prod board owns this firing alert (`ProdClaims.isClaimed` over the
+    /// board's own deployment selection): FIRING and `.h`'s estate firing
+    /// leave it to the deployment's card.
+    func prodClaims(_ alert: FiringAlert) -> Bool {
+        ProdClaims.isClaimed(alert: alert, digest: prodDigest, unreachableSince: prodUnreachableSince,
+                             pointers: preferences.prodPointers)
+    }
+
+    /// settings.json problems plus doubled prod keys — the orange rows above
+    /// the prod board, shown whatever the board's visibility or fold.
+    var prodConfigIssues: [String] {
+        configIssues + preferences.prodPointerIssues
+    }
+
+    /// `hlidacURL: ""` in settings.json turns the prod board off; unset means
+    /// the default Hlídač.
+    var hlidacConfigured: Bool {
+        preferences.hlidacURL.map { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? true
+    }
+
+    /// The menu bar's health strip (WP7 draws it).
+    var prodDots: [ProdGlance.Dot] {
+        prodGlance.dots(seenRed: prodSeenRed)
+    }
+
+    /// An open panel has shown every red card: stop their dots pulsing.
+    func markProdSeen() {
+        prodSeenRed.formUnion(prodGlance.redKeys)
+    }
+
+    /// One `gated(.hlidac)` call at a time: the fast lane and an explicit
+    /// refresh must not both hold a trial, or the breaker's bookkeeping races.
+    func refreshProd() async {
+        guard !isRefreshingProd else { return }
+        isRefreshingProd = true
+        defer { isRefreshingProd = false }
+        guard hlidacConfigured else {
+            // `hlidacURL: ""` turns the board off — no request, no digest,
+            // so no card claims an alert, no dot draws and FiringWatch keeps
+            // every alert and announcement.
+            prodDigest = nil
+            prodUnreachableSince = nil
+            ProdWatch.shared.observe(digest: nil, unreachableSince: nil, pointers: [], firingAnnounced: [])
+            return
+        }
+        var configured = preferences.hlidacURL ?? Preferences.defaultHlidacURL
+        #if DEBUG
+            // Hands-off verification serves the golden digest locally
+            // (CLAUDE.md "Verification"); release builds never read this.
+            if let override = ProcessInfo.processInfo.environment["PULTIK_HLIDAC_URL"], !override.isEmpty {
+                configured = override
+            }
+        #endif
+        let base = URL(string: configured) ?? URL(string: Preferences.defaultHlidacURL)!
+        await gated(.hlidac, probe: { await HlidacClient.shared.probe(base: base) }) {
+            let (digest, failure) = await HlidacClient.shared.digest(base: base)
+            guard let digest else {
+                if prodUnreachableSince == nil { prodUnreachableSince = Date() }
+                return failure
+            }
+            prodDigest = digest
+            prodUnreachableSince = nil
+            prodSeenRed = ProdGlance.seen(prodSeenRed, keepingOnly: prodGlance.redKeys)
+            return nil
+        }
+        // A held breaker skips the call above; the board must still read
+        // blind rather than keep showing a stale green.
+        if gate.isPaused(.hlidac), prodUnreachableSince == nil { prodUnreachableSince = Date() }
+        // Hlídač owns prod Sentry from this answer on (`refreshSentryIfStale`):
+        // drop the Mac sweep's baseline now, on the 15 s lane, so a fallback
+        // sweep after a short ownership never announces what piled up meanwhile.
+        if ProdClaims.sentryLive(digest: prodDigest, unreachableSince: prodUnreachableSince) {
+            seenSentryIssues = nil
+        }
+        ProdWatch.shared.observe(digest: prodDigest, unreachableSince: prodUnreachableSince,
+                                 pointers: preferences.prodPointers,
+                                 firingAnnounced: firingWatch.announcedDeployments)
+    }
+
+    // MARK: - settings.json hot reload
+
+    /// Directory-level watch, like NoteStore's: atomic writes replace the
+    /// file's inode, so only the containing directory reliably reports them.
+    private func startWatchingSettings() {
+        guard settingsWatcher == nil else { return }
+        let fd = Darwin.open(Preferences.directory.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write], queue: .main)
+        source.setEventHandler { [weak self] in self?.settingsDirectoryChanged() }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        settingsWatcher = source
+    }
+
+    /// Cheap `stat` first: notes.json and links.json share the directory, and
+    /// the app's own `Preferences.save()` must not bounce back as a reload.
+    private func settingsDirectoryChanged() {
+        let stamp = SettingsFile.stamp(of: Preferences.fileURL)
+        guard stamp != settingsSeenStamp else { return }
+        settingsSeenStamp = stamp
+        if let stamp, stamp == Preferences.memory.lastWritten { return }
+        settingsReload?.cancel()
+        settingsReload = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.reloadSettings()
+        }
+    }
+
+    /// Swap in an outside edit (an AI, `pultik prod add`, a hand edit). A
+    /// file that no longer decodes keeps the copy in use and says why.
+    private func reloadSettings() {
+        let snapshot = Preferences.loadSnapshot()
+        configIssues = snapshot.issues
+        settingsWritable = snapshot.writable
+        // Not clean, the snapshot is the last good copy with any skipped
+        // entries standing in — still the best view, just never written.
+        preferences = snapshot.value
+        if pinned != snapshot.value.pinnedRepos {
+            // `pinned`'s didSet writes back: the same value, one harmless save
+            // (refused while the file is not clean).
+            pinned = snapshot.value.pinnedRepos
+        }
+        NSLog("pultik: settings.json reloaded%@",
+              snapshot.issues.isEmpty ? "" : " with \(snapshot.issues.count) issue(s)")
+        onChange?()
     }
 
     /// Runs a remote subsystem's fetch unless its breaker is open.
@@ -831,6 +1011,9 @@ final class StatusStore {
 
     func enableLoginItemOnFirstRun() {
         let bundleId = Bundle.main.bundleIdentifier ?? "pultik"
+        // A cache standing in for an unclean file may lack the opt-out that
+        // the real file records — never re-enable on its say-so.
+        guard settingsWritable else { return }
         guard preferences.loginItemConfiguredFor != bundleId else { return }
         LoginItem.setEnabled(true)
         mutate { $0.loginItemConfiguredFor = bundleId }
@@ -841,8 +1024,18 @@ final class StatusStore {
     /// Unresolved production issues across the configured projects — throttled
     /// to every 5 minutes; new issues (after the first load) notify.
     private func refreshSentryIfStale() async {
+        // Decision log (Settled): while Hlídač serves prod Sentry the Mac
+        // stops sweeping it — no polling, no new-issue banners. The first
+        // sweep after Hlídač goes away is a silent baseline, so what arrived
+        // meanwhile does not burst out as banners.
+        if ProdClaims.sentryLive(digest: prodDigest, unreachableSince: prodUnreachableSince) {
+            seenSentryIssues = nil
+            return
+        }
         if let last = lastSentryRefresh, Date().timeIntervalSince(last) < 300 { return }
-        let projects = preferences.sentryProjects
+        // The global list plus every project's own: `eve-exampleapp` and
+        // `booking-onboarding` were configured per project and never swept.
+        let projects = preferences.allSentryProjects
         // `sentryToken`, never `preferences.sentryToken`: the keychain is the
         // runtime store and the legacy plaintext copy is blanked on migration.
         let settingsToken = sentryToken
@@ -883,6 +1076,13 @@ final class StatusStore {
             guard collected.failures.count < projects.count else {
                 lastSentryRefresh = Date()
                 return collected.failures.first
+            }
+            // Hlídač took Sentry over while this sweep was out: its banners
+            // and rows are no longer the Mac's to publish.
+            if ProdClaims.sentryLive(digest: prodDigest, unreachableSince: prodUnreachableSince) {
+                seenSentryIssues = nil
+                lastSentryRefresh = Date()
+                return nil
             }
 
             // "Major" means CURRENT: unresolved is forever in Sentry, so keep only
@@ -1023,7 +1223,8 @@ final class StatusStore {
             return
         }
         firingAlerts = fetched.alerts
-        let notices = firingWatch.update(fetched.alerts, answered: fetched.answered)
+        let notices = firingWatch.update(fetched.alerts, answered: fetched.answered,
+                                         quiet: { ProdWatch.shared.claims($0) })
         if preferences.notifyFiring {
             for notice in notices {
                 Notifier.send(title: notice.title, body: notice.body, url: Notifier.firingPanelURL)
@@ -1074,7 +1275,7 @@ final class StatusStore {
     /// has, and worth the cheapest possible way back after a pause.
     private func refreshInfraMetrics() async {
         let servers = preferences.servers.map { (name: $0.name, instance: $0.ref) }
-        let services = preferences.services.map { (name: $0.name, probe: $0.ref, host: $0.host) }
+        let services = preferences.services.map { (name: $0.name, probe: $0.ref, host: $0.host, job: $0.job) }
         var lanesRefreshed = false
         await gated(.prometheus, probe: {
             await MetricsClient.shared.reachable()
@@ -1428,9 +1629,10 @@ final class StatusStore {
     }
 
     /// Read-only view for the Integrations pane (preferences itself stays
-    /// private — every mutation goes through a store method).
+    /// private — every mutation goes through a store method). What is
+    /// actually swept, so the pane's "watching …" matches the rail.
     var sentryProjects: [String] {
-        preferences.sentryProjects
+        preferences.allSentryProjects
     }
 
     /// Returns nil on success, or the keychain's complaint — the Settings

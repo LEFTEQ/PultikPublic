@@ -254,7 +254,7 @@ struct StatusPanelView: View {
     /// ".t" → every todo, ".v" → every listener. Text after the mode token
     /// filters within the mode. Esc exits.
     enum PaletteMode: String, CaseIterable {
-        case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate
+        case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate, health
 
         var title: String {
             switch self {
@@ -271,6 +271,7 @@ struct StatusPanelView: View {
             case .devbox: "Devbox workspaces"
             case .ci: "CI jobs"
             case .estate: "Estate"
+            case .health: "Prod"
             }
         }
 
@@ -289,6 +290,7 @@ struct StatusPanelView: View {
             case .devbox: "every workspace — running, held, parked; verbs on hover"
             case .ci: "running jobs, queues and failed runs across lanes"
             case .estate: "servers and every service probe, with latency"
+            case .health: "every prod deployment — checks, logs, issues, eve accounts"
             }
         }
 
@@ -307,6 +309,7 @@ struct StatusPanelView: View {
             case .devbox: "shippingbox"
             case .ci: "gearshape.2"
             case .estate: "server.rack"
+            case .health: "waveform.path.ecg"
             }
         }
 
@@ -402,7 +405,7 @@ struct StatusPanelView: View {
     /// overhanging the screen edge; every widget's page stays reachable by
     /// typing its mode.
     private var showLeftRail: Bool {
-        guard showVitrinkaRail || !machineWidgets.isEmpty else { return false }
+        guard showVitrinkaRail || !machineWidgets.isEmpty || hasAttentionRails else { return false }
         let needed: CGFloat = 680 + 280 + (showServiceRail ? 280 : 0)
         return PanelMetrics.shared.maxWidth >= needed
     }
@@ -431,12 +434,14 @@ struct StatusPanelView: View {
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
     @State private var fanTicking = false
     @State private var presentedGeneration: Int?
-    /// The right rail is what needs you (2026-09-27): reminders, production
-    /// issues, firing alerts and eve alerts, with links and notes as one
-    /// reference line at its foot. Service probes live in the Estate widget,
-    /// CI and this Mac in their overview widgets.
+    /// The right rail is the prod board (decision D2 C, 2026-10-03): one card
+    /// per deployment over Hlídač, with links and notes as one reference line
+    /// at its foot. Reminders, estate firing and eve alerts moved to the left
+    /// column and fall back here only when that column is hidden.
     private var showServiceRail: Bool {
-        needsYou
+        showProdBoard
+            || !store.prodConfigIssues.isEmpty
+            || needsYou
             // An answering estate holds the rail open for its all-clear line.
             || sourcesAnswered
             // Links and notes are local — they must be able to hold the rail
@@ -502,24 +507,66 @@ struct StatusPanelView: View {
     /// Vitrinka, or the two would chase.
     @ViewBuilder
     private var leftColumn: some View {
+        if showProdBoard {
+            compactLeftColumn
+        } else {
+            fullLeftColumn
+        }
+    }
+
+    /// Decision D2 C (2026-10-03): with the prod board on the right rail the
+    /// widgets draw one line each, so reminders, estate firing and eve alerts
+    /// sit beneath them without scrolling. Content-sized: Vitrinka has no
+    /// budget to flex here, so nothing is measured and nothing can chase.
+    private var compactLeftColumn: some View {
+        let machines = machineWidgets
+        return VStack(spacing: 0) {
+            CompactOverview(store: store, fanStore: FanStore.shared,
+                            showVitrinka: showVitrinkaRail,
+                            showDevbox: machines.contains(.devbox),
+                            showCI: machines.contains(.ci),
+                            showEstate: machines.contains(.estate),
+                            showMac: machines.contains(.mac),
+                            onWork: { enterMode(.work) },
+                            onDevbox: { enterMode(.devbox) },
+                            onCI: { enterMode(.ci) },
+                            onEstate: { enterMode(.estate) },
+                            onFans: { enterMode(.fans) })
+                .padding(.vertical, 4)
+            if hasAttentionRails {
+                hairline
+                attentionRails
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var fullLeftColumn: some View {
         let machines = machineWidgets
         VStack(spacing: 0) {
             if showVitrinkaRail {
                 // Until the machine widgets have been measured, Vitrinka keeps
                 // its floor: a cold tree's first pass must not fill the whole
                 // budget with recents and hand the window an over-tall fit.
+                let below = !machines.isEmpty || hasAttentionRails
                 VitrinkaWidget(store: store, snapshots: store.vitrinkaWorkspaces,
-                               maxHeight: !machines.isEmpty && machineWidgetsHeight == 0 ? 0
+                               maxHeight: below && machineWidgetsHeight == 0 ? 0
                                    : max(0, columnBudget - machineWidgetsHeight
-                                       - (machines.isEmpty ? 0 : 1)),
+                                       - (below ? 1 : 0)),
                                onOpenWork: { enterMode(.work, filter: $0) },
                                onOpenBoards: { enterMode(.boards) })
-                if !machines.isEmpty { hairline }
+                if !machines.isEmpty || hasAttentionRails { hairline }
             }
+            // The attention rails sit in the measured block: Vitrinka's recent
+            // boards must leave room for them exactly as for the machines.
             VStack(spacing: 0) {
                 ForEach(Array(machines.enumerated()), id: \.element) { index, widget in
                     if index > 0 { hairline }
                     machineWidget(widget)
+                }
+                if hasAttentionRails {
+                    if !machines.isEmpty { hairline }
+                    attentionRails
                 }
             }
             .background(
@@ -645,6 +692,15 @@ struct StatusPanelView: View {
         .onChange(of: store.firingAlerts) {
             if session.isPresented, store.isSectionVisible("firing") { store.markFiringSeen() }
         }
+        // F6: a deployment turning red on an open panel is on the board
+        // already, so its menu-bar dot must not pulse for it afterwards —
+        // likewise when Hlídač comes back and the board reads true again.
+        .onChange(of: store.prodDigest) {
+            if session.isPresented, store.isSectionVisible("prod") { store.markProdSeen() }
+        }
+        .onChange(of: store.prodUnreachableSince) {
+            if session.isPresented, store.isSectionVisible("prod") { store.markProdSeen() }
+        }
         .onChange(of: session.isPresented) { _, presented in
             if !presented { panelDidDismiss() }
         }
@@ -674,6 +730,10 @@ struct StatusPanelView: View {
             store.markAlertsSeen()
         }
         if store.isSectionVisible("firing") { store.markFiringSeen() }
+        // The board shows every red deployment: their menu-bar dots stop pulsing.
+        if store.isSectionVisible("prod") { store.markProdSeen() }
+        // A prod notification click opened this summon: land on its row.
+        if let key = AppDelegate.shared?.takePendingProdKey() { enterMode(.health, filter: key) }
         // Focus once the panel is key; a zero-delay hop is enough. The tree
         // outlives the summon now, so a dismiss inside those 50 ms would
         // otherwise re-focus a hidden palette — and leave the binding already
@@ -767,39 +827,26 @@ struct StatusPanelView: View {
     /// eight indentation levels deep in the body.
     private var railsColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !reminders.isEmpty {
-                RailSection(key: "reminders", title: "Reminders",
-                            count: reminders.count,
-                            tone: reminders.contains(where: { $0.isOverdue() })
-                                ? .red : .orange)
-                {
-                    RemindersRail(todos: reminders)
-                }
+            // F4: settings problems stand on their own above the board — a
+            // folded or hidden board must not hide a broken settings.json.
+            let issues = store.prodConfigIssues
+            if !issues.isEmpty {
+                ProdConfigIssues(issues: issues)
             }
-            if !railProdIssues.isEmpty {
-                RailSection(key: "prod", title: "Prod", count: railProdIssues.count, tone: .red) {
+            if showProdBoard {
+                ProdBoardSection(glance: store.prodGlance,
+                                 now: Date(), onOpen: { enterMode(.health, filter: $0) })
+            }
+            // Until Hlídač has answered once, the Mac's own Sentry sweep keeps
+            // prod issues visible — nothing is lost while it is not deployed.
+            if !prodSentryLive, !railProdIssues.isEmpty {
+                RailSection(key: "prodSentry", title: "Sentry", count: railProdIssues.count, tone: .red) {
                     ProdRail(issues: railProdIssues,
                              isResolved: { resolvedStore.isResolved("prod:\($0.id)") })
                 }
             }
-            let firing = firingGlance
-            if !firing.rows.isEmpty {
-                RailSection(key: "firing", title: "Firing", count: firing.rows.count,
-                            tone: firing.critical > 0 ? .red : .orange)
-                {
-                    FiringAlertsRail(glance: firing)
-                }
-            }
-            if showAlerts {
-                let unread = unreadAlertsSnapshot.union(store.unreadAlertIds)
-                RailSection(key: "alerts", title: "eve alerts",
-                            count: unread.count,
-                            tone: unread.isEmpty ? .secondary : .orange)
-                {
-                    AlertsRail(alerts: store.visibleAlerts, unread: unread)
-                }
-            }
-            if !needsYou, sourcesAnswered {
+            if !showLeftRail { attentionRails }
+            if !needsYou, sourcesAnswered, !showProdBoard {
                 // An empty rail still says something: the sources answered
                 // and none of them needs you. Off the mesh it says nothing.
                 Text("✓ all clear")
@@ -816,6 +863,83 @@ struct StatusPanelView: View {
         }
     }
 
+    /// Reminders, estate firing and eve alerts — what needs you that is not a
+    /// deployment. The left column carries them under its widgets; the right
+    /// rail takes them back when that column is folded for width.
+    @ViewBuilder
+    private var attentionRails: some View {
+        if !reminders.isEmpty {
+            RailSection(key: "reminders", title: "Reminders",
+                        count: reminders.count,
+                        tone: reminders.contains(where: { $0.isOverdue() })
+                            ? .red : .orange)
+            {
+                RemindersRail(todos: reminders)
+            }
+        }
+        let firing = firingGlance
+        if !firing.rows.isEmpty {
+            RailSection(key: "firing", title: prodBoardClaims ? "Firing · estate" : "Firing",
+                        count: firing.rows.count,
+                        tone: firing.critical > 0 ? .red : .orange)
+            {
+                FiringAlertsRail(glance: firing)
+            }
+        }
+        if showAlerts {
+            let unread = unreadAlertsSnapshot.union(store.unreadAlertIds)
+            RailSection(key: "alerts", title: "eve alerts",
+                        count: unread.count,
+                        tone: unread.isEmpty ? .secondary : .orange)
+            {
+                AlertsRail(alerts: store.visibleAlerts, unread: unread)
+            }
+        }
+    }
+
+    private var hasAttentionRails: Bool {
+        !reminders.isEmpty || !firingGlance.rows.isEmpty || showAlerts
+    }
+
+    /// Hlídač serves prod Sentry now (`ProdClaims.sentryLive`): the Mac's own
+    /// Sentry sweep, the fallback, stays hidden.
+    private var prodSentryLive: Bool {
+        ProdClaims.sentryLive(digest: store.prodDigest, unreachableSince: store.prodUnreachableSince)
+    }
+
+    /// The board is answering and can claim deployment alerts, so FIRING
+    /// holds only the estate's own weather — and says so in its title.
+    private var prodBoardClaims: Bool {
+        showProdBoard && store.prodDigest != nil && store.prodUnreachableSince == nil
+            && store.prodDigest?.sources["alertmanager"]?.ok != false
+    }
+
+    /// AC S5: the deployment `.h <filter>` expands, by the same resolution
+    /// the page uses — reported to the panel driver as `prodExpanded`.
+    private var prodExpandedKey: String? {
+        guard let (mode, filter) = activeMode, mode == .health else { return nil }
+        return ProdMatrix.expandedKey(filter: filter,
+                                      rows: store.prodGlance.cards.map { (key: $0.key, title: $0.title) })
+    }
+
+    /// The prod board shows whenever Hlídač is configured and not hidden —
+    /// with cards, or (F10) one blind row while nothing has answered yet.
+    /// `/hide prod` or `hlidacURL: ""` turn it off, and the left column's
+    /// widgets go back to full size.
+    private var showProdBoard: Bool {
+        guard store.isSectionVisible("prod"), store.hlidacConfigured else { return false }
+        let glance = store.prodGlance
+        return !glance.cards.isEmpty || glance.waiting != nil
+    }
+
+    /// A deployment that is not green — or a board still waiting on Hlídač —
+    /// asks for attention like any rail row, and suppresses all-clear.
+    private var prodNeedsYou: Bool {
+        guard showProdBoard else { return false }
+        let glance = store.prodGlance
+        return glance.waiting != nil || glance.cards.contains { $0.tone != .green }
+    }
+
     /// Production issues for the rail — resolved-and-hidden ones gone, never
     /// narrowed by the palette query (the rail is not a search result).
     private var railProdIssues: [ProdIssue] {
@@ -825,14 +949,21 @@ struct StatusPanelView: View {
 
     /// Firing alerts as the rail shows them — gated here too, so `/hide
     /// firing` empties the section at once rather than at the next poll.
+    ///
+    /// Once Hlídač answers, an alert carrying a `deployment` label belongs to
+    /// that deployment's card; FIRING keeps only the estate's own weather.
+    /// With the board hidden (`/hide prod`) no card shows them, so FIRING does.
     private var firingGlance: AlertGlance {
-        AlertGlance(store.isSectionVisible("firing") ? store.firingAlerts : [])
+        guard store.isSectionVisible("firing") else { return AlertGlance([]) }
+        let boardShown = showProdBoard
+        return AlertGlance(store.firingAlerts.filter { !(boardShown && store.prodClaims($0)) })
     }
 
     /// Anything in the rail that asks for attention, as opposed to the
     /// reference line at its foot.
     private var needsYou: Bool {
-        !reminders.isEmpty || !railProdIssues.isEmpty || showAlerts || !firingGlance.rows.isEmpty
+        !reminders.isEmpty || (!prodSentryLive && !railProdIssues.isEmpty) || showAlerts
+            || !firingGlance.rows.isEmpty || prodNeedsYou
     }
 
     /// Prometheus answered this pass (its metrics or probes are in), so an
@@ -951,6 +1082,10 @@ struct StatusPanelView: View {
             }
         }
         .onExitCommand { escapeOneLayer() }
+        // A click while the panel is already up: no new summon, so switch here.
+        .onReceive(NotificationCenter.default.publisher(for: .pultikOpenProd)) { _ in
+            if let key = AppDelegate.shared?.takePendingProdKey() { enterMode(.health, filter: key) }
+        }
         #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: PanelDriver.paletteNotification)) { note in
             driveFromDebugger(note.userInfo ?? [:])
@@ -1004,6 +1139,7 @@ struct StatusPanelView: View {
                 "pathVerbIndex": pathVerbIndex,
                 "commandNotice": commandNotice?.text ?? NSNull(),
                 "activeMode": activeMode?.mode.rawValue ?? NSNull(),
+                "prodExpanded": prodExpandedKey ?? NSNull(),
                 "eveAskedPrompt": eveAskedPrompt ?? NSNull(),
                 "prSearchIDs": store.searchMatches.map(\.id),
                 "prSearchError": store.searchError ?? NSNull(),
@@ -1183,7 +1319,7 @@ struct StatusPanelView: View {
                 if let note = modeNotes(filter).first { toggleNote(note) } else { createNote(filter) }
             case .fans:
                 break // the deck is controls, not a result list — ↵ is a no-op
-            case .work, .devbox, .ci, .estate:
+            case .work, .devbox, .ci, .estate, .health:
                 break // overview pages are mouse-first (spec 2026-09-23) — ↵ is a no-op
             case .organize:
                 // Bare ↵ runs "default" (names() sorts it first); unmatched
@@ -1312,7 +1448,7 @@ struct StatusPanelView: View {
                         toggleNote(note)
                     }
                 }
-            case .fans, .work, .devbox, .ci, .estate:
+            case .fans, .work, .devbox, .ci, .estate, .health:
                 return []
             case .organize:
                 return modeOrganize(filter).map { name in
@@ -1475,6 +1611,8 @@ struct StatusPanelView: View {
             CIPage(store: store, filter: filter) { query = "" }
         case .estate:
             EstatePage(store: store, filter: filter) { query = "" }
+        case .health:
+            ProdMatrixPage(store: store, filter: filter) { query = "" }
         }
     }
 

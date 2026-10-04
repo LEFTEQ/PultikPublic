@@ -22,7 +22,13 @@ extension JSONDecoder.DateDecodingStrategy {
 extension Date {
     /// Compact age like "now", "45s", "6m", "1h", "2d".
     var shortAge: String {
-        let seconds = Int(-timeIntervalSinceNow)
+        shortAge(relativeTo: Date())
+    }
+
+    /// The same age against an explicit clock — the Foundation-tested glances
+    /// pass theirs so a test reads "12m", not whatever the wall clock says.
+    func shortAge(relativeTo now: Date) -> String {
+        let seconds = Int(now.timeIntervalSince(self))
         switch seconds {
         case ..<10: return "now"
         case ..<60: return "\(seconds)s"

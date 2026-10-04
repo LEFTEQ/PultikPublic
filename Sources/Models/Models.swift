@@ -731,6 +731,10 @@ struct ProjectSpec: Codable, Identifiable {
     var sentryProjects: [String] = []
     var services: [String] = [] // ServiceStatus.name references
     var links: [Link] = []
+    /// Prod watch pointers (docs/specs/2026-10-03-prod-watch-contracts.md §6):
+    /// which Hlídač deployments this project shows, and how. Nil = never set,
+    /// so `applyMigrations()` seeds it once; [] = deliberately none.
+    var prod: [ProdPointer]?
     var id: String {
         key
     }
@@ -740,6 +744,153 @@ struct ProjectSpec: Codable, Identifiable {
         var url: String
         var id: String {
             url
+        }
+    }
+}
+
+/// Lenient on purpose: an AI or a hand edit that omits `links` (or any list)
+/// must never fail the whole settings file. Only `key` is load-bearing; a
+/// project without one is skipped by `LossyArray` and listed as an issue.
+/// In an extension so the memberwise init `defaultProjects` uses survives.
+extension ProjectSpec {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? key
+        repos = try c.decodeIfPresent([String].self, forKey: .repos) ?? []
+        sentryProjects = try c.decodeIfPresent([String].self, forKey: .sentryProjects) ?? []
+        services = try c.decodeIfPresent([String].self, forKey: .services) ?? []
+        let sink = decoder.userInfo[ConfigIssueSink.key] as? ConfigIssueSink
+        let skippedBefore = sink?.skipped.count ?? 0
+        links = try c.decodeIfPresent(LossyArray<Link>.self, forKey: .links)?.elements ?? []
+        prod = try c.decodeIfPresent(LossyArray<ProdPointer>.self, forKey: .prod)?.elements
+        // Nested skips belong to this project, so the restore can find them.
+        sink?.claim(from: skippedBefore, owner: key)
+    }
+}
+
+extension [ProjectSpec] {
+    /// Puts back, from the last good copy, every project, link and prod
+    /// pointer a lossy decode skipped — matched by key / url, so one bad
+    /// entry never removes what was working (brief AC13).
+    mutating func restoreSkipped(_ skipped: [SkippedEntry], from lastGood: [ProjectSpec]) {
+        restore(skipped, list: "projects", from: lastGood, id: \.key)
+        for index in indices {
+            let key = self[index].key
+            guard let previous = lastGood.first(where: { $0.key == key }) else { continue }
+            self[index].links.restore(skipped, list: "links", owner: key, from: previous.links, id: \.url)
+            guard let previousProd = previous.prod else { continue }
+            var prod = self[index].prod ?? []
+            prod.restore(skipped, list: "prod", owner: key, from: previousProd, id: \.key)
+            if prod != (self[index].prod ?? []) { self[index].prod = prod }
+        }
+    }
+}
+
+/// One deployment a project shows on the prod board — a pointer into
+/// Hlídač's digest plus presentation; the checks themselves live server-side
+/// (decision D14). Absent title/tier/order fall back to Hlídač's.
+struct ProdPointer: Codable, Equatable, Identifiable {
+    var key: String // "booking-sk" — Hlídač's deployment key
+    var title: String?
+    var tier: String? // critical | important | watch
+    var order: Int?
+    var id: String {
+        key
+    }
+}
+
+/// Where decode problems in settings.json are collected instead of failing
+/// the whole file: `LossyArray` appends one line per skipped entry.
+final class ConfigIssueSink {
+    var issues: [String] = []
+    /// What was skipped, with the identity the restore matches on.
+    var skipped: [SkippedEntry] = []
+
+    static let key = CodingUserInfoKey(rawValue: "pultik.configIssues")!
+
+    /// Marks every skip recorded since `start` as belonging to `owner`.
+    func claim(from start: Int, owner: String) {
+        for index in skipped.indices.dropFirst(start) where skipped[index].owner == nil {
+            skipped[index].owner = owner
+        }
+    }
+}
+
+/// An array that keeps every element it can decode and reports the rest to
+/// the decoder's `ConfigIssueSink` — one bad project never costs the others.
+struct LossyArray<Element: Decodable>: Decodable {
+    var elements: [Element]
+
+    private struct Skipped: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+
+    /// The bad entry's own name for itself — `key`, `ref`, `url` or `name` —
+    /// read leniently so a type error elsewhere in it does not hide it.
+    private struct Identity: Decodable {
+        let value: String?
+
+        private enum Keys: String, CodingKey { case key, ref, url, name }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            value = [Keys.key, .ref, .url, .name].lazy
+                .compactMap { (try? c.decodeIfPresent(String.self, forKey: $0)) ?? nil }.first
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        let path = ConfigIssueSink.path(decoder.codingPath)
+        let list = decoder.codingPath.last?.stringValue ?? ""
+        var kept: [Element] = []
+        while !container.isAtEnd {
+            let index = container.currentIndex
+            do {
+                kept.append(try container.decode(Element.self))
+            } catch {
+                // Read the bad element's identity, which also advances past
+                // it; anything not even an object is skipped blind. Without
+                // advancing, the loop never ends.
+                var identity: String?
+                if container.currentIndex == index {
+                    identity = (try? container.decode(Identity.self))?.value
+                    if container.currentIndex == index { _ = try? container.decode(Skipped.self) }
+                }
+                let sink = decoder.userInfo[ConfigIssueSink.key] as? ConfigIssueSink
+                sink?.skipped.append(SkippedEntry(list: list, owner: nil, index: index, identity: identity))
+                sink?.issues.append("\(path)[\(index)]: \(ConfigIssueSink.describe(error))")
+                NSLog("pultik: settings %@[%d] skipped — %@", path, index, ConfigIssueSink.describe(error))
+            }
+        }
+        elements = kept
+    }
+}
+
+extension ConfigIssueSink {
+    /// "projects[2].links" — array positions as subscripts, not "Index 2".
+    static func path(_ keys: [CodingKey]) -> String {
+        keys.reduce(into: "") { path, key in
+            if let index = key.intValue {
+                path += "[\(index)]"
+            } else {
+                path += path.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+    }
+
+    /// "missing title", "expected String at key" — short enough for one row.
+    static func describe(_ error: Error) -> String {
+        guard let decoding = error as? DecodingError else { return error.localizedDescription }
+        switch decoding {
+        case let .keyNotFound(key, _): return "missing \(key.stringValue)"
+        case let .typeMismatch(type, context):
+            return "expected \(type) at \(context.codingPath.last?.stringValue ?? "value")"
+        case let .valueNotFound(type, context):
+            return "null \(type) at \(context.codingPath.last?.stringValue ?? "value")"
+        case let .dataCorrupted(context): return context.debugDescription
+        @unknown default: return decoding.localizedDescription
         }
     }
 }

@@ -34,6 +34,33 @@ final class FiringWatchTests: XCTestCase {
         XCTAssertEqual(burst.first?.body, "A, B, C, D")
     }
 
+    /// An alert the prod board announces (it carries `deployment` while
+    /// Hlídač answers) is tracked but never spoken — firing nor resolved —
+    /// so one outage is one banner.
+    func testQuietAlertsNeverNotifyFiringOrResolved() {
+        var watch = primed()
+        let quiet: (FiringAlert) -> Bool = { $0.name == "ExampleappProdApiDown" }
+        let fired = watch.update([alert("ExampleappProdApiDown"), alert("HostDown")], answered: both,
+                                 quiet: quiet, now: t0)
+        XCTAssertEqual(fired.map(\.title), ["🔴 HostDown"])
+        XCTAssertEqual(watch.update([], answered: both, quiet: quiet, now: t0).map(\.title), ["✅ HostDown resolved"])
+    }
+
+    /// Announced here while Hlídač was away, then claimed by the prod board:
+    /// reported for adoption, and its resolve is left to the prod board.
+    func testAnnouncedAlertHandedToTheProdBoardResolvesThereNotHere() {
+        var watch = primed()
+        let labelled = FiringAlert(name: "ExampleappProdApiDown", state: "firing", severity: "critical", summary: nil,
+                                   description: nil, labels: ["deployment": "exampleapp-prod", "severity": "critical"],
+                                   activeAt: t0, source: .prometheus)
+        XCTAssertEqual(watch.update([labelled], answered: both, now: t0).map(\.title), ["🔴 ExampleappProdApiDown"])
+        XCTAssertEqual(watch.announcedDeployments, ["exampleapp-prod"])
+        let claimed: (FiringAlert) -> Bool = { $0.labels["deployment"] != nil }
+        XCTAssertEqual(watch.update([labelled], answered: both, quiet: claimed, now: t0), [])
+        XCTAssertEqual(watch.announcedDeployments, [])
+        XCTAssertEqual(watch.update([], answered: both, quiet: claimed, now: t0), [])
+    }
+
     func testWarningNeverNotifies() {
         var watch = primed()
         XCTAssertEqual(watch.update([alert("DiskSpace", "warning")], answered: both, now: t0), [])
