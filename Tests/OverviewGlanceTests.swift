@@ -9,6 +9,28 @@ final class OverviewGlanceTests: XCTestCase {
 
     private let gib = DevboxGlance.gib
 
+    /// D2 C: while the prod board holds the right rail, every widget reads
+    /// as one line — and a reading that is missing is left out, never 0.
+    func testCompactWidgetLines() {
+        XCTAssertEqual(VitrinkaGlance<String>.compactLine(needsYou: 4, overdue: 2, dueNow: 0, elsewhere: nil),
+                       "4 needs you · 2 overdue")
+        XCTAssertEqual(VitrinkaGlance<String>.compactLine(needsYou: 0, overdue: 0, dueNow: 0, elsewhere: nil),
+                       "nothing needs you")
+        // Due-now work is attention too (`VitrinkaReason.attention`), and so
+        // is another workspace's — never an all-clear while either waits.
+        XCTAssertEqual(VitrinkaGlance<String>.compactLine(needsYou: 0, overdue: 0, dueNow: 3, elsewhere: nil),
+                       "0 needs you · 0 overdue · 3 due")
+        XCTAssertEqual(VitrinkaGlance<String>.compactLine(needsYou: 0, overdue: 0, dueNow: 0, elsewhere: 2),
+                       "nothing needs you here · +2 elsewhere")
+        XCTAssertEqual(DevboxGlance.compactLine(running: 3), "3 running")
+        XCTAssertEqual(CIGlance.compactLine(running: 2, queued: 24, failed: 1), "2 running · 24 queued · 1 failed")
+        XCTAssertEqual(CIGlance.compactLine(running: 0, queued: 3, failed: nil), "0 running · 3 queued")
+        XCTAssertEqual(EstateGlance.compactLine(up: 31, total: 32, down: 1), "31/32 up · 1 down")
+        XCTAssertEqual(EstateGlance.compactLine(up: 32, total: 32, down: 0), "32/32 up")
+        XCTAssertEqual(MacGlance.compactLine(cpuPercent: 38.4, memoryPercent: 71, celsius: 64.2), "cpu 38% · mem 71% · 64°")
+        XCTAssertEqual(MacGlance.compactLine(cpuPercent: nil, memoryPercent: 71, celsius: nil), "mem 71%")
+    }
+
     func testVitrinkaCountsAndTopRowsRankAttention() {
         let today = [
             Row(title: "a", reason: "in progress"),

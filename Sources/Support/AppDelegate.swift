@@ -14,7 +14,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static private(set) var shared: AppDelegate?
 
     private var statusItem: NSStatusItem?
-    private var lastIconState: (AggregateState, Int, Int, Bool, Bool, String)?
+    private var lastIconState: IconState?
+    /// Everything the status item's image is drawn from; a change re-renders.
+    private struct IconState: Equatable {
+        let aggregate: AggregateState
+        let todos: Int
+        let alerts: Int
+        let alertCritical: Bool
+        let awake: Bool
+        let prodDots: [ProdGlance.Dot]
+        let pulseOn: Bool
+        let dark: Bool
+    }
+
+    /// Pulses an unseen red prod dot; runs only while one exists.
+    private var pulseTimer: Timer?
+    private var pulseOn = true
+    /// A prod notification's deployment, held until the panel view takes it
+    /// (`takePendingProdKey`) — the view may not exist yet when it lands.
+    private var pendingProdKey: String?
+    /// The menu bar flips light/dark without any store change; a coloured
+    /// icon (prod dots) resolves `.primary` at render time, so re-render then.
+    private var appearanceObservation: NSKeyValueObservation?
     /// Warm between quick summons, released after 30 seconds hidden.
     private var panel: StatusPanel?
     private let panelSession = PanelSession()
@@ -71,6 +92,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.target = self
         item.button?.action = #selector(togglePanel(_:))
         statusItem = item
+        appearanceObservation = item.button?.observe(\.effectiveAppearance) { _, _ in
+            Task { @MainActor in AppDelegate.shared?.updateIcon() }
+        }
         updateIcon()
 
         // Build the panel on demand. Background monitoring needs no view tree.
@@ -108,27 +132,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func updateIcon() {
         guard let button = statusItem?.button else { return }
         let awake = AwakeStore.shared.isAwake
-        let iconState = (store.aggregate, TodoStore.shared.openTodos.count,
-                         store.badgeAlertCount, store.badgeAlertCritical, awake,
-                         button.effectiveAppearance.name.rawValue)
+        // No strip until Hlídač has answered once: an undeployed Hlídač
+        // must not paint five grey rings into everyone's menu bar.
+        let dots = store.prodDigest == nil ? [] : store.prodDots
+        syncPulse(dots)
+        let iconState = IconState(
+            aggregate: store.aggregate, todos: TodoStore.shared.openTodos.count,
+            alerts: store.badgeAlertCount, alertCritical: store.badgeAlertCritical, awake: awake,
+            prodDots: dots, pulseOn: pulseOn,
+            dark: button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         if lastIconState.map({ $0 != iconState }) ?? true {
-            button.image = MenuBarIconView.render(iconState.0, todoCount: iconState.1,
-                                                  alertCount: iconState.2, alertCritical: iconState.3,
-                                                  awake: iconState.4)
+            button.image = MenuBarIconView.render(iconState.aggregate, todoCount: iconState.todos,
+                                                  alertCount: iconState.alerts,
+                                                  alertCritical: iconState.alertCritical,
+                                                  awake: iconState.awake, prodDots: iconState.prodDots,
+                                                  pulseOn: iconState.pulseOn, dark: iconState.dark)
             lastIconState = iconState
         }
         // The icon draws the unread count and critical state — unread eve
         // alerts plus unseen firing criticals, one bell; the tooltip and
-        // a11y label are the only places a VoiceOver user can reach them.
+        // a11y label are the only places a VoiceOver user can reach them —
+        // the prod dots too, spoken in the same order they are drawn.
         let unread = store.badgeAlertCount
+        let prod = dots.isEmpty ? nil : store.prodGlance.spoken(seenRed: store.prodSeenRed)
         let description = (unread == 0
             ? "Pultík — command center (⌥Space)"
             : "Pultík — \(unread) unread alert\(unread == 1 ? "" : "s")"
                 + "\(store.badgeAlertCritical ? ", critical" : "") (⌥Space)")
+            + (prod.map { " — \($0)" } ?? "")
             + (awake ? " — Never Sleep on" : "")
         button.toolTip = description
         button.setAccessibilityLabel(description)
         statusItem?.isVisible = true
+    }
+
+    /// One timer while any prod dot pulses, none otherwise — the icon is
+    /// re-rendered only on the beat it changes.
+    private func syncPulse(_ dots: [ProdGlance.Dot]) {
+        if dots.contains(where: \.pulsing) {
+            guard pulseTimer == nil else { return }
+            pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { _ in
+                Task { @MainActor in
+                    guard let delegate = AppDelegate.shared else { return }
+                    delegate.pulseOn.toggle()
+                    delegate.updateIcon()
+                }
+            }
+        } else if pulseTimer != nil {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+            pulseOn = true
+        }
     }
 
     // MARK: - Panel
@@ -195,6 +249,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.setRail(rail, collapsed: false)
         guard panel?.isVisible != true else { return }
         togglePanel(nil)
+    }
+
+    /// A prod notification click: the panel opens (never toggles shut) and
+    /// the view switches to the `.h` overview matrix with `key` expanded.
+    /// A closed panel takes the key as it presents (`takePendingProdKey`);
+    /// an open one is told through `.pultikOpenProd`.
+    func showProd(key: String) {
+        pendingProdKey = key
+        let wasVisible = panel?.isVisible == true
+        if !wasVisible { togglePanel(nil) }
+        if wasVisible {
+            NotificationCenter.default.post(name: .pultikOpenProd, object: nil, userInfo: ["key": key])
+        }
+    }
+
+    /// The pending prod deployment, once: nil after the first taker.
+    func takePendingProdKey() -> String? {
+        defer { pendingProdKey = nil }
+        return pendingProdKey
     }
 
     func closePanel() {
@@ -335,4 +408,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // open AppleSMC (discovery + safe reset) just to tear it down.
         FanStore.instance?.releaseAllOnQuit()
     }
+}
+
+extension Notification.Name {
+    /// Posted by `AppDelegate.showProd(key:)`; `userInfo["key"]` is the
+    /// deployment the panel should open on the `.h` matrix.
+    static let pultikOpenProd = Notification.Name("dev.example.pultik.openProd")
 }

@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -145,6 +146,8 @@ func main() {
 		err = installCmd(os.Args[2:])
 	case "doctor":
 		err = doctorCmd(os.Args[2:])
+	case "prod":
+		err = prodCmd(os.Args[2:])
 	case "version", "--version", "-V":
 		fmt.Println("pultik 0.1.0")
 	case "help", "--help", "-h":
@@ -155,6 +158,10 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s✕ %v%s\n", red, err, reset)
+		var coded *exitError
+		if errors.As(err, &coded) {
+			os.Exit(coded.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -170,6 +177,7 @@ USAGE
                              (todos + reminders: vitrinka todo | schedule)
   pultik install [flags]     install app + CLI + Claude integration
   pultik doctor [--json]     diagnose the local Pultik installation
+  pultik prod <cmd>          prod watch pointers: schema | validate | add
 
   pultik <cmd> --help        flags for that command
 

@@ -8,23 +8,33 @@ enum Notifier {
     /// persisted queue unchanged.
     static let firingPanelURL = "pultik://panel/firing"
 
+    /// A prod notification's click: the panel on the `.h` matrix with this
+    /// deployment expanded (AppDelegate.showProd).
+    static func prodPanelURL(_ key: String) -> String {
+        "pultik://panel/prod/\(key)"
+    }
+
+    typealias Interruption = NotificationContent.Interruption
+
     static func requestPermission() {
         UNUserNotificationCenter.current().delegate = ClickHandler.shared
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    static func send(title: String, body: String, url: String?) {
+    /// - Parameters:
+    ///   - thread: groups related notifications (one thread per deployment).
+    ///   - bypassFocus: deliver now even while FocusGate holds — a prod
+    ///     red is exactly what a Focus hold must not sit on.
+    static func send(title: String, body: String, url: String?, thread: String? = nil,
+                     interruption: Interruption = .active, bypassFocus: Bool = false) {
         Task { @MainActor in
             // Focus hold: queued instead of delivered while a Focus is on
             // (opt-in, Integrations → Focus). The queue is persisted, so a
             // caller that stamps its own "announced" ledger stays honest
             // across a quit. FocusGate flushes on lift.
-            if FocusGate.shared.holdIfNeeded(title: title, body: body, url: url) { return }
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = body
-            content.sound = .default
-            if let url { content.userInfo = ["url": url] }
+            if !bypassFocus, FocusGate.shared.holdIfNeeded(title: title, body: body, url: url) { return }
+            let content = NotificationContent.make(title: title, body: body, url: url, thread: thread,
+                                                   interruption: interruption)
             let request = UNNotificationRequest(
                 identifier: UUID().uuidString,
                 content: content,
@@ -56,7 +66,10 @@ enum Notifier {
                   let url = URL(string: string)
             else { return }
             await MainActor.run {
-                if url.scheme == "pultik", url.host() == "panel" {
+                let path = url.pathComponents // ["/", "prod", "<key>"]
+                if url.scheme == "pultik", url.host() == "panel", path.count == 3, path[1] == "prod" {
+                    AppDelegate.shared?.showProd(key: path[2])
+                } else if url.scheme == "pultik", url.host() == "panel" {
                     AppDelegate.shared?.showPanel(unfolding: url.lastPathComponent)
                 } else {
                     NSWorkspace.shared.open(url)

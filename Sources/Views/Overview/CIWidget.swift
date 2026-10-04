@@ -207,23 +207,3 @@ struct CIWidget: View {
         }.joined(separator: "\n")
     }
 }
-
-/// Jobs per hour as a row of thin bars, scaled to the busiest hour; an hour
-/// with none keeps a hairline so the day's length still reads.
-private struct HourBars: View {
-    let values: [Int]
-
-    var body: some View {
-        let peak = max(values.max() ?? 0, 1)
-        HStack(alignment: .bottom, spacing: 1) {
-            ForEach(Array(values.enumerated()), id: \.offset) { _, value in
-                RoundedRectangle(cornerRadius: 0.5)
-                    .fill(Color.secondary.opacity(value == 0 ? 0.25 : 0.7))
-                    .frame(width: 2.5, height: max(1, 10 * CGFloat(value) / CGFloat(peak)))
-            }
-        }
-        .frame(height: 10, alignment: .bottom)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Jobs per hour: \(values.map(String.init).joined(separator: ", "))")
-    }
-}

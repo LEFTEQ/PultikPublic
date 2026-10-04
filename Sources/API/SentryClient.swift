@@ -8,6 +8,11 @@ actor SentryClient {
 
     private let base = URL(string: "https://sentry.ops.example.invalid")!
     private let org = "sentry"
+
+    /// Every Sentry environment that IS production. Booking SK reports as
+    /// `sk`, so a `production`-only filter hid live-money errors entirely.
+    /// Interim: Hlídač owns per-deployment environments (contracts §5).
+    static let prodEnvironments = ["production", "sk"]
     private let session: URLSession
     private var cachedToken: String?
 
@@ -79,9 +84,8 @@ actor SentryClient {
         components.queryItems = [
             URLQueryItem(name: "query", value: "is:unresolved level:[error,fatal]"),
             URLQueryItem(name: "statsPeriod", value: "24h"),
-            URLQueryItem(name: "environment", value: "production"),
             URLQueryItem(name: "sort", value: "date"),
-        ]
+        ] + Self.prodEnvironments.map { URLQueryItem(name: "environment", value: $0) }
         var request = URLRequest(url: components.url!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -159,9 +163,8 @@ actor SentryClient {
             URLQueryItem(name: "query", value: "is:unresolved level:[error,fatal]"),
             URLQueryItem(name: "start", value: iso.string(from: start)),
             URLQueryItem(name: "end", value: iso.string(from: end)),
-            URLQueryItem(name: "environment", value: "production"),
             URLQueryItem(name: "sort", value: "date"),
-        ]
+        ] + Self.prodEnvironments.map { URLQueryItem(name: "environment", value: $0) }
         var request = URLRequest(url: components.url!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

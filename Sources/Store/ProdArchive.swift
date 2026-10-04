@@ -57,7 +57,8 @@ final class ProdArchive {
         // Sentry, so it takes a real gate verdict — not just an isPaused peek
         // that goes quiet the moment a pause expires. A half-open breaker gets
         // one cheap org probe before the burst is allowed out.
-        let prefs = Preferences.load()
+        // The rail's list, so the archive never shows less than the strip.
+        let sentryProjects = Preferences.load().allSentryProjects
         switch ProbeGate.shared.verdict(.sentry) {
         case .hold:
             error = "sentry probes paused — refresh from the footer to retry"
@@ -78,7 +79,7 @@ final class ProdArchive {
         var collected: [ProdIssue] = []
         var failures: [ProbeFailure] = []
         await withTaskGroup(of: ProbeResult<[ProdIssue]>.self) { group in
-            for project in prefs.sentryProjects {
+            for project in sentryProjects {
                 group.addTask {
                     do {
                         let fetched = try await SentryClient.shared.archiveIssues(
@@ -102,7 +103,7 @@ final class ProdArchive {
         // say so, and stop the next mode entry firing the same burst again.
         // (A window that comes back genuinely empty is no longer mistaken for
         // this: only a thrown request counts as a failure now.)
-        if failures.count == prefs.sentryProjects.count, let failure = failures.first {
+        if failures.count == sentryProjects.count, let failure = failures.first {
             ProbeGate.shared.failed(.sentry, failure)
             if window == 0 { error = "sentry unreachable (mesh? token?)" }
         } else {

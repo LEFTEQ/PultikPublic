@@ -181,6 +181,9 @@ final class FanStore {
     func startTicking() {
         tickHolders += 1
         guard tickTimer == nil else { return }
+        // Slow movers sample on the open tick: a reading left from the last
+        // time the panel was open can be hours stale.
+        tickCount = 0
         tick()
         let timer = Timer(timeInterval: 1, repeats: true) { _ in
             Task { @MainActor in FanStore.shared.tick() }

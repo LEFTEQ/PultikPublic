@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Release-only entitlements for Pultík, applied by tools/dist-macos.sh ONLY
+  when a Developer ID provisioning profile that grants them is embedded
+  (PULTIK_PROVISIONING_PROFILE). dist-macos.sh adds the team's
+  application-identifier and team-identifier from that profile at sign time.
+  Never reference this file from Project.swift: a restricted entitlement
+  under the hardened runtime without its profile stops the app launching.
+  Without it, UNNotificationContent.interruptionLevel = .timeSensitive
+  silently degrades to an ordinary banner (decision log D9, L1).
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
+</dict>
+</plist>

@@ -245,19 +245,47 @@ actor MetricsClient {
         }
     }
 
-    func serviceStatuses(services: [(name: String, probe: String, host: String?)]) async -> [ServiceStatus] {
-        async let up = try? instantByInstance("probe_success")
-        async let duration = try? instantByInstance("probe_duration_seconds")
-        let (upMap, durationMap) = await (up, duration)
-        guard upMap != nil else { return [] }
+    func serviceStatuses(services: [(name: String, probe: String, host: String?, job: String?)]) async -> [ServiceStatus] {
+        async let up = try? instantSeries("probe_success")
+        async let duration = try? instantSeries("probe_duration_seconds")
+        let (upSeries, durationSeries) = await (up, duration)
+        guard let upSeries else { return [] }
+        let upMap = Self.byJobInstance(upSeries)
+        let durationMap = Self.byJobInstance(durationSeries ?? [])
         return services.map { service in
             ServiceStatus(
                 name: service.name,
                 probe: service.probe,
                 host: service.host,
-                up: upMap?[service.probe].map { $0 > 0 },
-                latencySeconds: durationMap?[service.probe]
+                up: Self.pick(upMap, instance: service.probe, job: service.job, worst: min).map { $0 > 0 },
+                latencySeconds: Self.pick(durationMap, instance: service.probe, job: service.job, worst: max)
             )
         }
+    }
+
+    /// One probe instance can sit in several blackbox jobs (`https://exampleapp.app`
+    /// is in blackbox-http AND blackbox-ssl). Keyed by instance alone the last
+    /// series silently won, so a tile could show the certificate check's
+    /// answer instead of the site's.
+    private struct JobInstance: Hashable {
+        let job: String
+        let instance: String
+    }
+
+    private static func byJobInstance(_ series: [(labels: [String: String], value: Double)]) -> [JobInstance: Double] {
+        Dictionary(series.compactMap { sample in
+            guard let instance = sample.labels["instance"] else { return nil }
+            return (JobInstance(job: sample.labels["job"] ?? "", instance: instance), sample.value)
+        }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The service's own job when it names one; otherwise every non-ssl job
+    /// probing that instance, reduced to the worst value — a site is only up
+    /// when every probe of it says so.
+    private static func pick(_ map: [JobInstance: Double], instance: String, job: String?,
+                             worst: (Double, Double) -> Double) -> Double? {
+        if let job { return map[JobInstance(job: job, instance: instance)] }
+        return map.filter { $0.key.instance == instance && !$0.key.job.hasSuffix("ssl") }
+            .values.reduce(nil) { acc, value in acc.map { worst($0, value) } ?? value }
     }
 }

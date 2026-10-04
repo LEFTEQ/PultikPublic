@@ -18,6 +18,9 @@ enum ProbeTarget: Hashable, Sendable {
     case sentry
     case vitrinka
     case semafor
+    /// Hlídač, the prod digest API — another BuildServer host, so a Semafor or
+    /// Prometheus outage never pauses the prod board, nor the reverse.
+    case hlidac
     case devbox(box: String)
 
     /// Stable key for logs and `Pause.id`. The first box keeps today's
@@ -30,6 +33,7 @@ enum ProbeTarget: Hashable, Sendable {
         case .sentry: return "sentry"
         case .vitrinka: return "vitrinka"
         case .semafor: return "semafor"
+        case .hlidac: return "hlidac"
         case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox" : "devbox-\(box)"
         }
     }
@@ -42,6 +46,7 @@ enum ProbeTarget: Hashable, Sendable {
         case .sentry: return "sentry"
         case .vitrinka: return "vitrinka"
         case .semafor: return "CI pool (semafor)"
+        case .hlidac: return "prod watch (hlídač)"
         case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox (ssh)" : "devbox \(box) (ssh)"
         }
     }
@@ -174,6 +179,16 @@ final class ProbeGate {
     /// before Pultík knocks enough times to earn another.
     private static let backoff: [TimeInterval] = [120, 300, 600, 1200, 1800, 3600]
 
+    /// Hlídač is a mesh-only read API with no fail2ban behind it, and the
+    /// prod board is the one surface that must notice recovery fast: 15 s →
+    /// 30 s → 60 s cap, refusals included.
+    private static func ladder(for target: ProbeTarget) -> [TimeInterval] {
+        switch target {
+        case .hlidac: return [15, 30, 60]
+        default: return backoff
+        }
+    }
+
     private let pathMonitor = NWPathMonitor()
     private var lastPathRetry: Date?
 
@@ -257,7 +272,8 @@ final class ProbeGate {
         if rejected { count = max(count, 5) }
         strikes[target] = count
 
-        let wait = Self.backoff[min(count - 1, Self.backoff.count - 1)]
+        let ladder = Self.ladder(for: target)
+        let wait = ladder[min(count - 1, ladder.count - 1)]
         pauses[target] = Pause(
             target: target,
             reason: failure.reason,

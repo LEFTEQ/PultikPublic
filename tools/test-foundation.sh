@@ -8,10 +8,17 @@ mkdir -p "$harness/Sources/Pultik" "$harness/Tests/PultikTests"
 sources=(Sources/Models/Models.swift Sources/Models/OverviewGlance.swift
   Sources/Models/DevboxBoxes.swift Sources/Models/DevboxClear.swift Sources/Models/FiringWatch.swift Sources/API/PollingSession.swift
   Sources/Support/GHToken.swift Sources/Support/ProbeGate.swift Sources/Support/DevboxClearWorktree.swift
-  Sources/Support/PanelTestDisplay.swift)
+  Sources/Support/PanelTestDisplay.swift
+  Sources/Models/ProdGlance.swift Sources/Models/ProdMatrix.swift Sources/Models/SettingsFile.swift
+  Sources/Support/DateAge.swift Sources/Models/ProdTransitions.swift Sources/Models/ProdClaims.swift
+  Sources/Models/NotificationContent.swift)
 tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/DevboxBoxesTests.swift
   Tests/FiringWatchTests.swift Tests/DevboxClearTests.swift Tests/DevboxClearWorktreeTests.swift
-  Tests/PanelTestDisplayTests.swift)
+  Tests/PanelTestDisplayTests.swift
+  Tests/ProdGlanceTests.swift Tests/SettingsFileTests.swift Tests/ProdTransitionsTests.swift
+  Tests/ProdClaimsTests.swift)
+# Golden payloads the contract tests read beside themselves (#filePath).
+cp -R "$repo/Tests/Fixtures" "$harness/Tests/PultikTests/Fixtures"
 for file in "${sources[@]}" "$repo"/Sources/API/GitHub*.swift; do
   [[ "$file" = /* ]] || file="$repo/$file"
   cp "$file" "$harness/Sources/Pultik/"
@@ -25,7 +32,7 @@ cat > "$harness/Package.swift" <<'SWIFT'
 import PackageDescription
 let package = Package(name: "PultikFoundationContract", platforms: [.macOS(.v14)], targets: [
     .target(name: "Pultik"),
-    .testTarget(name: "PultikTests", dependencies: ["Pultik"])
+    .testTarget(name: "PultikTests", dependencies: ["Pultik"], exclude: ["Fixtures"])
 ])
 SWIFT
 swift test --package-path "$harness" "$@"
