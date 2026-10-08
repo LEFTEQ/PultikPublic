@@ -25,6 +25,8 @@ import SwiftUI
 struct MacWidget: View {
     let store: StatusStore
     let fanStore: FanStore
+    var onHealth: () -> Void = {}
+    var health: MacHealthStore = .shared
 
     /// Host stats need no SMC, so the system row always has something to
     /// say; only the sensors row waits for a sensor or a fan.
@@ -34,8 +36,9 @@ struct MacWidget: View {
 
     var body: some View {
         if Self.isShown(store: store, fanStore: fanStore) {
-            MacTier(fanStore: fanStore)
-                .padding(10)
+            GlanceGrid.tile {
+                MacTier(fanStore: fanStore, onHealth: onHealth, health: health)
+            }
         }
     }
 }
@@ -49,13 +52,27 @@ struct MacWidget: View {
 /// `FanStrip` reading set; nothing was dropped in any move.
 private struct MacTier: View {
     let fanStore: FanStore
+    let onHealth: () -> Void
+    let health: MacHealthStore
     private let brightness = BrightnessStore.shared
     private let awake = AwakeStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Kicker(text: "This Mac")
+                // toolkit's report makes the heading the Mac health page's
+                // door, like every other widget's; the count is what it
+                // flags, tinted by the worst. No report → a plain heading.
+                if case .hidden = health.status {
+                    Kicker(text: "This Mac")
+                } else {
+                    let report = health.status.fresh
+                    Kicker(text: "This Mac", count: report?.headline.flagged ?? 0,
+                           tone: report.flatMap { $0.headline.flagged > 0 ? MacHealthTone.color($0.headline.severity) : nil }
+                               ?? .secondary,
+                           action: onHealth,
+                           actionHelp: health.status.chip?.help ?? "Open Mac health — .mac")
+                }
                 Spacer(minLength: 0)
                 AwakeToggle(awake: awake)
                 if brightness.isAvailable {
@@ -75,8 +92,9 @@ private struct MacTier: View {
                 }
             }
             .padding(.horizontal, RailRowMetrics.inset)
-            .padding(.bottom, 1)
+            .padding(.bottom, 2)
 
+            GlanceHeads(titles: ["cpu", "memory", "disk"])
             let disk = diskUsage
             // memTone, not percentTone: used-% over-alarms on a healthy Mac
             // where inactive pages keep "used" high while kernel pressure is
@@ -86,13 +104,9 @@ private struct MacTier: View {
                           memoryUsed: fanStore.memUsedBytes, memoryTotal: fanStore.memTotalBytes,
                           diskUsed: disk?.used, diskTotal: disk?.total,
                           memoryTone: fanStore.memUsedFraction.map { memTone(fanStore, percent: $0 * 100) })
-                .padding(.horizontal, RailRowMetrics.inset)
-                .padding(.vertical, 3)
 
             if hasSensors || !thermalHelp.isEmpty {
                 sensors
-                    .padding(.horizontal, RailRowMetrics.inset)
-                    .padding(.vertical, 3)
                     // The row, not the temperature cell, carries the OS thermal
                     // state: a machine with no readable sensor has no temperature
                     // cell to hang it on, and that is exactly a machine whose
@@ -106,42 +120,35 @@ private struct MacTier: View {
         fanStore.hottest != nil || !fanStore.fans.isEmpty
     }
 
-    /// Temp under cpu, fans under memory and disk — the machine rows'
-    /// columns, so the two rows read as one grid.
+    /// Temp under cpu, fans under memory and disk — the grid's tracks, so the
+    /// two rows read as one table (D5).
     private var sensors: some View {
-        HStack(spacing: 6) {
-            Text("sensors")
-                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: MachineVitals.Column.name, alignment: .leading)
-            if let hottest = fanStore.hottest {
-                Vital(symbol: "thermometer.medium",
-                      text: String(format: "%.0f°", hottest.celsius),
-                      tone: tempTone(hottest.celsius), width: MachineVitals.Column.percent,
-                      help: "\(hottest.name) — hottest sensor")
-            }
-            if fanStore.fans.count <= Self.maxFanCells {
-                ForEach(Array(fanStore.fans.enumerated()), id: \.element.id) { index, fan in
-                    Vital(symbol: "fanblades", text: "\(fan.currentRPM)", tone: fanTone(fan),
-                          width: index == 0 ? MachineVitals.Column.size : MachineVitals.Column.percent,
-                          help: fanHelp(fan))
-                }
-            } else if let fastest = fanStore.fans.max(by: { $0.currentRPM < $1.currentRPM }) {
-                // One cell for the fastest fan and the count says more than
-                // half-visible numbers; the full list is on the tooltip.
-                Vital(symbol: "fanblades",
-                      text: "\(fastest.currentRPM)×\(fanStore.fans.count)",
-                      tone: fanTone(fastest), width: MachineVitals.Column.size, help: allFansHelp)
-            }
-            if !hasSensors {
-                // No SMC reading to carry it: the OS thermal state in words.
-                Text(fanStore.thermalState == .fair ? "warm" : "throttling")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.orange)
-            }
-            Spacer(minLength: 0)
+        var cells: [GlanceCell] = []
+        if let hottest = fanStore.hottest {
+            cells.append(GlanceCell(String(format: "%.0f°", hottest.celsius),
+                                    tone: Self.loud(tempTone(hottest.celsius)),
+                                    help: "\(hottest.name) — hottest sensor"))
         }
+        if fanStore.fans.count <= Self.maxFanCells {
+            for fan in fanStore.fans {
+                cells.append(GlanceCell("\(fan.currentRPM) rpm", tone: Self.loud(fanTone(fan)), help: fanHelp(fan)))
+            }
+        } else if let fastest = fanStore.fans.max(by: { $0.currentRPM < $1.currentRPM }) {
+            // One cell for the fastest fan and the count says more than
+            // half-visible numbers; the full list is on the tooltip.
+            cells.append(GlanceCell("\(fastest.currentRPM)×\(fanStore.fans.count)",
+                                    tone: Self.loud(fanTone(fastest)), help: allFansHelp))
+        }
+        if !hasSensors {
+            // No SMC reading to carry it: the OS thermal state in words.
+            cells.append(GlanceCell(fanStore.thermalState == .fair ? "warm" : "throttling", tone: .orange))
+        }
+        return GlanceRow(name: "sensors", cells: cells)
+    }
+
+    /// A calm reading is plain text on the grid; only warm and hot colour it.
+    private static func loud(_ tone: Color) -> Color? {
+        tone == .secondary ? nil : tone
     }
 
     /// The startup volume as `FanStore` last sampled it — never read here,

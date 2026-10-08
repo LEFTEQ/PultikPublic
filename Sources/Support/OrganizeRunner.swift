@@ -25,18 +25,19 @@ enum OrganizeRunner {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: hs)
             process.arguments = ["-c", code]
-            let stderr = Pipe()
-            process.standardOutput = Pipe()
+            let stdout = Pipe(), stderr = Pipe()
+            process.standardOutput = stdout
             process.standardError = stderr
+            let errData: Data
             do {
                 try process.run()
-                process.waitUntilExit()
+                errData = ProcessOutput.collect(process, stdout: stdout, stderr: stderr).stderr
             } catch {
                 return SlashResult.failed("hs failed: \(error.localizedDescription)")
             }
             guard process.terminationStatus == 0 else {
                 let detail = String(
-                    data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                    data: errData,
                     encoding: .utf8
                 )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 return SlashResult.failed(

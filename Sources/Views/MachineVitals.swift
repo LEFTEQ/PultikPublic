@@ -1,14 +1,10 @@
 import SwiftUI
 
-/// ONE line per machine — the same capacity grammar for the estate servers
-/// and the Devbox guest: name, then cpu / ram / disk, each tinted by its own
-/// load tier. Column widths are fixed and sized to the widest value each can
-/// hold — "AppServer", "100%", "147/251 GB" — because ragged numeric columns
-/// are unreadable at 9.5pt (restored 2026-09-14; the two-row grid it briefly
-/// became scattered the reading across three lines and lost the tones).
-///
-/// Disk shows a percentage to stay narrow; the absolute figure and the core
-/// count are a hover away on the row's tooltip rather than lost. A dash is
+/// ONE row per machine — the estate servers and this Mac: the name over its
+/// core count, then cpu · ram · disk as `GlanceGrid` cells, each a reading
+/// over a bar tinted by its own load tier (panel Home D5, 2026-10-07: the
+/// columns start where every other glance's do). Sizes are compact —
+/// "215/251G", "1.5/1.7T"; the full figures are on the tooltip. A dash is
 /// "unavailable" — never a number made up from another machine.
 struct MachineVitals: View {
     let name: String
@@ -25,14 +21,6 @@ struct MachineVitals: View {
     /// This Mac tints memory by kernel pressure, where used-% over-alarms.
     var memoryTone: Color? = nil
 
-    /// Shared with the This Mac widget's sensors row, so its cells sit in
-    /// the same columns as the machine rows.
-    enum Column {
-        static let name: CGFloat = 60
-        static let percent: CGFloat = 26
-        static let size: CGFloat = 58
-    }
-
     private var memoryLoad: Double? {
         if let memoryPercent { return memoryPercent }
         guard let memoryUsed, let memoryTotal, memoryTotal > 0 else { return nil }
@@ -46,25 +34,30 @@ struct MachineVitals: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(name)
-                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: Column.name, alignment: .leading)
-            Vital(symbol: "cpu", percent: cpuPercent, text: percentText(cpuPercent), width: Column.percent)
-            let memoryText = sizeText(used: memoryUsed, total: memoryTotal) ?? percentText(memoryLoad)
-            if let memoryTone {
-                Vital(symbol: "memorychip", text: memoryText, tone: memoryTone, width: Column.size)
-            } else {
-                Vital(symbol: "memorychip", percent: memoryLoad, text: memoryText, width: Column.size)
-            }
-            Vital(symbol: "internaldrive", percent: diskLoad, text: percentText(diskLoad),
-                  width: Column.percent)
-        }
-        .help(help)
+        GlanceRow(name: name, detail: cpuCount.map { "\($0) cores" }, cells: [
+            GlanceCell(percentText(cpuPercent), fraction: cpuPercent.map { $0 / 100 }),
+            memoryCell,
+            GlanceCell(compactText(used: diskUsed, total: diskTotal) ?? percentText(diskLoad),
+                       fraction: diskLoad.map { $0 / 100 }),
+        ], help: help)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+    }
+
+    /// This Mac passes a pressure tone: calm pressure reads calm whatever
+    /// used-% says, so the bar keeps the fraction but not its alarm.
+    private var memoryCell: GlanceCell {
+        let text = compactText(used: memoryUsed, total: memoryTotal) ?? percentText(memoryLoad)
+        let fraction = memoryLoad.map { $0 / 100 }
+        guard let memoryTone else { return GlanceCell(text, fraction: fraction) }
+        let calm = memoryTone == .secondary
+        return GlanceCell(text, fraction: fraction, tone: calm ? .primary : memoryTone,
+                          barTone: calm ? .green : memoryTone)
+    }
+
+    private func compactText(used: Double?, total: Double?) -> String? {
+        guard let used, let total, total > 0 else { return nil }
+        return compactSize(used: max(0, used), total: total)
     }
 
     private func percentText(_ value: Double?) -> String {
@@ -87,52 +80,5 @@ struct MachineVitals: View {
         "\(name), \(cpuCount.map { "\($0) CPUs, " } ?? "")CPU \(cpuPercent.map { String(format: "%.0f percent", $0) } ?? "unavailable"), "
             + "memory \(sizeText(used: memoryUsed, total: memoryTotal) ?? "unavailable"), "
             + "disk \(sizeText(used: diskUsed, total: diskTotal) ?? "unavailable")"
-    }
-}
-
-// MARK: - Shared vital cell
-
-/// Icon + number, tinted by load. Two initialisers because the callers know
-/// different things: the Mac tier has already chosen a tone (a fan's tone
-/// comes from its own min/max, not a percentage; memory from kernel
-/// pressure), the machine row has a percentage and wants the shared
-/// `LoadTier` scale applied to it.
-struct Vital: View {
-    let symbol: String
-    let text: String
-    let tone: Color
-    var width: CGFloat?
-    var help: String?
-
-    init(symbol: String, text: String, tone: Color, width: CGFloat? = nil, help: String? = nil) {
-        self.symbol = symbol
-        self.text = text
-        self.tone = tone
-        self.width = width
-        self.help = help
-    }
-
-    init(symbol: String, percent: Double?, text: String, width: CGFloat) {
-        self.symbol = symbol
-        self.text = text
-        self.width = width
-        self.tone = percent.map(percentTone) ?? .secondary
-    }
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol)
-                .font(.system(size: 9))
-                .frame(width: 10)
-            Text(text)
-                .font(.system(size: 9.5, design: .monospaced))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(width: width, alignment: width == nil ? .leading : .trailing)
-        }
-        .foregroundStyle(tone)
-        .help(help ?? "")
     }
 }

@@ -12,54 +12,54 @@ struct DevboxWidget: View {
     var body: some View {
         if let summary = store.devboxSummary {
             let glance = DevboxGlance(summary: summary, workspaces: store.devboxWorkspaces)
-            VStack(alignment: .leading, spacing: 6) {
-                header(glance, pressure: summary.pressure)
-                gauges(glance)
-                if !glance.boxes.isEmpty {
-                    boxLine(glance)
-                }
-                pile(glance)
-                if !glance.bannerAlerts.isEmpty {
-                    alertLine(glance)
+            GlanceGrid.tile {
+                VStack(alignment: .leading, spacing: 4) {
+                    header(glance, pressure: summary.pressure)
+                        .padding(.bottom, 2)
+                    gauges(glance)
+                    if !glance.boxes.isEmpty {
+                        boxLine(glance)
+                    }
+                    pile(glance)
+                    if !glance.bannerAlerts.isEmpty {
+                        alertLine(glance)
+                    }
                 }
             }
-            .padding(10)
             .contentShape(Rectangle())
             .onTapGesture { onOpen("") }
         }
     }
 
     private func header(_ glance: DevboxGlance, pressure: DevboxOverviewSummary.Pressure) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Kicker(text: "Devbox", count: glance.running.count,
+        // The headroom is what admission spends, so it rides the heading.
+        TileHeader(title: "Devbox", count: glance.running.count,
                    tone: Self.tone(pressure) ?? .secondary,
+                   caption: glance.freeText,
+                   captionTone: glance.headroomBytes < 0 ? .red : .secondary,
                    action: { onOpen("") },
                    actionHelp: "Open every devbox workspace")
-            Text("\(glance.parked) parked ›")
-                .font(RailRowMetrics.metaFont)
-                .foregroundStyle(.tertiary)
-                .fixedSize()
-        }
-        .padding(.horizontal, RailRowMetrics.inset)
+            .padding(.horizontal, RailRowMetrics.inset)
     }
 
-    /// CPU, SSD and swap take a fixed cell with their shortest readings; RAM
-    /// gets the rest because it carries the headroom next to used/total.
-    /// Swap's reading turns orange past the threshold the alert line used
-    /// to name. Cores and the full SSD reading are on the `.devbox` strip.
+    /// The guest on the shared grid (D5): cpu · ram · ssd, then swap under
+    /// cpu. RAM's tick is the floor the box keeps free and its reading turns
+    /// red past it; swap turns orange past the threshold the alert line used
+    /// to name. The headroom and the full SSD reading are on the `.devbox` strip.
     private func gauges(_ glance: DevboxGlance) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            DevboxGauge(label: "CPU", fraction: glance.cpuFraction, value: glance.cpuPercentText)
-                .frame(width: 34)
-            DevboxGauge(label: "RAM", fraction: glance.memoryFraction, tick: glance.floorTick,
-                        value: glance.ramText, valueTone: glance.headroomBytes < 0 ? .red : nil)
-            DevboxGauge(label: "SSD", fraction: glance.diskFraction, value: glance.ssdCompactText)
-                .frame(width: 48)
-            DevboxGauge(label: "SWAP", fraction: glance.swapFraction, value: glance.swapText,
-                        valueTone: glance.swapUsedBytes > DevboxGlance.swapAlertBytes ? .orange : nil)
-                .frame(width: 40)
+        VStack(alignment: .leading, spacing: 2) {
+            GlanceHeads(titles: ["cpu", "ram", "ssd"])
+            GlanceRow(name: glance.boxes.isEmpty ? "guest" : "boxes", detail: "\(glance.cores) cores", cells: [
+                GlanceCell(glance.cpuPercentText, fraction: glance.cpuFraction),
+                GlanceCell(glance.ramCompactText, fraction: glance.memoryFraction, tick: glance.floorTick,
+                           tone: glance.headroomBytes < 0 ? .red : nil),
+                GlanceCell(glance.ssdCompactText, fraction: glance.diskFraction),
+            ])
+            GlanceRow(name: "swap", cells: [
+                GlanceCell(glance.swapText, fraction: glance.swapFraction,
+                           tone: glance.swapUsedBytes > DevboxGlance.swapAlertBytes ? .orange : nil),
+            ])
         }
-        .padding(.horizontal, RailRowMetrics.inset)
         .help("\(glance.cores) cores. RAM's orange tick is the \(DevboxGlance.compact(glance.floorBytes))G floor the box keeps free")
     }
 
@@ -220,6 +220,19 @@ extension DevboxGlance {
         guard memoryTotalBytes > 0 else { return "—" }
         let free = headroomBytes < 0 ? "\u{2212}\(Self.compact(-headroomBytes))" : Self.compact(headroomBytes)
         return "\(Self.compact(memoryUsedBytes))/\(Self.compact(memoryTotalBytes))G · \(free)G free"
+    }
+
+    /// The glance's grid cell — the headroom moved to the heading.
+    var ramCompactText: String {
+        guard memoryTotalBytes > 0 else { return "—" }
+        return "\(Self.compact(memoryUsedBytes))/\(Self.compact(memoryTotalBytes))G"
+    }
+
+    /// "88G free", "−4G free" once the box is below its floor.
+    var freeText: String? {
+        guard memoryTotalBytes > 0 else { return nil }
+        let free = headroomBytes < 0 ? "\u{2212}\(Self.compact(-headroomBytes))" : Self.compact(headroomBytes)
+        return "\(free)G free"
     }
 
     var ssdText: String {

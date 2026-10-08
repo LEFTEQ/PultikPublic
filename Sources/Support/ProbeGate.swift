@@ -106,12 +106,23 @@ extension ProbeFailure {
                 // The client owns the exact deadline; do not turn a local
                 // budget pause into a 30-minute credential rejection.
                 return .unreachable(github.localizedDescription)
+            case .graphQL:
+                return .unreachable(github.localizedDescription)
             }
         }
         // A missing or broken `gh` login: every request would fail the same
         // way, and each one re-spawns the CLI to ask again.
         if error is GHTokenError { return .rejected(error.localizedDescription) }
         return .unreachable(error.localizedDescription)
+    }
+
+    /// What a GitHub failure feeds the breaker: nothing for a quota deferral.
+    /// The request budget already holds every call until its own deadline, and
+    /// a breaker pause on top would also block searches the foreground
+    /// reserve still admits.
+    static func tripping(_ error: Error) -> ProbeFailure? {
+        if case GitHubError.deferred = error { return nil }
+        return classify(error)
     }
 }
 

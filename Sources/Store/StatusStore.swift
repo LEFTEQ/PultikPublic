@@ -377,7 +377,7 @@ final class StatusStore {
                 // A palette failure is a host failure like any other — feed
                 // the breaker, or a refusal first seen here never opens it
                 // and every further keystroke keeps knocking.
-                gate.failed(.github, .classify(error))
+                if let failure = ProbeFailure.tripping(error) { gate.failed(.github, failure) }
                 guard scope == searchScope else { return }
                 searchError = error.localizedDescription
             }
@@ -530,7 +530,7 @@ final class StatusStore {
                 remember(cacheKey, found)
             } catch {
                 guard !Task.isCancelled else { return }
-                gate.failed(.github, .classify(error))
+                if let failure = ProbeFailure.tripping(error) { gate.failed(.github, failure) }
                 guard query == issueQuery else { return }
                 issueResults = []
                 issueSearchError = error.localizedDescription
@@ -833,16 +833,27 @@ final class StatusStore {
     }
 
     private func refreshGitHub(_ slugs: [String]) async {
-        // Load missing repos first, then rotate one repo per tick. A single
-        // active workflow must not trigger a full-estate refresh every 30s.
-        // Small estates also get a five-minute floor per repository.
+        // PRs, checks, reviews and deployments for every repo come from one
+        // GraphQL read per chunk. Workflow runs stay REST: missing repos
+        // first, then one repo per tick with a five-minute floor each.
         do { try await ensurePRIndex() }
         catch { NSLog("pultik: PR cache identity unavailable: %@", error.localizedDescription) }
         await gated(.github, probe: { [client] in await client.probeHealth() }) {
-            if let failure = await refreshPRArchiveIfNeeded() { return failure }
+            // An archive page failing (a removed repo's 404) must not hold back
+            // the estate; the estate read alone decides the breaker.
+            await refreshPRArchiveIfNeeded()
             let identity = prIndexIdentity
-            let known = Set(repos.map(\.slug))
-            var selected = slugs.filter { !known.contains($0) }
+            let scope = searchableRepos
+            let estate: [String: GitHubEstate.Repo]
+            do { estate = try await client.estate(repos: scope) }
+            catch is CancellationError { return nil }
+            catch {
+                NSLog("pultik: GitHub estate failed: %@", error.localizedDescription)
+                globalError = error.localizedDescription
+                return ProbeFailure.tripping(error)
+            }
+
+            var selected = slugs.filter { githubPolledAt[$0] == nil }
             if selected.isEmpty {
                 for _ in slugs.indices {
                     let slug = slugs[githubPollCursor % slugs.count]
@@ -853,28 +864,22 @@ final class StatusStore {
                     }
                 }
             }
-            guard !selected.isEmpty else { return nil }
             for slug in selected { githubPolledAt[slug] = Date() }
-            let statuses = await withTaskGroup(of: (status: RepoStatus, failure: ProbeFailure?).self) { group in
+            let runs = await withTaskGroup(of: (String, Result<[WorkflowRun], Error>).self) { group in
                 var remaining = selected.makeIterator()
                 // Bound simultaneous response decoding across a large estate.
-                // Preserve pinned order below while keeping four repos moving.
                 for _ in 0..<4 {
                     guard let slug = remaining.next() else { break }
-                    group.addTask { [client] in
-                        await Self.fetchRepo(slug: slug, client: client)
-                    }
+                    group.addTask { [client] in await Self.fetchRuns(slug: slug, client: client) }
                 }
-                var collected: [String: (status: RepoStatus, failure: ProbeFailure?)] = [:]
-                for await result in group {
-                    collected[result.status.slug] = result
+                var collected: [String: Result<[WorkflowRun], Error>] = [:]
+                for await (slug, result) in group {
+                    collected[slug] = result
                     if let slug = remaining.next() {
-                        group.addTask { [client] in
-                            await Self.fetchRepo(slug: slug, client: client)
-                        }
+                        group.addTask { [client] in await Self.fetchRuns(slug: slug, client: client) }
                     }
                 }
-                return selected.compactMap { collected[$0] }
+                return collected
             }
             if let current = try? await client.cacheIdentity(), current != identity || identity != prIndexIdentity {
                 do { try await ensurePRIndex() }
@@ -882,54 +887,54 @@ final class StatusStore {
                 return nil
             }
 
-            for result in statuses where result.status.error != nil {
-                NSLog("pultik: %@ error: %@", result.status.slug, result.status.error ?? "")
-            }
-            let fetched = statuses.map(\.status)
+            // One repo failing keeps its last snapshot and shows its error;
+            // only the estate read failing as a whole opens the breaker.
             var merged = Dictionary(uniqueKeysWithValues: repos.map { ($0.slug, $0) })
-            for status in fetched {
-                if let previous = merged[status.slug], status.error != nil {
-                    var retained = previous
-                    retained.error = status.error
-                    merged[status.slug] = retained
-                } else {
-                    merged[status.slug] = status
+            var answered = false
+            for slug in slugs {
+                var status = merged[slug] ?? RepoStatus(slug: slug)
+                var errors: [String] = []
+                if let repo = estate[slug] {
+                    if let error = repo.error { errors.append(error) } else {
+                        status.prs = repo.prs
+                        status.deploys = repo.deploys
+                        answered = true
+                    }
                 }
+                switch runs[slug] {
+                case .success(let fetched): status.runs = fetched; answered = true
+                case .failure(let error): errors.append(error.localizedDescription)
+                case nil: break
+                }
+                status.error = errors.first
+                if let error = status.error { NSLog("pultik: %@ error: %@", slug, error) }
+                merged[slug] = status
             }
             repos = slugs.compactMap { merged[$0] }
             if prIndexIdentity != nil {
                 let now = Date()
-                for status in fetched where status.error == nil {
-                    prIndex.ingest(status.prs.map { ArchivedPR(pr: $0.pr, repoSlug: status.slug, fetchedAt: now) }, now: now)
+                for (slug, repo) in estate where repo.error == nil {
+                    prIndex.rememberRecent(repo: slug, hits: repo.recent, limit: GitHubEstate.recentLimit, now: now)
+                    prIndex.ingest(repo.prs.map { ArchivedPR(pr: $0.pr, repoSlug: slug, fetchedAt: now) }, now: now)
                 }
                 persistPRIndex()
+                if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
             }
             notifyTransitions(repos)
             // Stamped HERE, not once per poll: while GitHub is paused the
             // inbox is not refreshing, and a footer reading "just now" over
             // half-hour-old runs would be a lie the pause badge can't undo.
-            if fetched.contains(where: { $0.error == nil }) { lastRefresh = Date() }
+            if answered { lastRefresh = Date() }
             onChange?()
-            globalError = fetched.allSatisfy { $0.error != nil } && !fetched.isEmpty
-                ? fetched.first?.error
-                : nil
-
-            // A missing repository does not pause the whole estate. A 403
-            // must retain its rejected classification and open the breaker.
-            if selected.count == 1,
-               let error = fetched.first?.error,
-               error.hasPrefix("GitHub API 404 ") {
-                return nil
-            }
-            guard fetched.allSatisfy({ $0.error != nil }) else { return nil }
-            return statuses.compactMap(\.failure).first ?? .unreachable("no answer from GitHub")
+            globalError = !repos.isEmpty && repos.allSatisfy { $0.error != nil } ? repos.first?.error : nil
+            return nil
         }
     }
 
-    private func refreshPRArchiveIfNeeded() async -> ProbeFailure? {
-        if let at = archiveAttemptedAt, Date().timeIntervalSince(at) < 30 { return nil }
+    private func refreshPRArchiveIfNeeded() async {
+        if let at = archiveAttemptedAt, Date().timeIntervalSince(at) < 30 { return }
         let scope = searchableRepos
-        guard !scope.isEmpty else { return nil }
+        guard !scope.isEmpty else { return }
         archiveAttemptedAt = Date() // failed pages back off too
         do {
             try await ensurePRIndex()
@@ -939,35 +944,22 @@ final class StatusStore {
                 archiveCursor = (archiveCursor + 1) % scope.count
                 guard let page = prIndex.archivePage(repo: repo, now: Date()) else { continue }
                 let hits = try await client.archivePage(repo: repo, page: page)
-                guard identity == prIndexIdentity, try await client.cacheIdentity() == identity else { return nil }
+                guard identity == prIndexIdentity, try await client.cacheIdentity() == identity else { return }
                 prIndex.rememberPage(repo: repo, page: page, hits: hits, now: Date())
                 persistPRIndex()
                 if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
-                return nil
+                return
             }
         } catch {
             NSLog("pultik: PR archive refresh failed: %@", error.localizedDescription)
-            return .classify(error)
         }
-        return nil
     }
 
-    private nonisolated static func fetchRepo(
+    private nonisolated static func fetchRuns(
         slug: String, client: GitHubClient
-    ) async -> (status: RepoStatus, failure: ProbeFailure?) {
-        var status = RepoStatus(slug: slug)
-        do {
-            async let runs = client.workflowRuns(repo: slug)
-            async let deploys = client.deployments(repo: slug)
-            async let prs = client.pullRequests(repo: slug)
-            status.runs = try Self.displayRuns(await runs)
-            status.deploys = try await deploys
-            status.prs = try await prs
-        } catch {
-            status.error = error.localizedDescription
-            return (status, .classify(error))
-        }
-        return (status, nil)
+    ) async -> (String, Result<[WorkflowRun], Error>) {
+        do { return (slug, .success(Self.displayRuns(try await client.workflowRuns(repo: slug)))) }
+        catch { return (slug, .failure(error)) }
     }
 
     /// Running runs + recent (24h) completed ones, capped at 5, always at least the latest.

@@ -56,7 +56,7 @@ enum PanelDriver {
             ProbeGate.shared.failed(.github, .unreachable("Debug verification pause"))
         case "github-resume":
             ProbeGate.shared.succeeded(.github)
-        case "query", "key", "paste", "state", "clear-preview", "clear-action":
+        case "query", "key", "paste", "state", "clear-preview", "clear-action", "mac-stop", "home-toggle":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:
             NSLog("pultik: debug driver ignored %@", String(describing: info))
@@ -96,11 +96,15 @@ enum PanelDriver {
 
     /// Writes `window` as a PNG. Own-window capture needs no screen-recording
     /// grant, which is the whole reason this is in-process.
-    static func capture(window: NSWindow, to path: String) {
+    /// `also` windows (front to back) are composited above it, over their union.
+    static func capture(window: NSWindow, also: [NSWindow] = [], to path: String) {
         let id = CGWindowID(window.windowNumber)
-        guard let image = CGWindowListCreateImage(
-            .null, .optionIncludingWindow, id, [.boundsIgnoreFraming, .bestResolution]
-        ) else {
+        // CGWindowIDs travel as raw pointer-sized values: no retain callbacks.
+        var raw = (also + [window]).map { UnsafeRawPointer(bitPattern: UInt($0.windowNumber)) }
+        let ids = CFArrayCreate(kCFAllocatorDefault, &raw, raw.count, nil)
+        let options: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
+        let composite = ids.flatMap { CGImage(windowListFromArrayScreenBounds: .null, windowArray: $0, imageOption: options) }
+        guard let image = also.isEmpty ? CGWindowListCreateImage(.null, .optionIncludingWindow, id, options) : composite else {
             NSLog("pultik: debug capture failed for window %d", id)
             return
         }

@@ -167,18 +167,16 @@ enum HelperInstaller {
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         task.arguments = ["-e", appleScript]
 
-        let errPipe = Pipe()
+        let outPipe = Pipe(), errPipe = Pipe()
         task.standardError = errPipe
-        task.standardOutput = Pipe()
+        task.standardOutput = outPipe
 
         do {
             try task.run()
         } catch {
             throw HelperInstallError.osascript("could not launch osascript: \(error)")
         }
-        // Read before waiting — a full pipe buffer would deadlock the wait.
-        let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
+        let data = ProcessOutput.collect(task, stdout: outPipe, stderr: errPipe).stderr
         guard task.terminationStatus != 0 else { return }
         let stderr = String(data: data, encoding: .utf8) ?? ""
         // osascript reports a dismissed password prompt as -128; that's the

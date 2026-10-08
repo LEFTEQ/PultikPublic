@@ -8,23 +8,8 @@ struct ProdBoardSection: View {
     let now: Date
     let onOpen: (String) -> Void
 
-    /// Deployments asking for attention — what the kicker's pill counts. A
-    /// board with nothing to draw but its waiting row counts that row.
-    private var attention: Int {
-        glance.cards.isEmpty ? (glance.waiting == nil ? 0 : 1)
-            : glance.cards.filter { $0.tone == .red || $0.tone == .orange || $0.tone == .blind }.count
-    }
-
-    private var kickerTone: Color {
-        if glance.cards.contains(where: { $0.tone == .red }) { return .red }
-        if glance.waiting != nil || glance.cards.contains(where: { $0.tone == .orange || $0.tone == .blind }) {
-            return .orange
-        }
-        return .secondary
-    }
-
     var body: some View {
-        RailSection(key: "prod", title: "Prod", count: attention, tone: kickerTone,
+        RailSection(key: "prod", title: "Prod", count: glance.attention, tone: glance.headingTone,
                     accessory: AnyView(
                         Text(glance.cards.isEmpty ? "Hlídač" : "\(glance.cards.count) deployments · 24h")
                             .font(RailRowMetrics.metaFont)
@@ -85,6 +70,8 @@ struct ProdCardView: View {
     let card: ProdGlance.Card
     let now: Date
     let action: () -> Void
+    /// Home's Production tile draws the 24 h bars taller than the rail did.
+    var barHeight: CGFloat = 10
     @State private var hovering = false
 
     var body: some View {
@@ -167,12 +154,12 @@ struct ProdCardView: View {
     @ViewBuilder
     private var barsAndLogs: some View {
         if let hours = card.hours, !hours.isEmpty {
-            HourBars(stacks: hours.map(HourBars.Stack.init))
+            HourBars(stacks: hours.map(HourBars.Stack.init), height: barHeight)
         } else {
             Text(card.tone == .hollow ? "logs not shipped" : "no logs")
                 .font(.system(size: 7, design: .monospaced))
                 .foregroundStyle(.tertiary)
-                .frame(width: 81, height: 10)
+                .frame(width: 81, height: barHeight)
                 .overlay(RoundedRectangle(cornerRadius: 2)
                     .strokeBorder(Color.white.opacity(0.16), style: StrokeStyle(lineWidth: 1, dash: [2, 2])))
         }
@@ -320,5 +307,23 @@ extension ProdGlance.Tone {
         case .red: .red
         case .blind, .hollow: .secondary
         }
+    }
+}
+
+extension ProdGlance {
+    /// Deployments asking for attention — what the heading's pill counts. A
+    /// board with nothing to draw but its waiting row counts that row.
+    var attention: Int {
+        cards.isEmpty ? (waiting == nil ? 0 : 1)
+            : cards.filter { $0.tone == .red || $0.tone == .orange || $0.tone == .blind }.count
+    }
+
+    /// The heading's tone, shared by the rail section and Home's tile.
+    var headingTone: Color {
+        if cards.contains(where: { $0.tone == .red }) { return .red }
+        if waiting != nil || cards.contains(where: { $0.tone == .orange || $0.tone == .blind }) {
+            return .orange
+        }
+        return .secondary
     }
 }

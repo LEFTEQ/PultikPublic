@@ -32,12 +32,6 @@ struct Deployment: Decodable, Identifiable {
     let createdAt: Date
 }
 
-struct DeploymentStatus: Decodable {
-    let state: String // pending | queued | in_progress | success | failure | error | inactive
-    let targetUrl: String?
-    let environmentUrl: String?
-}
-
 struct PullRequest: Decodable, Identifiable {
     let id: Int
     let number: Int
@@ -51,24 +45,6 @@ struct PullRequest: Decodable, Identifiable {
         let sha: String
         let ref: String
     }
-}
-
-struct PRReview: Decodable {
-    let state: String // APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING
-    let user: User?
-
-    struct User: Decodable {
-        let login: String
-    }
-}
-
-struct CheckRunsResponse: Decodable {
-    let checkRuns: [CheckRun]
-}
-
-struct CheckRun: Decodable {
-    let status: String // queued | in_progress | completed
-    let conclusion: String?
 }
 
 struct DiscoveredRepo: Decodable {

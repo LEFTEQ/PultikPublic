@@ -76,14 +76,33 @@ final class GitHubClientTests: XCTestCase {
         XCTAssertTrue(denied.confirmedRepos.isEmpty)
         XCTAssertNotNil(denied.warning)
     }
+
+    func testSpentGraphQLQuotaPausesTheEstateButNotRESTLookups() async throws {
+        let reset = String(Int(Date().timeIntervalSince1970) + 3600)
+        GitHubFixtureProtocol.fixture.reset(status: 200,
+            body: #"{"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}"#,
+            headers: ["X-RateLimit-Resource": "graphql", "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset])
+        let client = client()
+        do { _ = try await client.estate(repos: ["owner/a"]); XCTFail("a spent quota returned an estate") }
+        catch GitHubError.deferred {} // expected
+        GitHubFixtureProtocol.fixture.reset(status: 200)
+        let lookup = try await client.lookupPullRequests(number: 1744, repos: ["owner/a"])
+        XCTAssertEqual(lookup.hits.first?.number, 1744, "REST keeps its own quota")
+        XCTAssertEqual(GitHubFixtureProtocol.fixture.count, 1)
+    }
 }
 
 private final class GitHubFixture: @unchecked Sendable {
     private let lock = NSLock()
     private var requests = 0
     private var status = 200
+    private var override: (body: String, headers: [String: String])?
+    var response: (body: String, headers: [String: String])? { lock.lock(); defer { lock.unlock() }; return override }
     var count: Int { lock.lock(); defer { lock.unlock() }; return requests }
-    func reset(status: Int) { lock.lock(); defer { lock.unlock() }; requests = 0; self.status = status }
+    func reset(status: Int, body: String? = nil, headers: [String: String] = [:]) {
+        lock.lock(); defer { lock.unlock() }
+        requests = 0; self.status = status; override = body.map { ($0, headers) }
+    }
     func start() -> Int { lock.lock(); defer { lock.unlock() }; requests += 1; return status }
 }
 
@@ -96,12 +115,13 @@ private final class GitHubFixtureProtocol: URLProtocol, @unchecked Sendable {
         let status = Self.fixture.start()
         responseTask = Task {
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            let override = Self.fixture.response
             guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: status,
-                httpVersion: "HTTP/1.1", headerFields: status == 429 ? ["Retry-After": "120"] : [:]) else { return }
-            let body = status == 200 ? """
+                httpVersion: "HTTP/1.1", headerFields: override?.headers ?? (status == 429 ? ["Retry-After": "120"] : [:])) else { return }
+            let body = override?.body ?? (status == 200 ? """
                 {"number":1744,"title":"Cached search","html_url":"https://github.com/owner/a/pull/1744",
                  "state":"closed","merged_at":"2026-09-30T12:00:00Z","updated_at":"2026-09-30T12:00:00Z"}
-                """ : "{\"message\":\"fixture refusal\"}"
+                """ : "{\"message\":\"fixture refusal\"}")
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: Data(body.utf8))
             client?.urlProtocolDidFinishLoading(self)

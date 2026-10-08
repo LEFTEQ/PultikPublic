@@ -21,19 +21,21 @@ struct CIWidget: View {
 
     var body: some View {
         let glance = CIGlance(board: store.laneBoard, repos: store.repos)
-        VStack(alignment: .leading, spacing: 6) {
-            header(glance)
-            if showLanes, let pool = store.laneBoard.pool {
-                gauges(pool)
-                if let throughput = store.ciThroughput {
-                    dayLines(CIThroughputGlance(throughput))
-                }
-                if glance.queued > 0, !pool.refusals.isEmpty {
-                    refusalLine(pool.refusals)
+        GlanceGrid.tile {
+            VStack(alignment: .leading, spacing: 4) {
+                header(glance)
+                    .padding(.bottom, 2)
+                if showLanes, let pool = store.laneBoard.pool {
+                    gauges(pool)
+                    if let throughput = store.ciThroughput {
+                        dayRows(throughput)
+                    }
+                    if glance.queued > 0, !pool.refusals.isEmpty {
+                        refusalLine(pool.refusals)
+                    }
                 }
             }
         }
-        .padding(10)
         .contentShape(Rectangle())
         .onTapGesture { onOpen("") }
     }
@@ -72,18 +74,20 @@ struct CIWidget: View {
     /// newest controller reading is stale.
     private func gauges(_ pool: CIPool) -> some View {
         let poolGlance = CIPoolGlance(pool: pool)
-        return HStack(alignment: .top, spacing: 10) {
-            DevboxGauge(label: "SLOTS", fraction: Self.fraction(pool.slotsUsed, pool.slotsMax),
-                        value: "\(pool.slotsUsed)/\(pool.slotsMax)")
-            DevboxGauge(label: "POOL", fraction: Self.fraction(pool.reservedMiB, pool.budgetMiB),
-                        value: "\(Self.gib(pool.reservedMiB))/\(Self.gib(pool.budgetMiB))G",
-                        valueTone: poolGlance.full ? .orange : nil)
-            if let bastion = pool.bastion {
-                DevboxGauge(label: "BASTION", fraction: Self.fraction(bastion.reservedMiB, bastion.budgetMiB),
-                            value: "\(Self.gib(bastion.reservedMiB))/\(Self.gib(bastion.budgetMiB))G")
-            }
+        var cells = [
+            GlanceCell("\(pool.slotsUsed)/\(pool.slotsMax)", fraction: Self.fraction(pool.slotsUsed, pool.slotsMax)),
+            GlanceCell("\(Self.gib(pool.reservedMiB))/\(Self.gib(pool.budgetMiB))G",
+                       fraction: Self.fraction(pool.reservedMiB, pool.budgetMiB),
+                       tone: poolGlance.full ? .orange : nil),
+        ]
+        if let bastion = pool.bastion {
+            cells.append(GlanceCell("\(Self.gib(bastion.reservedMiB))/\(Self.gib(bastion.budgetMiB))G",
+                                    fraction: Self.fraction(bastion.reservedMiB, bastion.budgetMiB)))
         }
-        .padding(.horizontal, RailRowMetrics.inset)
+        return VStack(alignment: .leading, spacing: 2) {
+            GlanceHeads(titles: pool.bastion == nil ? ["slots", "pool"] : ["slots", "pool", "bastions"])
+            GlanceRow(name: "pools", cells: cells)
+        }
         .opacity(poolGlance.stale ? 0.5 : 1)
         .help(poolHelp(pool, glance: poolGlance))
     }
@@ -99,27 +103,33 @@ struct CIWidget: View {
         return lines.joined(separator: "\n")
     }
 
-    private func dayLines(_ day: CIThroughputGlance) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(day.wait ?? "no job finished yet today")
-                .foregroundStyle(day.waitSlow ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.tertiary))
-                .help("Today's queue wait — p50, p95 and the share over 5 minutes (Semafor); orange past a 2 min p95")
-            HStack(spacing: 5) {
-                Text(day.jobs).foregroundStyle(.secondary)
-                if let delta = day.delta {
-                    Text(delta)
-                        .foregroundStyle(.tertiary)
-                        .help("Against yesterday up to the same time")
-                }
-                Spacer(minLength: 4)
-                HourBars(values: day.hours)
-                    .help("Jobs per hour since midnight")
+    /// Semafor's day on the grid: the queue wait (p50 · p95 · share over
+    /// 5 m) and today's jobs against yesterday, the hours so far beneath.
+    private func dayRows(_ throughput: CIThroughput) -> some View {
+        let day = CIThroughputGlance(throughput)
+        var wait: [GlanceCell] = []
+        if let queue = throughput.queue {
+            wait = [GlanceCell("p50 \(CIThroughputGlance.duration(queue.p50))", tone: .secondary),
+                    GlanceCell("p95 \(CIThroughputGlance.duration(queue.p95))",
+                               tone: day.waitSlow ? .orange : .secondary)]
+            if let share = throughput.over300sShare {
+                wait.append(GlanceCell("\(CIThroughputGlance.percent(share)) > 5m", tone: .secondary))
             }
+        } else {
+            wait = [GlanceCell("none finished yet", tone: .secondary)]
         }
-        .font(RailRowMetrics.metaFont)
-        .monospacedDigit()
-        .lineLimit(1)
-        .padding(.horizontal, RailRowMetrics.inset)
+        var today = [GlanceCell("\(throughput.jobs) jobs")]
+        if let delta = day.delta {
+            today.append(GlanceCell(delta, tone: .secondary, help: "Against yesterday up to the same time"))
+        }
+        return VStack(alignment: .leading, spacing: 2) {
+            GlanceRow(name: "wait", cells: wait,
+                      help: "Today's queue wait — p50, p95 and the share over 5 minutes (Semafor); orange past a 2 min p95")
+            GlanceRow(name: "today", cells: today)
+            HourBars(values: day.hours, height: 14, barWidth: 4)
+                .padding(.leading, RailRowMetrics.inset + GlanceGrid.name + GlanceGrid.spacing)
+                .help("Jobs per hour since midnight")
+        }
     }
 
     /// Present only while jobs wait and lanes were refused: the two most

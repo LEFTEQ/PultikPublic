@@ -4,6 +4,7 @@ import CryptoKit
 enum GitHubError: LocalizedError {
     case http(Int, String)
     case deferred(Date)
+    case graphQL(String)
 
     var errorDescription: String? {
         switch self {
@@ -11,6 +12,8 @@ enum GitHubError: LocalizedError {
             return "GitHub API \(code) on \(path)"
         case .deferred(let until):
             return "GitHub polling paused to protect quota; retry after \(until.formatted(date: .omitted, time: .shortened))"
+        case .graphQL(let message):
+            return "GitHub GraphQL: \(message)"
         }
     }
 }
@@ -162,15 +165,15 @@ actor GitHubClient {
         } else { pending[key] = flight }
     }
 
-    private func performRequest(_ path: String, method: String, cache: Bool,
+    private func performRequest(_ path: String, method: String, body: Data? = nil, cache: Bool,
                                 priority: GitHubRequestQueue.Priority, polling: Bool, authorization: String) async throws -> Data {
-        let resource = path.hasPrefix("/search/") ? "search" : "core"
+        let resource = path.hasPrefix("/search/") ? "search" : path == "/graphql" ? "graphql" : "core"
         // Bind the credential before queueing. An account switch while this
         // request waits must not put the new account's data in the old cache.
         let slot = UUID()
         try await queue.acquire(id: slot, resource: resource, priority: priority)
         do {
-            let data = try await send(path, method: method, cache: cache, resource: resource,
+            let data = try await send(path, method: method, body: body, cache: cache, resource: resource,
                                       polling: polling, authorization: authorization)
             await queue.release(id: slot)
             return data
@@ -180,15 +183,20 @@ actor GitHubClient {
         }
     }
 
-    private func send(_ path: String, method: String, cache: Bool, resource: String,
+    private func send(_ path: String, method: String, body: Data? = nil, cache: Bool, resource: String,
                       polling: Bool, authorization: String) async throws -> Data {
         try Task.checkCancellation()
+        // A GraphQL POST is a read: it spends the read budget like any GET.
         if let until = budget.admit(resource: resource, polling: polling,
-                                    mutation: method != "GET", now: Date()) {
+                                    mutation: method != "GET" && resource != "graphql", now: Date()) {
             throw GitHubError.deferred(until)
         }
         var req = URLRequest(url: URL(string: "https://api.github.com" + path)!)
         req.httpMethod = method
+        if let body {
+            req.httpBody = body
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         req.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
@@ -256,7 +264,7 @@ actor GitHubClient {
             _ = try await request("/user", cache: false)
             return nil
         } catch {
-            return .classify(error)
+            return .tripping(error)
         }
     }
 
@@ -264,65 +272,44 @@ actor GitHubClient {
         try await fetch(WorkflowRunsResponse.self, "/repos/\(repo)/actions/runs?per_page=10", priority: .background).workflowRuns
     }
 
-    /// Latest deployment per environment, each with its most recent status.
-    func deployments(repo: String) async throws -> [DeployInfo] {
-        let deployments = try await fetch([Deployment].self, "/repos/\(repo)/deployments?per_page=10", priority: .background)
-        let latestPerEnv = Dictionary(grouping: deployments, by: \.environment)
-            .compactMap { $0.value.max(by: { $0.createdAt < $1.createdAt }) }
-            .sorted { $0.createdAt > $1.createdAt }
-
-        var infos: [DeployInfo] = []
-        for deployment in latestPerEnv.prefix(4) {
-            let statuses = try await fetch(
-                [DeploymentStatus].self,
-                "/repos/\(repo)/deployments/\(deployment.id)/statuses?per_page=1", priority: .background
-            )
-            let status = statuses.first
-            infos.append(DeployInfo(
-                deployment: deployment,
-                state: status?.state ?? "pending",
-                url: status?.environmentUrl ?? status?.targetUrl
-            ))
-        }
-        return infos
-    }
-
-    func pullRequests(repo: String) async throws -> [PRInfo] {
-        let prs = try await fetch([PullRequest].self, "/repos/\(repo)/pulls?state=open&per_page=5", priority: .background)
-        var infos: [PRInfo] = []
-        for pr in prs {
-            let checks = try await fetch(
-                CheckRunsResponse.self,
-                "/repos/\(repo)/commits/\(pr.head.sha)/check-runs?per_page=50", priority: .background
-            ).checkRuns
-            let state: CheckState
-            if checks.isEmpty {
-                state = .none
-            } else if checks.contains(where: { $0.status != "completed" }) {
-                state = .running
-            } else if checks.contains(where: { ["failure", "timed_out", "startup_failure"].contains($0.conclusion ?? "") }) {
-                state = .failure
-            } else {
-                state = .success
+    /// Inbox, deploy chips and the search delta for `repos`: one GraphQL read
+    /// per chunk instead of ~10 REST calls per repo. A failing chunk marks its
+    /// repos; every chunk failing throws, and so does a quota deferral, whose
+    /// deadline holds the remaining chunks too.
+    func estate(repos: [String]) async throws -> [String: GitHubEstate.Repo] {
+        var result: [String: GitHubEstate.Repo] = [:]
+        var failure: Error?
+        for start in stride(from: 0, to: repos.count, by: GitHubEstate.chunkSize) {
+            let chunk = Array(repos[start ..< min(start + GitHubEstate.chunkSize, repos.count)])
+            do {
+                let data = try await performRequest("/graphql", method: "POST", body: GitHubEstate.body(for: chunk),
+                                                    cache: false, priority: .background, polling: true,
+                                                    authorization: try tokenValue())
+                let answer = try GitHubEstate.decode(data, repos: chunk, decoder: decoder)
+                if answer.rateLimited {
+                    // send() already recorded this response's quota headers: a spent
+                    // primary quota pauses GraphQL alone. Only a limit without one is
+                    // secondary, which GitHub applies across every resource.
+                    if budget.blockedUntil(resource: "graphql", now: Date()) == nil {
+                        budget.observe(status: 429, resource: "graphql", remaining: nil, reset: nil,
+                                       retryAfter: nil, rateLimited: true, now: Date())
+                    }
+                    throw GitHubError.deferred(budget.blockedUntil(resource: "graphql", now: Date())
+                        ?? Date().addingTimeInterval(60))
+                }
+                result.merge(answer.repos) { $1 }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch GitHubError.deferred(let until) {
+                throw GitHubError.deferred(until)
+            } catch {
+                NSLog("pultik: GitHub estate chunk failed: %@", error.localizedDescription)
+                failure = error
+                for repo in chunk { result[repo] = GitHubEstate.Repo(error: error.localizedDescription) }
             }
-            infos.append(PRInfo(pr: pr, state: state, review: try await reviewState(repo: repo, number: pr.number)))
         }
-        return infos
-    }
-
-    /// Latest APPROVED/CHANGES_REQUESTED/DISMISSED review per reviewer;
-    /// changes-requested dominates, any approval counts, otherwise awaiting.
-    private func reviewState(repo: String, number: Int) async throws -> ReviewState {
-        let reviews = try await fetch([PRReview].self, "/repos/\(repo)/pulls/\(number)/reviews?per_page=50", priority: .background)
-        var latest: [String: String] = [:]
-        for review in reviews {
-            guard let login = review.user?.login,
-                  ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].contains(review.state) else { continue }
-            latest[login] = review.state
-        }
-        if latest.values.contains("CHANGES_REQUESTED") { return .changesRequested }
-        if latest.values.contains("APPROVED") { return .approved }
-        return .awaiting
+        if let failure, result.values.allSatisfy({ $0.error != nil }) { throw failure }
+        return result
     }
 
     func discoverRepos() async throws -> [String] {
@@ -479,7 +466,7 @@ actor GitHubClient {
                     } catch {
                         NSLog("pultik: issue #%d lookup on %@ failed: %@",
                               number, repo, error.localizedDescription)
-                        return (nil, .classify(error))
+                        return (nil, .tripping(error))
                     }
                 }
             }
@@ -519,7 +506,7 @@ actor GitHubClient {
             catch GitHubError.http(404, _) { confirmed.append(repo) }
             catch {
                 warning = error.localizedDescription
-                failure = .classify(error)
+                failure = .tripping(error)
                 NSLog("pultik: PR #%d lookup on %@ failed: %@", number, repo, error.localizedDescription)
                 // A known deadline applies to every remaining repo too.
                 if case GitHubError.deferred = error { break }
