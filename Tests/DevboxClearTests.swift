@@ -21,4 +21,28 @@ final class DevboxClearTests: XCTestCase {
         XCTAssertTrue(malformed.log.contains("unexpected output"))
         XCTAssertTrue(malformed.log.contains("connection refused"))
     }
+
+    func testSummaryJoinsStatusWithNumstatAndJudgesTheChosenAction() {
+        var preview = DevboxClearPreview(path: "/w", status: " M src/a.ts\nR  old.ts -> src/b.ts\n?? notes.md\nUU merge.ts\n",
+                                         diff: "", commits: "abc1234 feat: first\ndef5678 fix: second\n", canRemove: true, complete: true,
+                                         explanation: "", fingerprint: "", log: "")
+        preview.numstat = "12\t3\tsrc/a.ts\n-\t-\tsrc/b.ts\n"
+        preview.upstream = "origin/feat"
+        preview.changesRead = true
+        let summary = DevboxClearSummary(preview)
+        XCTAssertEqual(summary.files.map(\.kind), ["M", "R", "?", "U"])
+        XCTAssertEqual(summary.files[1].path, "src/b.ts")
+        XCTAssertNil(summary.files[1].added)
+        XCTAssertEqual([summary.added, summary.removed], [12, 3])
+        XCTAssertEqual(summary.commits.last, .init(sha: "def5678", subject: "fix: second"))
+        XCTAssertEqual(DevboxClearSummary.verdict([summary], action: .keep), .keepsWork)
+        XCTAssertEqual(DevboxClearSummary.verdict([summary], action: .discard), .discards(files: 4))
+        var clean = DevboxClearPreview(path: "/w", status: "", diff: "", commits: "", canRemove: true, complete: false,
+                                       explanation: "", fingerprint: "", log: "")
+        clean.changesRead = true
+        XCTAssertEqual(DevboxClearSummary.verdict([DevboxClearSummary(clean)], action: .discard), .clean)
+        XCTAssertEqual(DevboxClearSummary.verdict([DevboxClearSummary(clean), summary], action: .keep), .keepsWork)
+        clean.changesRead = false
+        XCTAssertEqual(DevboxClearSummary.verdict([DevboxClearSummary(clean)], action: .keep), .unread)
+    }
 }

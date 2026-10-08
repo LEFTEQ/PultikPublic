@@ -1,6 +1,6 @@
 import SwiftUI
 
-private enum OverviewURL {
+enum OverviewURL {
     static let githubPulls = URL(string: "https://github.com/pulls")!
     static let sentryIssues = URL(string: "https://sentry.ops.example.invalid/organizations/sentry/issues/")!
 
@@ -43,29 +43,10 @@ private struct FooterHeightKey: PreferenceKey {
     }
 }
 
-/// Intrinsic heights of the two side columns' scrollers — measured on their
-/// DEFINITE `ScrollColumn` frames, never on the stretched HStack cell. A
-/// stretched cell measures the panel's height, which includes the centre
-/// column itself: feeding that back into `centreCap` could never shrink, and
-/// a rail folding away would leave the panel ratcheted tall forever.
-private struct LeftColumnHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 /// The Devbox and Estate widgets' combined rendered height — the Vitrinka
 /// widget above them fits its recent boards into what they leave of the
 /// column budget.
 private struct MachineWidgetsHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-private struct RightRailsHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
@@ -180,7 +161,10 @@ struct StatusPanelView: View {
     /// summons until the idle release, so per-open work hangs off this, not
     /// off `onAppear`.
     let session: PanelSession
-    @State private var contentHeight: CGFloat = 200
+    /// Which of Home's PR folds are open — repo slugs for their ready lines,
+    /// `PRDigest.foldKey` for drafts · stale. Kept here, not in the tile, so
+    /// keyboard selection walks exactly the rows on screen.
+    @State private var homeExpanded: Set<String> = []
 
     @State private var query = ""
     @FocusState private var paletteFocused: Bool
@@ -254,7 +238,7 @@ struct StatusPanelView: View {
     /// ".t" → every todo, ".v" → every listener. Text after the mode token
     /// filters within the mode. Esc exits.
     enum PaletteMode: String, CaseIterable {
-        case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate, health
+        case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate, health, mac
 
         var title: String {
             switch self {
@@ -272,6 +256,7 @@ struct StatusPanelView: View {
             case .ci: "CI jobs"
             case .estate: "Estate"
             case .health: "Prod"
+            case .mac: "Mac health"
             }
         }
 
@@ -291,6 +276,7 @@ struct StatusPanelView: View {
             case .ci: "running jobs, queues and failed runs across lanes"
             case .estate: "servers and every service probe, with latency"
             case .health: "every prod deployment — checks, logs, issues, eve accounts"
+            case .mac: "this Mac — likely orphans, memory by family, network (toolkit)"
             }
         }
 
@@ -310,6 +296,7 @@ struct StatusPanelView: View {
             case .ci: "gearshape.2"
             case .estate: "server.rack"
             case .health: "waveform.path.ecg"
+            case .mac: "memorychip"
             }
         }
 
@@ -406,8 +393,9 @@ struct StatusPanelView: View {
     /// typing its mode.
     private var showLeftRail: Bool {
         guard showVitrinkaRail || !machineWidgets.isEmpty || hasAttentionRails else { return false }
-        let needed: CGFloat = 680 + 280 + (showServiceRail ? 280 : 0)
-        return PanelMetrics.shared.maxWidth >= needed
+        // Both side columns beside a usable centre; the fixed frame (D4) is
+        // at least 1240 pt, so only a screen narrower than that folds it.
+        return PanelMetrics.shared.panelSize.width >= Self.sideColumnWidth * 2 + 560
     }
 
     private var showVitrinkaRail: Bool {
@@ -433,6 +421,8 @@ struct StatusPanelView: View {
     @State private var unreadAlertsSnapshot: Set<Int> = []
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
     @State private var fanTicking = false
+    /// True while this panel holds MacHealthStore's re-read, the same way.
+    @State private var macHealthWatching = false
     @State private var presentedGeneration: Int?
     /// The right rail is the prod board (decision D2 C, 2026-10-03): one card
     /// per deployment over Hlídač, with links and notes as one reference line
@@ -450,25 +440,32 @@ struct StatusPanelView: View {
             || !notes.notes.isEmpty
     }
 
-    private var panelWidth: CGFloat {
-        680 + (showLeftRail ? 280 : 0) + (showServiceRail ? 280 : 0)
+    /// The side columns' width — the D5 glance grid is laid out against it.
+    static let sideColumnWidth: CGFloat = 300
+
+    /// Home (panel Home D2, 2026-10-07) owns the right region while nothing
+    /// is typed and nothing else is open; any query, mode, page or Eve reply
+    /// swaps it back to results beside the prod rail.
+    private var showsHome: Bool {
+        query.isEmpty && activeMode == nil && !showTodos && activeProject == nil
+            && eveAskedPrompt == nil
     }
 
-    /// Measured chrome, subtracted from the screen budget below.
+    /// Home's PR tile, folded (D3) — resolved-and-hidden PRs already gone.
+    private var homeDigest: PRDigest<StatusStore.InboxPR> {
+        PRDigest(filteredInbox, repo: \.repoSlug, info: \.info)
+    }
+
+    /// Measured chrome, subtracted from the panel's height below.
     @State private var footerHeight: CGFloat = 0
-    /// Tallest a column may be before it has to scroll: the working area of the
-    /// screen the panel is on (`PanelMetrics`), less the footer beneath it.
-    /// The floor keeps the hub usable on a very short screen rather than
-    /// collapsing the columns to nothing.
+    /// Tallest a column may be before it has to scroll: the panel's fixed
+    /// frame (`PanelMetrics.panelSize`, D4) less the footer beneath it. The
+    /// floor keeps the hub usable on a very short screen.
     private var columnBudget: CGFloat {
-        max(280, PanelMetrics.shared.maxHeight - footerHeight - 1)
+        max(280, PanelMetrics.shared.panelSize.height - footerHeight - 1)
     }
 
     @State private var centreChrome: CGFloat = 0
-    /// Intrinsic side-column heights — see LeftColumnHeightKey for why these
-    /// are measured on the scrollers, not the stretched HStack cells.
-    @State private var leftColumnHeight: CGFloat = 0
-    @State private var rightRailsHeight: CGFloat = 0
     /// The Devbox, CI, Estate and This Mac widgets as rendered — what the
     /// Vitrinka widget's recent boards must leave room for.
     @State private var machineWidgetsHeight: CGFloat = 0
@@ -487,14 +484,6 @@ struct StatusPanelView: View {
         return widgets
     }
 
-    /// The centre list keeps its 560pt design cap on a roomy screen and gives
-    /// it up only when the screen is shorter than that — or when a side rail
-    /// has already made the panel taller: the panel's height is set by its
-    /// tallest column, so a capped centre would just leave a dead zone under
-    /// its last row while rows sit unread behind its scroller (2026-09-01).
-    /// The screen budget still wins over both. The palette and the pinned
-    /// strips are stacked outside this frame, so every bound subtracts them
-    /// first or the column would overrun the cap it is supposed to obey.
     /// The overview column (spec 2026-09-23, 2026-09-27): Vitrinka · Devbox ·
     /// CI · Estate · This Mac in that fixed order, hairlines only between
     /// widgets that draw. The machine widgets are content-sized and measured;
@@ -507,66 +496,36 @@ struct StatusPanelView: View {
     /// Vitrinka, or the two would chase.
     @ViewBuilder
     private var leftColumn: some View {
-        if showProdBoard {
-            compactLeftColumn
-        } else {
-            fullLeftColumn
-        }
-    }
-
-    /// Decision D2 C (2026-10-03): with the prod board on the right rail the
-    /// widgets draw one line each, so reminders, estate firing and eve alerts
-    /// sit beneath them without scrolling. Content-sized: Vitrinka has no
-    /// budget to flex here, so nothing is measured and nothing can chase.
-    private var compactLeftColumn: some View {
         let machines = machineWidgets
-        return VStack(spacing: 0) {
-            CompactOverview(store: store, fanStore: FanStore.shared,
-                            showVitrinka: showVitrinkaRail,
-                            showDevbox: machines.contains(.devbox),
-                            showCI: machines.contains(.ci),
-                            showEstate: machines.contains(.estate),
-                            showMac: machines.contains(.mac),
-                            onWork: { enterMode(.work) },
-                            onDevbox: { enterMode(.devbox) },
-                            onCI: { enterMode(.ci) },
-                            onEstate: { enterMode(.estate) },
-                            onFans: { enterMode(.fans) })
-                .padding(.vertical, 4)
-            if hasAttentionRails {
-                hairline
-                attentionRails
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var fullLeftColumn: some View {
-        let machines = machineWidgets
-        VStack(spacing: 0) {
+        let gap = TileMetrics.gap
+        VStack(spacing: gap) {
             if showVitrinkaRail {
                 // Until the machine widgets have been measured, Vitrinka keeps
                 // its floor: a cold tree's first pass must not fill the whole
                 // budget with recents and hand the window an over-tall fit.
+                // The column's padding and the gap below it come off too.
                 let below = !machines.isEmpty || hasAttentionRails
                 VitrinkaWidget(store: store, snapshots: store.vitrinkaWorkspaces,
                                maxHeight: below && machineWidgetsHeight == 0 ? 0
-                                   : max(0, columnBudget - machineWidgetsHeight
-                                       - (below ? 1 : 0)),
+                                   : max(0, columnBudget - machineWidgetsHeight - gap * 2
+                                       - (below ? gap : 0)),
                                onOpenWork: { enterMode(.work, filter: $0) },
                                onOpenBoards: { enterMode(.boards) })
-                if !machines.isEmpty || hasAttentionRails { hairline }
             }
             // The attention rails sit in the measured block: Vitrinka's recent
             // boards must leave room for them exactly as for the machines.
-            VStack(spacing: 0) {
-                ForEach(Array(machines.enumerated()), id: \.element) { index, widget in
-                    if index > 0 { hairline }
+            VStack(spacing: gap) {
+                ForEach(machines, id: \.self) { widget in
                     machineWidget(widget)
                 }
                 if hasAttentionRails {
-                    if !machines.isEmpty { hairline }
                     attentionRails
+                }
+                // Home hides the right rail, whose foot this was.
+                if showsHome, !links.links.isEmpty || !notes.notes.isEmpty {
+                    RailFoot(links: links.ordered, notes: notes.notes.count,
+                             onOpenLink: { openLink($0) },
+                             onOpenNotes: { enterMode(.notes) })
                 }
             }
             .background(
@@ -576,6 +535,7 @@ struct StatusPanelView: View {
                 }
             )
         }
+        .padding(gap)
     }
 
     @ViewBuilder
@@ -586,21 +546,17 @@ struct StatusPanelView: View {
         case .ci:
             CIWidget(store: store, onOpen: { enterMode(.ci, filter: $0) })
         case .estate:
-            // Estate carries no outer padding of its own (it grew out of a
-            // padded rail section); the column gives it the same 10pt the
-            // other widgets keep.
             EstateWidget(store: store, onOpen: { enterMode(.estate, filter: $0) })
-                .padding(10)
         case .mac:
-            MacWidget(store: store, fanStore: FanStore.shared)
+            MacWidget(store: store, fanStore: FanStore.shared, onHealth: { enterMode(.mac) })
         }
     }
 
+    /// The centre's list height: the fixed frame less the palette and the
+    /// pinned strips stacked around it (D4 — the old 560 pt design cap and
+    /// the tallest-side stretch went with content sizing).
     private var centreCap: CGFloat {
-        let budget = max(160, columnBudget - centreChrome)
-        let design = min(560, budget)
-        let tallestSide = max(leftColumnHeight, rightRailsHeight)
-        return max(design, min(max(0, tallestSide - centreChrome), budget))
+        max(160, columnBudget - centreChrome)
     }
 
     var body: some View {
@@ -610,13 +566,7 @@ struct StatusPanelView: View {
                     ScrollColumn(maxHeight: columnBudget) {
                         leftColumn
                     }
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(key: LeftColumnHeightKey.self,
-                                                   value: proxy.size.height)
-                        }
-                    )
-                    .frame(width: 280)
+                    .frame(width: Self.sideColumnWidth)
                     // A fixed-width frame centers (never clips) an oversized
                     // child, so any row that escapes the rail would bleed into
                     // the centre column — clip here so it can't, whatever the
@@ -624,29 +574,27 @@ struct StatusPanelView: View {
                     .clipped()
                     hairlineV
                 }
+                // Home takes the centre and the right rail's room (D2); the
+                // prod rail returns beside any results.
                 centerColumn
-                    .frame(width: 680)
-                if showServiceRail {
+                    .frame(maxWidth: .infinity)
+                if showServiceRail, !showsHome {
                     hairlineV
                     ScrollColumn(maxHeight: columnBudget) {
                         railsColumn
                     }
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(key: RightRailsHeightKey.self,
-                                                   value: proxy.size.height)
-                        }
-                    )
-                    .frame(width: 280)
+                    .frame(width: Self.sideColumnWidth)
                     .clipped()
                 }
             }
+            .frame(maxHeight: .infinity, alignment: .top)
             hairline
             PanelFooter(
                 store: store,
                 eveOnline: eveOnline,
                 todoCount: todoStore.openTodos.count,
-                onTodos: { showTodos = true }
+                onTodos: { showTodos = true },
+                onMacHealth: { enterMode(.mac) }
             )
             .background(
                 GeometryReader { proxy in
@@ -655,19 +603,12 @@ struct StatusPanelView: View {
             )
         }
         .environment(\.panelIsPresented, session.isPresented)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(width: panelWidth)
+        // One fixed frame (D4): the window takes this size and content never
+        // resizes it.
+        .frame(width: PanelMetrics.shared.panelSize.width, height: PanelMetrics.shared.panelSize.height)
         .onPreferenceChange(FooterHeightKey.self) { value in
             let rounded = value.rounded()
             if abs(rounded - footerHeight) >= 1 { footerHeight = rounded }
-        }
-        .onPreferenceChange(LeftColumnHeightKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - leftColumnHeight) >= 1 { leftColumnHeight = rounded }
-        }
-        .onPreferenceChange(RightRailsHeightKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - rightRailsHeight) >= 1 { rightRailsHeight = rounded }
         }
         .onPreferenceChange(MachineWidgetsHeightKey.self) { value in
             // Rounded UP: Vitrinka fits into the budget less this, and the
@@ -776,6 +717,11 @@ struct StatusPanelView: View {
             FanStore.shared.startTicking()
             fanTicking = true
         }
+        // toolkit republishes once a minute; read on open, re-read while up.
+        if !macHealthWatching {
+            MacHealthStore.shared.startWatching()
+            macHealthWatching = true
+        }
     }
 
     /// Is `generation` still the open on screen? Async work started by a
@@ -797,6 +743,10 @@ struct StatusPanelView: View {
         if fanTicking {
             FanStore.shared.stopTicking()
             fanTicking = false
+        }
+        if macHealthWatching {
+            MacHealthStore.shared.stopWatching()
+            macHealthWatching = false
         }
         paletteFocused = false
         query = ""
@@ -826,7 +776,7 @@ struct StatusPanelView: View {
     /// measured (RightRailsHeightKey) without burying the GeometryReader
     /// eight indentation levels deep in the body.
     private var railsColumn: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: TileMetrics.gap) {
             // F4: settings problems stand on their own above the board — a
             // folded or hidden board must not hide a broken settings.json.
             let issues = store.prodConfigIssues
@@ -861,6 +811,7 @@ struct StatusPanelView: View {
                          onOpenNotes: { enterMode(.notes) })
             }
         }
+        .padding(TileMetrics.gap)
     }
 
     /// Reminders, estate firing and eve alerts — what needs you that is not a
@@ -996,12 +947,12 @@ struct StatusPanelView: View {
                 ProjectPageView(project: project, store: store) { activeProject = nil }
                     .frame(height: centreCap)
             } else {
-                if store.pinned.isEmpty && query.isEmpty {
-                    emptyState
+                if showsHome {
+                    home
+                        .frame(height: centreCap)
                 } else {
-                    // A ScrollView in a borderless panel has no height to fill —
-                    // measure the content and size the viewport to it, capped at
-                    // `centreCap` (the 560pt design cap, or the screen if shorter).
+                    // The fixed frame (D4) gives the list a definite height:
+                    // it fills what the palette and strips leave.
                     ScrollViewReader { scroller in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 2) {
@@ -1012,21 +963,8 @@ struct StatusPanelView: View {
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 8)
-                            .background(
-                                GeometryReader { proxy in
-                                    Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
-                                }
-                            )
                         }
-                        // Sub-point jitter here is expensive, not cosmetic: every
-                        // write re-renders the panel AND resizes the window, which
-                        // re-pins it (StatusPanel.applyPin). Quantise to whole
-                        // points so scrolling can't drive a resize feedback loop.
-                        .onPreferenceChange(ContentHeightKey.self) { measured in
-                            let rounded = measured.rounded()
-                            if abs(rounded - contentHeight) >= 1 { contentHeight = rounded }
-                        }
-                        .frame(height: min(max(contentHeight, eveAskedPrompt != nil ? 320 : 0), centreCap))
+                        .frame(height: centreCap)
                         // Arrowing past the viewport must pull the row into it;
                         // the palette and prod strip live outside this scroller
                         // and are always on screen, so their ids simply miss.
@@ -1126,6 +1064,10 @@ struct StatusPanelView: View {
             guard handleKey(event, synthetic: true) != nil else { return }
             if name == "enter" { submitPalette() }
             if name == "esc" { escapeOneLayer() }
+        case "home-toggle":
+            let text = info["text"] as? String ?? ""
+            let key = text == "fold" ? PRDigest<StatusStore.InboxPR>.foldKey : text
+            if homeExpanded.contains(key) { homeExpanded.remove(key) } else { homeExpanded.insert(key) }
         case "paste":
             // ⌘V's real route: the monitor first, then the field editor.
             guard let event = PanelDriver.keyEvent(named: "v", mods: "cmd"),
@@ -1141,6 +1083,13 @@ struct StatusPanelView: View {
                 "activeMode": activeMode?.mode.rawValue ?? NSNull(),
                 "prodExpanded": prodExpandedKey ?? NSNull(),
                 "eveAskedPrompt": eveAskedPrompt ?? NSNull(),
+                // Panel Home: which region shows, its open folds and the rows
+                // the keyboard walks, the prod rail beside results, the frame.
+                "home": showsHome,
+                "homeExpanded": homeExpanded.sorted(),
+                "homeRows": showsHome ? homeDigest.visible(expanded: homeExpanded).map { "pr:\($0.id)" } : [],
+                "prodRail": showServiceRail && !showsHome,
+                "panelSize": [PanelMetrics.shared.panelSize.width, PanelMetrics.shared.panelSize.height],
                 "prSearchIDs": store.searchMatches.map(\.id),
                 "prSearchError": store.searchError ?? NSNull(),
                 "prSearchPartial": store.searchIsPartial,
@@ -1319,7 +1268,7 @@ struct StatusPanelView: View {
                 if let note = modeNotes(filter).first { toggleNote(note) } else { createNote(filter) }
             case .fans:
                 break // the deck is controls, not a result list — ↵ is a no-op
-            case .work, .devbox, .ci, .estate, .health:
+            case .work, .devbox, .ci, .estate, .health, .mac:
                 break // overview pages are mouse-first (spec 2026-09-23) — ↵ is a no-op
             case .organize:
                 // Bare ↵ runs "default" (names() sorts it first); unmatched
@@ -1448,7 +1397,7 @@ struct StatusPanelView: View {
                         toggleNote(note)
                     }
                 }
-            case .fans, .work, .devbox, .ci, .estate, .health:
+            case .fans, .work, .devbox, .ci, .estate, .health, .mac:
                 return []
             case .organize:
                 return modeOrganize(filter).map { name in
@@ -1486,6 +1435,12 @@ struct StatusPanelView: View {
         guard !(store.pinned.isEmpty && query.isEmpty) else { return items }
         // Matching the visual order exactly: PRs in fixed repo order, todos,
         // archive, then the pinned strips at the foot — prod, links.
+        // Home (D3) walks only the PR rows it draws: folded lines stay folded.
+        if showsHome {
+            return items + homeDigest.visible(expanded: homeExpanded).map { entry in
+                PaletteItem(id: "pr:\(entry.id)") { Self.open(entry.info.pr.htmlUrl) }
+            }
+        }
         for entry in filteredInbox {
             items.append(PaletteItem(id: "pr:\(entry.id)") {
                 Self.open(entry.info.pr.htmlUrl)
@@ -1613,6 +1568,8 @@ struct StatusPanelView: View {
             EstatePage(store: store, filter: filter) { query = "" }
         case .health:
             ProdMatrixPage(store: store, filter: filter) { query = "" }
+        case .mac:
+            MacHealthPage(health: MacHealthStore.shared, filter: filter) { query = "" }
         }
     }
 
@@ -2313,6 +2270,37 @@ struct StatusPanelView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(note.text, forType: .string)
         commandNotice = .ok("copied the note")
+    }
+
+    // MARK: - Home
+
+    /// Home's bento (D2): fixed slots, a tile hidden when its backend is off
+    /// the mesh — Production excepted while Hlídač is configured, it reads
+    /// blind rather than vanishing.
+    private var home: some View {
+        HomeView(
+            showProd: showProdBoard || !store.prodConfigIssues.isEmpty
+                || (!prodSentryLive && !railProdIssues.isEmpty),
+            showCI: CITile.isShown(store: store),
+            showDevbox: DevboxTile.isShown(store: store),
+            prod: {
+                ProdTile(glance: showProdBoard ? store.prodGlance : ProdGlance(cards: [], waiting: nil),
+                         configIssues: store.prodConfigIssues,
+                         sentryIssues: prodSentryLive ? [] : railProdIssues,
+                         isResolved: { resolvedStore.isResolved("prod:\($0.id)") },
+                         now: Date(), onOpen: { enterMode(.health, filter: $0) })
+            },
+            prs: {
+                if store.pinned.isEmpty {
+                    emptyState.tileSurface()
+                } else {
+                    PRDigestTile(digest: homeDigest, expanded: $homeExpanded, selectedID: selectedID,
+                                 isResolved: { resolvedStore.isResolved($0) })
+                }
+            },
+            ci: { CITile(store: store, onOpen: { enterMode(.ci, filter: $0) }) },
+            devbox: { DevboxTile(store: store, onOpen: { enterMode(.devbox, filter: $0) }) }
+        )
     }
 
     // MARK: - Empty state

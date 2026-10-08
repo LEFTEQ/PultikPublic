@@ -326,7 +326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("pultik: debug capture — panel is not open")
             return
         }
-        PanelDriver.capture(window: panel, to: path)
+        // Popovers (Clear this) live in their own windows; composite them over the panel.
+        let popovers = NSApp.windows.filter { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+        PanelDriver.capture(window: panel, also: popovers, to: path)
     }
     #endif
 

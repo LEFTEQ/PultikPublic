@@ -13,7 +13,7 @@ struct GitHubRequestBudget {
     private var secondaryFailures = 0
     private var lowQuotaUntil: [String: Date] = [:]
 
-    init(hourlyLimit: Int = 500, readLimit: Int = 1_000) {
+    init(hourlyLimit: Int = 3_000, readLimit: Int = 4_000) {
         self.hourlyLimit = max(1, hourlyLimit)
         self.readLimit = max(1, readLimit)
     }

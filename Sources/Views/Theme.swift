@@ -1,11 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Native dense dev-tool language (redesign 2026-07-22): flat dark surfaces,
-/// hairlines, SF Symbols, monospaced numerics — Instruments/Xcode-organizer
-/// density. The warm-ink vitrinka glass is retired; system semantic colors
-/// carry state, the red accent survives only for brand moments (✦ eve, quick
-/// commands).
+/// claude-switcheroo's iOS 26 language (panel Home, 2026-10-07 D6): one glass
+/// panel, quiet tiles on it, sentence-case titles with a trailing caption, SF
+/// Pro text with monospaced digits only. System semantic colors carry state;
+/// the red accent survives only for brand moments (✦ eve, quick commands).
 enum Theme {
     static let accent = Color(red: 1.0, green: 0.231, blue: 0.341)          // #ff3b57
     static let accentSoft = accent.opacity(0.10)
@@ -13,7 +12,62 @@ enum Theme {
     static let eve = Color(red: 0.749, green: 0.353, blue: 0.949)           // #bf5af2
     static let eveSoft = eve.opacity(0.12)
     static let hairline = Color.white.opacity(0.08)
-    static let panelRadius: CGFloat = 14
+    static let panelRadius: CGFloat = 20
+}
+
+/// The numbers behind a tile — a Home tile or a glance — so both sit on one
+/// rhythm (Switcheroo's `arcadeTile`: radius 16, 14pt padding, no stroke).
+enum TileMetrics {
+    static let radius: CGFloat = 16
+    static let padding: CGFloat = 14
+    /// Between tiles, and between a tile and the panel's edge.
+    static let gap: CGFloat = 10
+    static let fill = Color.white.opacity(0.055)
+    static let titleFont = Font.system(size: 12, weight: .semibold)
+    static let captionFont = Font.system(size: 10.5).monospacedDigit()
+    /// The one big number a tile leads with.
+    static let heroFont = Font.system(size: 28, weight: .bold, design: .rounded).monospacedDigit()
+    static let heroUnitFont = Font.system(size: 11)
+}
+
+extension View {
+    /// A tile: a quiet fill on the panel's glass. Not a second glass layer —
+    /// glass on glass reads muddy, and the panel is already the one material.
+    func tileSurface(padding: CGFloat = TileMetrics.padding) -> some View {
+        self
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(TileMetrics.fill,
+                        in: RoundedRectangle(cornerRadius: TileMetrics.radius, style: .continuous))
+    }
+}
+
+/// A tile's heading row (Switcheroo's `ArcadeTileHeader`): the title, and a
+/// quiet caption on the trailing edge. The title is a `Kicker`, so a tile
+/// that opens a page keeps the same hit target and hover affordance.
+struct TileHeader: View {
+    let title: String
+    var count: Int = 0
+    var tone: Color = .secondary
+    var caption: String?
+    var captionTone: Color = .secondary
+    var action: (() -> Void)?
+    var actionRole: KickerActionRole = .button
+    var actionHelp: String?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Kicker(text: title, count: count, tone: tone, action: action,
+                   actionRole: actionRole, actionHelp: actionHelp)
+            Spacer(minLength: 0)
+            if let caption {
+                Text(caption)
+                    .font(TileMetrics.captionFont)
+                    .foregroundStyle(captionTone)
+                    .lineLimit(1)
+            }
+        }
+    }
 }
 
 enum KickerActionRole {
@@ -21,7 +75,9 @@ enum KickerActionRole {
     case link
 }
 
-/// Mono uppercase micro-label — the section header of the dense panel.
+/// The section title of the panel: sentence case, SF Pro semibold, primary
+/// unless a tone says something needs you (D6, 2026-10-07 — the uppercase
+/// mono micro-label retired).
 struct Kicker: View {
     let text: String
     var count: Int = 0
@@ -57,28 +113,33 @@ struct Kicker: View {
     }
 
     private func label(actionRole: KickerActionRole?) -> some View {
-        HStack(spacing: 6) {
-            Text(text.uppercased())
-                .kerning(1.2)
-                .foregroundStyle(tone)
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(text)
+                .font(TileMetrics.titleFont)
+                .foregroundStyle(titleTone)
+                .lineLimit(1)
             if count > 0 {
                 Text("\(count)")
-                    .kerning(0)
+                    .font(.system(size: 10, weight: .semibold))
                     .monospacedDigit()
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
-                    .background(tone.opacity(0.15), in: Capsule())
-                    .foregroundStyle(tone)
+                    .background(countTone.opacity(0.16), in: Capsule())
+                    .foregroundStyle(countTone)
             }
             if let actionRole {
                 Image(systemName: actionRole == .link ? "arrow.up.right" : "chevron.right")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(tone)
-                    .opacity(hovering ? 0.8 : 0.28)
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .opacity(hovering ? 0.9 : 0.35)
             }
         }
-        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
     }
+
+    /// A quiet title reads primary; an attention tone (orange, red) colours
+    /// the title itself, the way the old kicker did.
+    private var titleTone: Color { tone == .secondary ? .primary : tone }
+    private var countTone: Color { tone == .secondary ? .secondary : tone }
 }
 
 /// A capsule count on a rail row's trailing edge — open questions, open
@@ -176,8 +237,10 @@ struct RailRow: View {
 /// The numbers behind `RailRow`, shared with the devbox card so a workspace
 /// line and a board line sit on the same grid.
 enum RailRowMetrics {
-    static let titleFont = Font.system(size: 10.5)
-    static let metaFont = Font.system(size: 9, design: .monospaced)
+    static let titleFont = Font.system(size: 11)
+    /// SF Pro with tabular digits (D6): numbers still line up, words read
+    /// as words.
+    static let metaFont = Font.system(size: 10).monospacedDigit()
     static let dotSize: CGFloat = 6
     static let dotGap: CGFloat = 6
     static let inset: CGFloat = 8
@@ -280,7 +343,7 @@ struct RailSection<Content: View>: View {
                     Spacer(minLength: 0)
                     accessory
                 }
-                .padding(.horizontal, 2)
+                .padding(.horizontal, RailRowMetrics.inset)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -292,6 +355,8 @@ struct RailSection<Content: View>: View {
 
             if !collapsed { content() }
         }
-        .padding(10)
+        // A tile like the glances (D6), on their padding, so a rail's rows
+        // start where a glance's do.
+        .glanceTile()
     }
 }

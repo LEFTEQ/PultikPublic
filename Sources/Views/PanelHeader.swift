@@ -16,6 +16,8 @@ struct PanelFooter: View {
     let eveOnline: Bool?
     var todoCount: Int = 0
     var onTodos: () -> Void = {}
+    var macHealth: MacHealthStore = .shared
+    var onMacHealth: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 12) {
@@ -38,6 +40,9 @@ struct PanelFooter: View {
                 .help("\(todoCount) open todo\(todoCount == 1 ? "" : "s") — pultik-memory")
             }
             Spacer(minLength: 8)
+            if let chip = macHealth.status.chip {
+                MacHealthFooterChip(chip: chip, onOpen: onMacHealth)
+            }
             EveSummary(sessions: store.eveSessions, online: eveOnline)
             refreshState
             actions
@@ -196,5 +201,34 @@ struct EveSummary: View {
             let state = session.status ?? "?"
             return "\(state) — \(session.prompt?.prefix(60) ?? "session \(session.id)")"
         }.joined(separator: "\n")
+    }
+}
+
+// MARK: - Mac health
+
+/// toolkit's Mac health headline, verbatim — only while a fresh report flags
+/// something (`MacHealthStatus.chip`); a healthy Mac or a silent watch
+/// draws nothing. The hover lists the worst findings, a click opens `.mac`.
+struct MacHealthFooterChip: View {
+    let chip: MacHealthChip
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(MacHealthTone.color(chip.severity))
+                    .frame(width: 6, height: 6)
+                Text(chip.text)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(chip.help)
+        .accessibilityLabel("Mac health: \(chip.text)")
     }
 }

@@ -8,7 +8,7 @@
 #   tools/panel-drive.sh query '<text>'            # set the palette text
 #   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V)
 #   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc
-#   tools/panel-drive.sh capture /tmp/panel.png    # the panel window as PNG
+#   tools/panel-drive.sh capture /tmp/panel.png    # the panel window (+ any open popover) as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette state as JSON (prints it)
 #   tools/panel-drive.sh metrics [/tmp/mem.json]   # footprint + summon time, also hidden
 #   tools/panel-drive.sh github-pause             # simulate a GitHub breaker pause (Debug only)
@@ -17,6 +17,8 @@
 #   tools/panel-drive.sh firing 'DiskFull,warning:Slow'  # inject firing alerts (critical unless prefixed); '' clears
 #   tools/panel-drive.sh clear-preview '<workspace>' # open the Clear this preview
 #   tools/panel-drive.sh clear-action '<action>'     # keep|backup|discard|clear|inspect|refresh|show-log|show-changes|close
+#   tools/panel-drive.sh mac-stop '<finding id>'      # open a .mac finding's Stop… confirm (never confirms it)
+#   tools/panel-drive.sh home-toggle '<owner/repo>'   # open/close a Home ready line ('fold' = drafts · stale)
 #   PULTIK_DEVBOX_EXECUTABLE can select a test CLI in Debug; a disposable
 #   PULTIK_CLEAR_FIXTURE_PATH enables the clear-fixture preview for native QA.
 #
@@ -27,7 +29,7 @@ set -euo pipefail
 cmd="${1:-}"; shift || true
 case "$cmd" in
   open|close|github-pause|github-resume) ;;
-  query|clear-preview|clear-action) PD_TEXT="${1-}" ;;
+  query|clear-preview|clear-action|mac-stop|home-toggle) PD_TEXT="${1-}" ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}" ;;
   capture) PD_PATH="${1:?png path}" ;;
@@ -35,7 +37,7 @@ case "$cmd" in
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
   frame) ;;
   firing) PD_TEXT="${1-}" ;;
-  *) sed -n '2,17p' "$0"; exit 2 ;;
+  *) sed -n '2,21p' "$0"; exit 2 ;;
 esac
 
 post() {

@@ -12,5 +12,11 @@ final class PanelTestDisplayTests: XCTestCase {
         XCTAssertNil(PanelTestDisplay.preferredIndex(in: ["Built-in Retina Display", "Pro Display XDR"]))
         XCTAssertNil(PanelTestDisplay.preferredIndex(in: []))
     }
+
+    func testNamedScreenOverridesTheStudioDisplay() {
+        let screens = ["Studio Display", "Pro Display XDR"]
+        XCTAssertEqual(PanelTestDisplay.preferredIndex(in: screens, override: "Pro Display XDR"), 1)
+        XCTAssertEqual(PanelTestDisplay.preferredIndex(in: screens, override: "Gone"), 0)
+    }
 }
 #endif

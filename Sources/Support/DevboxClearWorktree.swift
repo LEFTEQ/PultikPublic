@@ -28,7 +28,8 @@ struct DevboxClearWorktree: Sendable {
         let unstaged = git(["-C", path, "diff"] + diffArgs)
         let diff = [("Staged changes", staged.stdout), ("Unstaged changes", unstaged.stdout)]
             .filter { !$0.1.isEmpty }.map { "\($0.0)\n\($0.1)" }.joined(separator: "\n")
-        let upstream = git(["-C", path, "rev-parse", "--verify", "@{upstream}"])
+        let numstat = git(["-C", path, "diff", "HEAD", "--numstat", "--no-renames"] + diffArgs)
+        let upstream = git(["-C", path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
         let commits = upstream.ok ? git(["-C", path, "log", "--oneline", "@{upstream}..HEAD"])
             : git(["-C", path, "log", "--oneline", "HEAD", "--not", "--remotes"])
         let common = git(["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"])
@@ -86,9 +87,13 @@ struct DevboxClearWorktree: Sendable {
         let fingerprint = status.stdout + diff + commits.stdout + stamp.joined(separator: "\n") + identity.stdout + branch.stdout + common.stdout + index.stdout + indexFlags.stdout
         let identityErrors = [common.stderr, top.stderr, gitDir.stderr, identity.stderr, branch.stderr, index.stderr, indexFlags.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
         let log = "$ git status --short\n\(status.stdout)\(status.stderr)\n$ git diff --cached / git diff (secret files excluded)\n\(diff)\(staged.stderr)\(unstaged.stderr)\n$ git log (local commits; remote refs may be stale)\n\(commits.stdout)\(commits.stderr)\nDeletion guard: \(inventory.count) tracked, untracked and ignored paths inspected.\n\(names.stderr)\(ignored.stderr)\(inspectionErrors.joined(separator: "\n"))\nGit identity/index inspection:\n\(identityErrors)"
-        return DevboxClearPreview(path: path, status: status.stdout, diff: diff, commits: commits.stdout,
-                                  canRemove: linked && anchored, complete: complete,
-                                  explanation: explanation, fingerprint: fingerprint, log: log)
+        var preview = DevboxClearPreview(path: path, status: status.stdout, diff: diff, commits: commits.stdout,
+                                         canRemove: linked && anchored, complete: complete,
+                                         explanation: explanation, fingerprint: fingerprint, log: log)
+        preview.numstat = numstat.ok ? numstat.stdout : ""
+        preview.upstream = upstream.ok ? upstream.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        preview.changesRead = status.ok && staged.ok && unstaged.ok && commits.ok
+        return preview
     }
 
     func remove(_ preview: DevboxClearPreview, source: DevboxClearSourceAction, after report: DevboxClearReport) -> DevboxClearReport {

@@ -138,9 +138,9 @@ enum VitrinkaCLI {
             inPipe.fileHandleForWriting.closeFile()
         }
         do { try process.run() } catch { return Output(status: -1, stdout: "", stderr: "\(error)") }
-        process.waitUntilExit()
-        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let (outData, errData) = ProcessOutput.collect(process, stdout: outPipe, stderr: errPipe)
+        let out = String(data: outData, encoding: .utf8) ?? ""
+        let err = String(data: errData, encoding: .utf8) ?? ""
         return Output(status: process.terminationStatus, stdout: out, stderr: err)
     }
 }

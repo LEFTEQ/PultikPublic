@@ -68,6 +68,9 @@ struct StateChip: View {
 struct InboxPRRow: View {
     let entry: StatusStore.InboxPR
     var selected = false
+    /// Off inside a repo-grouped list (Home's PR tile), where the group
+    /// heading already names the repo.
+    var showsRepo = true
     @Environment(\.panelIsPresented) private var panelIsPresented
 
     private var info: PRInfo { entry.info }
@@ -76,13 +79,15 @@ struct InboxPRRow: View {
         HStack(spacing: 7) {
             stateGlyph
                 .frame(width: 14)
-            Text(entry.repoName)
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(.secondary)
+            if showsRepo {
+                Text(entry.repoName)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
             // verbatim: interpolated Ints in a plain Text go through the
             // locale formatter, which groups thousands — "#1 069" on cs-CZ.
             Text(verbatim: "#\(info.pr.number)")
-                .font(.system(size: 10.5, design: .monospaced))
+                .font(.system(size: 11))
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
             Text(info.pr.title)

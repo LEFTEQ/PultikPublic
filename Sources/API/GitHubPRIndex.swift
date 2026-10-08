@@ -114,6 +114,8 @@ struct GitHubPRIndex: Codable {
     }
 
     mutating func ingest(_ hits: [ArchivedPR], now: Date) {
+        var changed: Set<String> = []
+        defer { forgetQueries(containing: changed) }
         for pr in hits {
             if let source = pr.sourceRepoSlug { aliases[source.lowercased()] = pr.repoSlug.lowercased() }
             let id = pr.id.lowercased()
@@ -125,6 +127,9 @@ struct GitHubPRIndex: Codable {
             // Search responses omit the branch; preserve the richer lookup
             // metadata instead of making local branch filters forget it.
             if metadata.branch == nil { metadata.branch = records[id]?.pr.branch ?? redirected?.pr.branch }
+            if let previous = records[id]?.pr, previous.title != metadata.title || previous.outcome != metadata.outcome {
+                changed.insert(id)
+            }
             records[id] = Record(pr: metadata, fetchedAt: now)
         }
         if records.count > Self.recordLimit {
@@ -132,6 +137,17 @@ struct GitHubPRIndex: Codable {
                 .prefix(records.count - Self.recordLimit)
             for victim in victims { records.removeValue(forKey: victim.key) }
         }
+    }
+
+    /// A retitled, merged or closed PR may no longer belong to a query's
+    /// server-side answer, which no local filter can re-evaluate (body text,
+    /// qualifiers). Those snapshots are dropped so the next search asks again.
+    private mutating func forgetQueries(containing ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        for (key, query) in queries where query.ids.contains(where: ids.contains) {
+            queries.removeValue(forKey: key)
+        }
+        queryOrder.removeAll { queries[$0] == nil }
     }
 
     mutating func remember(query: String, repos: [String], hits: [ArchivedPR], complete: Bool, now: Date) {
@@ -174,6 +190,18 @@ struct GitHubPRIndex: Codable {
         }
         else { state.nextPage = page + 1; state.backfillDue = false }
         if hits.count < 100 || page >= Self.pageLimit { state.finished = true }
+        coverage[key] = state
+    }
+
+    /// The most recently updated PRs, from every poll. They stand in for the
+    /// REST head page only once that head was fetched and while the delta
+    /// reaches back past it; a busier window leaves the head due.
+    mutating func rememberRecent(repo: String, hits: [ArchivedPR], limit: Int, now: Date) {
+        ingest(hits, now: now)
+        let key = repo.lowercased()
+        guard var state = coverage[key], state.headFetchedAt > .distantPast,
+              hits.count < limit || (hits.map(\.updatedAt).min() ?? now) <= state.headFetchedAt else { return }
+        state.headFetchedAt = now
         coverage[key] = state
     }
 }

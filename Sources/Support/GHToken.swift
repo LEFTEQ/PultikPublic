@@ -31,14 +31,14 @@ enum GHToken {
         process.standardError = stderr
 
         try process.run()
-        process.waitUntilExit()
+        let (outData, errData) = ProcessOutput.collect(process, stdout: stdout, stderr: stderr)
 
         guard process.terminationStatus == 0 else {
-            let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let err = String(data: errData, encoding: .utf8) ?? ""
             throw GHTokenError.commandFailed(err.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
-        let token = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        let token = String(data: outData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !token.isEmpty else {
             throw GHTokenError.commandFailed("empty token — run `gh auth login`")

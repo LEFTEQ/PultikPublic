@@ -65,4 +65,11 @@ final class GitHubRequestBudgetTests: XCTestCase {
                        retryAfter: nil, rateLimited: true, now: later)
         XCTAssertEqual(budget.blockedUntil(resource: "search", now: later), later.addingTimeInterval(120))
     }
+
+    func testQuotaDeferralNeverTripsTheBreakerButARefusalDoes() {
+        XCTAssertNil(ProbeFailure.tripping(GitHubError.deferred(now)), "the budget already holds every request")
+        guard case .rejected = ProbeFailure.tripping(GitHubError.http(401, "/graphql")) else {
+            return XCTFail("a refused credential must still open the breaker")
+        }
+    }
 }

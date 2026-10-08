@@ -1,0 +1,299 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-04T13:01:41Z",
+  "windowSeconds": 60,
+  "machine": {
+    "cores": 14,
+    "load1": 7.3,
+    "cpuPct": 43,
+    "memTotalGb": 96,
+    "memUsedGb": 93,
+    "compressorGb": 17,
+    "swapUsedGb": 4.8,
+    "swapTotalGb": 6,
+    "procs": 2400
+  },
+  "headline": {
+    "severity": "red",
+    "text": "3 likely orphans · 12% CPU · 6.0 GB · +2 worth a look",
+    "orphans": 3,
+    "flagged": 5,
+    "cpuPct": 11.8,
+    "memGb": 6
+  },
+  "families": [
+    {
+      "name": "claude",
+      "count": 82,
+      "memMb": 27489,
+      "cpuPct": 15.4,
+      "health": "amber",
+      "flagged": 6
+    },
+    {
+      "name": "Google Chrome",
+      "count": 60,
+      "memMb": 10452,
+      "cpuPct": 2,
+      "health": "ok",
+      "flagged": 0
+    },
+    {
+      "name": "qemu-system-aarch64",
+      "count": 1,
+      "memMb": 6089,
+      "cpuPct": 11.7,
+      "health": "red",
+      "flagged": 1
+    },
+    {
+      "name": "node",
+      "count": 38,
+      "memMb": 5677,
+      "cpuPct": 1.2,
+      "health": "ok",
+      "flagged": 0
+    },
+    {
+      "name": "bun",
+      "count": 50,
+      "memMb": 3982,
+      "cpuPct": 2.4,
+      "health": "ok",
+      "flagged": 0
+    },
+    {
+      "name": "codex",
+      "count": 16,
+      "memMb": 3710,
+      "cpuPct": 0.4,
+      "health": "amber",
+      "flagged": 6
+    },
+    {
+      "name": "WindowServer",
+      "count": 1,
+      "memMb": 2910,
+      "cpuPct": 11.7,
+      "health": "ok",
+      "flagged": 0
+    },
+    {
+      "name": "cmux",
+      "count": 2,
+      "memMb": 1962,
+      "cpuPct": 56.3,
+      "health": "ok",
+      "flagged": 0
+    },
+    {
+      "name": "com.apple.appkit.xpc.openAndSavePanelService",
+      "count": 7,
+      "memMb": 260,
+      "cpuPct": 15.4,
+      "health": "amber",
+      "flagged": 3
+    },
+    {
+      "name": "log",
+      "count": 1,
+      "memMb": 4,
+      "cpuPct": 0,
+      "health": "red",
+      "flagged": 1
+    }
+  ],
+  "findings": [
+    {
+      "id": "orphan:22504",
+      "kind": "orphan",
+      "severity": "red",
+      "title": "Android emulator exampleapp_pixel8",
+      "detail": "Its launcher is gone and no Android test is running.",
+      "evidence": "parent is launchd · up 2 h 10 m · no gradle/appium-android process",
+      "family": "qemu-system-aarch64",
+      "since": "2026-10-04T10:51:41Z",
+      "cpuPct": 11.7,
+      "memMb": 6089,
+      "processes": [
+        {
+          "pid": 22504,
+          "started": "2026-10-04T10:51:41Z",
+          "name": "qemu-system-aarch64",
+          "command": "~/Library/Android/sdk/emulator/qemu/darwin-aarch64/qemu-system-aarch64 -avd exampleapp_pixel8 -no-snapshot-save"
+        }
+      ],
+      "stop": {
+        "supported": true,
+        "argv": [
+          "toolkit",
+          "macwatch",
+          "stop",
+          "--json",
+          "--pid",
+          "22504",
+          "--started",
+          "2026-10-04T10:51:41Z"
+        ]
+      }
+    },
+    {
+      "id": "orphan:16090",
+      "kind": "orphan",
+      "severity": "red",
+      "title": "log stream left running",
+      "detail": "Nothing reads it; its --debug filter makes diagnosticd evaluate every debug message on the Mac.",
+      "evidence": "parent is launchd · up 5 d 11 h",
+      "family": "log",
+      "since": "2026-09-29T02:01:41Z",
+      "cpuPct": 0.1,
+      "memMb": 4,
+      "processes": [
+        {
+          "pid": 16090,
+          "started": "2026-09-29T02:01:41Z",
+          "name": "log",
+          "command": "/usr/bin/log stream --predicate process contains \"Xcode\" --debug --info"
+        }
+      ],
+      "stop": {
+        "supported": true,
+        "argv": [
+          "toolkit",
+          "macwatch",
+          "stop",
+          "--json",
+          "--pid",
+          "16090",
+          "--started",
+          "2026-09-29T02:01:41Z"
+        ]
+      }
+    },
+    {
+      "id": "orphan:45691",
+      "kind": "orphan",
+      "severity": "red",
+      "title": "Log watcher on /tmp/reconc-4287-sim-up.log",
+      "detail": "A Monitor pipe whose session ended.",
+      "evidence": "parent is launchd · up 4 d",
+      "family": "tail",
+      "since": "2026-09-30T13:01:41Z",
+      "cpuPct": 0,
+      "memMb": 1,
+      "processes": [
+        {
+          "pid": 45691,
+          "started": "2026-09-30T13:01:41Z",
+          "name": "tail",
+          "command": "tail -n +6 -F /tmp/reconc-4287-sim-up.log"
+        },
+        {
+          "pid": 45695,
+          "started": "2026-09-30T13:01:41Z",
+          "name": "ugrep",
+          "command": "ugrep --line-buffered -E ✓|✗|error"
+        }
+      ],
+      "stop": {
+        "supported": true,
+        "argv": [
+          "toolkit",
+          "macwatch",
+          "stop",
+          "--json",
+          "--pid",
+          "45691",
+          "--started",
+          "2026-09-30T13:01:41Z",
+          "--pid",
+          "45695",
+          "--started",
+          "2026-09-30T13:01:41Z"
+        ]
+      }
+    },
+    {
+      "id": "runaway:98052",
+      "kind": "runaway",
+      "severity": "amber",
+      "title": "Open/Save dialog open for 12 days",
+      "detail": "A file dialog left open in some app keeps re-listing your home folder as files change. Stopping it closes that dialog.",
+      "evidence": "6.1 % CPU over the last minute · 7 h 36 m CPU in total",
+      "family": "com.apple.appkit.xpc.openAndSavePanelService",
+      "since": "2026-09-22T08:01:41Z",
+      "cpuPct": 6.1,
+      "memMb": 40,
+      "processes": [
+        {
+          "pid": 98052,
+          "started": "2026-09-22T08:01:41Z",
+          "name": "com.apple.appkit.xpc.openAndSavePanelService",
+          "command": "/System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc"
+        }
+      ],
+      "stop": {
+        "supported": true,
+        "argv": [
+          "toolkit",
+          "macwatch",
+          "stop",
+          "--json",
+          "--pid",
+          "98052",
+          "--started",
+          "2026-09-22T08:01:41Z"
+        ]
+      }
+    },
+    {
+      "id": "stale:codex:82860",
+      "kind": "stale",
+      "severity": "amber",
+      "title": "Codex session idle for 3 days",
+      "detail": "No model call in 24 h.",
+      "evidence": "cwd build-server-infra · last call 2026-09-30",
+      "family": "codex",
+      "project": "example-org/build-server-infra",
+      "since": "2026-09-30T17:01:41Z",
+      "cpuPct": 0,
+      "memMb": 102,
+      "processes": [
+        {
+          "pid": 82860,
+          "started": "2026-09-30T17:01:41Z",
+          "name": "codex",
+          "command": "~/.local/bin/codex"
+        }
+      ],
+      "stop": {
+        "supported": false,
+        "reason": "an agent session — close its terminal tab"
+      }
+    }
+  ],
+  "network": {
+    "top": [
+      {
+        "name": "bun",
+        "pid": 91939,
+        "inBps": 300000,
+        "outBps": 2600000
+      },
+      {
+        "name": "wireguard-go",
+        "pid": 48946,
+        "inBps": 130000,
+        "outBps": 200000,
+        "tunnel": true
+      },
+      {
+        "name": "claude",
+        "pid": 21591,
+        "inBps": 2000,
+        "outBps": 90000
+      }
+    ]
+  },
+  "diagnostics": []
+}

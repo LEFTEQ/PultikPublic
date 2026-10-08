@@ -113,9 +113,10 @@ struct VitrinkaWidget: View {
         // Rows the budget dropped are parked far outside the window, where
         // they can neither draw nor take a click; the clip is belt and braces.
         .clipped()
-        .padding(Self.padding)
+        .glanceTile()
     }
 
+    /// The tile's vertical padding (`glanceTile`), which the budget excludes.
     private static let padding: CGFloat = 10
 
     /// Boards a live session holds are already on screen as sessions.
@@ -125,74 +126,40 @@ struct VitrinkaWidget: View {
         return Array(snapshot.tray.boards.filter { !listened.contains($0.slug) }.prefix(Self.recentCeiling))
     }
 
-    // MARK: - Counts line
+    // MARK: - Counts on the grid
 
-    private struct CountEntry: Identifiable {
-        let count: Int
-        let label: String
-        let short: String
-        let reason: String
-        let tone: Color
-        var id: String { reason }
-    }
-
-    /// "3 need you · 1 overdue · 2 due · 4 in progress · ?3 ›" — zeros are
-    /// left out, and a line too wide for the column falls back to short
-    /// labels rather than wrapping. Each count opens `.work <reason>`.
+    /// need you · overdue · due on the shared grid (D5), each count opening
+    /// `.work <reason>`; in progress and a live board's open questions ride
+    /// under the row's name. Zeros stay, quiet — a grid column keeps its
+    /// place.
     @ViewBuilder
     private func countsLine(_ glance: VitrinkaGlance<VitrinkaWorkRow>) -> some View {
-        let entries = [
-            CountEntry(count: glance.needsYou, label: "need you", short: "you",
-                       reason: VitrinkaReason.needsYou, tone: .orange),
-            CountEntry(count: glance.overdue, label: "overdue", short: "late",
-                       reason: VitrinkaReason.overdue, tone: .red),
-            CountEntry(count: glance.dueNow, label: "due", short: "due",
-                       reason: VitrinkaReason.dueNow, tone: .primary),
-            CountEntry(count: glance.inProgress, label: "in progress", short: "wip",
-                       reason: VitrinkaReason.inProgress, tone: .secondary),
-        ].filter { $0.count > 0 }
-        if entries.isEmpty && glance.openQuestions == 0 {
+        if glance.needsYou + glance.overdue + glance.dueNow + glance.inProgress + glance.openQuestions == 0 {
             RailNote("Nothing needs you right now")
         } else {
-            ViewThatFits(in: .horizontal) {
-                countsRow(entries, questions: glance.openQuestions, short: false)
-                countsRow(entries, questions: glance.openQuestions, short: true)
+            VStack(alignment: .leading, spacing: 2) {
+                GlanceHeads(titles: ["need you", "overdue", "due"])
+                GlanceRow(name: "today", detail: detail(glance), cells: [
+                    count(glance.needsYou, tone: .orange, reason: VitrinkaReason.needsYou),
+                    count(glance.overdue, tone: .red, reason: VitrinkaReason.overdue),
+                    count(glance.dueNow, tone: .primary, reason: VitrinkaReason.dueNow),
+                ], help: glance.openQuestions > 0
+                    ? "\(glance.openQuestions) open question\(glance.openQuestions == 1 ? "" : "s") on boards a live session is listening to"
+                    : nil)
             }
-            .padding(.horizontal, RailRowMetrics.inset)
         }
     }
 
-    private func countsRow(_ entries: [CountEntry], questions: Int, short: Bool) -> some View {
-        HStack(spacing: 4) {
-            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                if index > 0 { Text("·").foregroundStyle(.tertiary) }
-                Button { onOpenWork(entry.reason) } label: {
-                    HStack(spacing: 3) {
-                        Text("\(entry.count)").foregroundStyle(entry.tone)
-                        Text(short ? entry.short : entry.label).foregroundStyle(.secondary)
-                    }
-                }
-                .buttonStyle(.plain)
-                .help("Open \(entry.reason) work")
-            }
-            if questions > 0 {
-                if !entries.isEmpty { Text("·").foregroundStyle(.tertiary) }
-                Text("?\(questions)")
-                    .foregroundStyle(Theme.eve)
-                    .help("\(questions) open question\(questions == 1 ? "" : "s") on boards a live session is listening to")
-            }
-            Spacer(minLength: 0)
-            Button { onOpenWork("") } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
-            .help("Open today’s work")
-        }
-        .font(RailRowMetrics.metaFont)
-        .monospacedDigit()
-        .lineLimit(1)
+    private func count(_ value: Int, tone: Color, reason: String) -> GlanceCell {
+        GlanceCell("\(value)", tone: value > 0 ? tone : .secondary, help: "Open \(reason) work",
+                   action: { onOpenWork(reason) })
+    }
+
+    /// "4 wip · ?3" — in progress, then open questions.
+    private func detail(_ glance: VitrinkaGlance<VitrinkaWorkRow>) -> String? {
+        let parts = [glance.inProgress > 0 ? "\(glance.inProgress) wip" : nil,
+                     glance.openQuestions > 0 ? "?\(glance.openQuestions)" : nil].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: - Workspace picker

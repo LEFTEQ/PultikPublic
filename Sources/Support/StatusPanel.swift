@@ -50,6 +50,15 @@ final class PanelMetrics {
     /// devbox rail before the window would overhang the screen edge.
     private(set) var maxWidth: CGFloat = 1000
 
+    /// The panel's one frame (panel Home D4, 2026-10-07): 80% of the working
+    /// area's height, and 80% of its width clamped to 1240–1600 pt — never
+    /// past the working area. The root view takes exactly this size, so
+    /// content no longer resizes the window; Home's tiles flex to fill it.
+    private(set) var panelSize = NSSize(width: 1240, height: 720)
+    static let heightShare: CGFloat = 0.8
+    static let widthShare: CGFloat = 0.8
+    static let widthRange: ClosedRange<CGFloat> = 1240...1600
+
     /// Re-read the working area of `screen` (its frame minus menu bar and Dock).
     func update(for screen: NSScreen?) {
         guard let screen = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
@@ -57,6 +66,16 @@ final class PanelMetrics {
         if abs(height - maxHeight) >= 1 { maxHeight = height }
         let width = max(680, screen.visibleFrame.width - Self.margin * 2)
         if abs(width - maxWidth) >= 1 { maxWidth = width }
+        let size = Self.panelSize(for: screen.visibleFrame.size, maxWidth: width, maxHeight: height)
+        if abs(size.width - panelSize.width) >= 1 || abs(size.height - panelSize.height) >= 1 {
+            panelSize = size
+        }
+    }
+
+    static func panelSize(for working: NSSize, maxWidth: CGFloat, maxHeight: CGFloat) -> NSSize {
+        let width = min(max(working.width * widthShare, widthRange.lowerBound), widthRange.upperBound)
+        return NSSize(width: min(width, maxWidth).rounded(),
+                      height: min(working.height * heightShare, maxHeight).rounded())
     }
 }
 
@@ -184,7 +203,17 @@ final class StatusPanel: NSPanel {
             target.size = size
             self.setFrame(target, display: true)
             self.applyPin()
+            self.refreshShadow()
         }
+    }
+
+    /// The window server draws the shadow AND macOS 26's light rim from the
+    /// content's alpha as it stood when the shadow was last computed. A
+    /// resize can capture the rounded glass before SwiftUI has redrawn it
+    /// at the new size — a square rim around the rounded edge (2026-10-07).
+    /// Recompute once the new size has rendered.
+    private func refreshShadow() {
+        DispatchQueue.main.async { [weak self] in self?.invalidateShadow() }
     }
 
     override var canBecomeKey: Bool { true }
@@ -214,7 +243,8 @@ final class StatusPanel: NSPanel {
     }
 
     /// Spotlight-style: horizontally centered on the focused screen, top at
-    /// ~20% down. `NSScreen.main` is the screen holding the key window — the
+    /// 10% down, so the 80%-high panel sits centred in the working area.
+    /// `NSScreen.main` is the screen holding the key window — the
     /// one the user is working on — falling back to the mouse's screen.
     /// Native test summons can supply a preferred screen explicitly.
     func showCentered(on preferredScreen: NSScreen? = nil) {
@@ -226,7 +256,7 @@ final class StatusPanel: NSPanel {
         PanelMetrics.shared.update(for: screen)
         applyInitialSize()
         let vf = screen.visibleFrame
-        pin = .topCenter(NSPoint(x: vf.midX, y: vf.maxY - vf.height * 0.20))
+        pin = .topCenter(NSPoint(x: vf.midX, y: vf.maxY - vf.height * (1 - PanelMetrics.heightShare) / 2))
         applyPin()
         present()
     }
@@ -345,6 +375,7 @@ final class StatusPanel: NSPanel {
         guard !isVisible else { return }
         previousApp = NSWorkspace.shared.frontmostApplication
         makeKeyAndOrderFront(nil)
+        refreshShadow()
 
         // A nonactivating panel doesn't reliably resign key when the user clicks
         // into another app's window — watch global clicks and dismiss ourselves.

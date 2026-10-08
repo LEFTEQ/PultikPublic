@@ -109,6 +109,36 @@ final class GitHubPRIndexTests: XCTestCase {
         XCTAssertEqual(index.records[metadata.id]?.pr.outcome, .merged)
     }
 
+    func testRecentDeltaStandsInForTheHeadOnlyWhenItReachesBackPastIt() {
+        var index = GitHubPRIndex()
+        let recent = [pr(1), pr(2)]
+        index.rememberRecent(repo: repos[0], hits: recent, limit: 20, now: now)
+        XCTAssertNotNil(index.records[recent[0].id.lowercased()], "the delta is searchable at once")
+        XCTAssertEqual(index.archivePage(repo: repos[0], now: now), 1, "a never-fetched head still loads its page")
+        index.rememberPage(repo: repos[0], page: 1, hits: recent, now: now)
+        let later = now.addingTimeInterval(400)
+        let busy = (3...22).map { number in ArchivedPR(lookup: PRLookup(number: number, title: "busy",
+            htmlUrl: "https://github.com/owner/a/pull/\(number)", state: "open", draft: false, mergedAt: nil,
+            updatedAt: later, head: nil), repoSlug: repos[0]) }
+        index.rememberRecent(repo: repos[0], hits: busy, limit: 20, now: later)
+        XCTAssertEqual(index.archivePage(repo: repos[0], now: later), 1, "twenty newer PRs may hide a gap")
+        index.rememberRecent(repo: repos[0], hits: recent, limit: 20, now: later)
+        XCTAssertNotEqual(index.archivePage(repo: repos[0], now: later), 1, "a short delta covers the head")
+    }
+
+    func testADeltaRetitleDropsTheStaleQuerySnapshotThatStillListedIt() {
+        var index = GitHubPRIndex()
+        index.remember(query: "pricing", repos: repos, hits: [pr(5, title: "Pricing module")], complete: true, now: now)
+        XCTAssertEqual(index.answer(query: "pricing", repos: repos, now: now).hits.map(\.number), [5])
+        let retitled = ArchivedPR(lookup: PRLookup(number: 5, title: "Billing module",
+            htmlUrl: "https://github.com/owner/a/pull/5", state: "closed", draft: false, mergedAt: now,
+            updatedAt: now.addingTimeInterval(60), head: nil), repoSlug: repos[0])
+        index.rememberRecent(repo: repos[0], hits: [retitled], limit: 20, now: now.addingTimeInterval(60))
+        let answer = index.answer(query: "pricing", repos: repos, now: now.addingTimeInterval(60))
+        XCTAssertTrue(answer.hits.isEmpty, "the snapshot no longer vouches for a retitled PR")
+        XCTAssertFalse(answer.isFresh, "the next search asks GitHub again")
+    }
+
     func testArchiveBackfillResumesAndCannotStarveBehindStaleHeads() throws {
         var index = GitHubPRIndex()
         let page = (1...100).map { pr($0) }

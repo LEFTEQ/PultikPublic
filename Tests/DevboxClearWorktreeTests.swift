@@ -185,6 +185,9 @@ final class DevboxClearWorktreeTests: XCTestCase {
         XCTAssertFalse(large.complete)
         XCTAssertFalse(large.canRemove)
         XCTAssertTrue(large.explanation.contains("exceeds 1 paths"))
+        // The deletion guard gave up; the changes summary still reads.
+        XCTAssertTrue(large.changesRead)
+        XCTAssertEqual(DevboxClearSummary(large).files.map(\.kind), ["?", "?"])
         policy.inspectionSeconds = 0
         let timedOut = policy.inspect(f.worktree)
         XCTAssertFalse(timedOut.complete)
