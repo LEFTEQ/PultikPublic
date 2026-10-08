@@ -116,7 +116,7 @@ struct Preferences: Codable {
     /// The vitrinka project slug the panel's own writers file into — a
     /// promoted note, an expiry-radar reminder. Nil = unset; those writers
     /// then refuse with a pointer at Settings ▸ General. Sessions never use
-    /// it: `vitrinka todo add` files into the checkout's project.
+    /// it: `vitrinka me todo add` files into the checkout's project.
     var todoProject: String?
     /// Code editor for the palette path card (`CodeEditor.known` id: cursor,
     /// vscode, zed). Nil = first installed. Settings ▸ General or `/editor`.
@@ -449,6 +449,7 @@ struct Preferences: Codable {
             Bool.self, forKey: .focusHoldsNotifications) ?? false
         vaultPath = try container.decodeIfPresent(String.self, forKey: .vaultPath)
         todoProject = try container.decodeIfPresent(String.self, forKey: .todoProject)
+        codeEditor = try container.decodeIfPresent(String.self, forKey: .codeEditor)
         collapsedRails = try container.decodeIfPresent([String].self, forKey: .collapsedRails) ?? []
         leftRailTab = try container.decodeIfPresent(String.self, forKey: .leftRailTab)
         leftRailSplit = try container.decodeIfPresent(Double.self, forKey: .leftRailSplit)

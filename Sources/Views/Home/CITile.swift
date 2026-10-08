@@ -55,8 +55,14 @@ struct CITile: View {
         .tileSurface()
     }
 
+    /// The CI glance's own count — a running run is also a lane job, so
+    /// adding the two counted every self-hosted build twice.
+    private func running(_ glance: CIGlance) -> Int {
+        glance.runningCount(lanesReport: CIWidget.lanesReport(store))
+    }
+
     private func caption(_ glance: CIGlance) -> String {
-        var parts = ["\(glance.running + glance.runningRuns) running"]
+        var parts = ["\(running(glance)) running"]
         if glance.queued > 0 { parts.append("\(glance.queued) queued") }
         parts.append(glance.failedRuns > 0 ? "\(glance.failedRuns) failed" : "✓")
         return parts.joined(separator: " · ")
@@ -74,7 +80,7 @@ struct CITile: View {
                          tone: day.waitSlow ? .orange : .primary)
                 }
             } else {
-                hero("\(glance.running + glance.runningRuns)", unit: "running")
+                hero("\(running(glance))", unit: "running")
             }
             hero("\(glance.failedRuns)", unit: "failed", tone: glance.failedRuns > 0 ? .red : .secondary)
         }

@@ -162,7 +162,7 @@ enum SlashCommands {
         ) { _ in
             // Kept as a signpost for muscle memory, not a verb: the vault is
             // read-only history since 2026-09-05 (`vitrinka import pultik`).
-            .failed("the todo vault is retired — todos live in vitrinka (\(VitrinkaClient.shared.myWorkURL.absoluteString)); vitrinka todo | schedule in a terminal")
+            .failed("the todo vault is retired — todos live in vitrinka (\(VitrinkaClient.shared.myWorkURL.absoluteString)); vitrinka me todo | schedule in a terminal")
         },
         SlashCommand(
             name: "ssh",

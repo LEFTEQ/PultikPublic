@@ -3,7 +3,7 @@ import Foundation
 import Observation
 
 /// One `todo`-type task from the vitrinka task engine (2026-09-05: the
-/// Obsidian vault became read-only history; `vitrinka todo|schedule` is the
+/// Obsidian vault became read-only history; `vitrinka me todo|schedule` is the
 /// writer and this app only reads).
 ///
 /// Decoded straight off `GET /api/v1/tasks` and the `task` half of

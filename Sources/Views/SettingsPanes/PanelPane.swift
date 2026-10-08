@@ -24,7 +24,7 @@ struct PanelPane: View {
             } header: {
                 Text("Sections")
             } footer: {
-                Text("Hidden sections stop rendering — they keep polling, so switching one back on shows current data straight away.")
+                Text("Hidden sections stop rendering. Eve alerts and firing alerts — and runners and devbox, hidden with /hide — also stop polling and fill again on the next refresh; the rest keep polling, so switching one back on shows current data straight away.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

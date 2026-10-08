@@ -12,6 +12,12 @@ struct CIWidget: View {
     let onOpen: (String) -> Void
 
     private var showLanes: Bool {
+        Self.lanesReport(store)
+    }
+
+    /// The fleet reports: its lane jobs are the "running" count here and on
+    /// Home's CI/CD tile (`CIGlance.runningCount`).
+    static func lanesReport(_ store: StatusStore) -> Bool {
         store.isSectionVisible("runners") && !store.laneBoard.isEmpty
     }
 
@@ -44,7 +50,7 @@ struct CIWidget: View {
     /// running runs otherwise — the one number that still means "something
     /// is building".
     private func running(_ glance: CIGlance) -> Int {
-        showLanes ? glance.running : glance.runningRuns
+        glance.runningCount(lanesReport: showLanes)
     }
 
     private func header(_ glance: CIGlance) -> some View {

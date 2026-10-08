@@ -443,7 +443,7 @@ var topLevelKinds = map[string]jsonKind{
 	"hlidacURL": kindString, "repoOrder": kindStringArray, "visibleAlertLanes": kindStringArray,
 	"notifyFiring": kindBool, "activeFanCurve": kindString, "fanCurves": kindObject,
 	"fanCurveSmoothing": kindNumber, "expiryWatch": kindArray, "focusHoldsNotifications": kindBool,
-	"vaultPath": kindString, "todoProject": kindString, "collapsedRails": kindStringArray,
+	"vaultPath": kindString, "todoProject": kindString, "codeEditor": kindString, "collapsedRails": kindStringArray,
 	"leftRailTab": kindString, "leftRailSplit": kindNumber, "vitrinkaWorkspace": kindString,
 	"workspaces": kindObject, "displayPresets": kindArray, "externalBrightnessOffset": kindInteger,
 	"dimBrightness": kindNumber, "neverSleep": kindBool,

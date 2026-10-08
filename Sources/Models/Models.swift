@@ -374,15 +374,16 @@ enum LoadTier {
 
 /// "18/32 GB", "1.8/3.5 TB" — the pair is scaled by the TOTAL so both halves
 /// share a unit, and BuildServer's 3.5 TB disk doesn't render as 3576 GB.
+/// `String(format:)` like every other panel number: a decimal point whatever
+/// the system locale (a Czech Mac printed "1,4/1,7 TB" beside "5.5G").
 func formatSize(used: Double, total: Double) -> String {
     let gb = 1_073_741_824.0
     let terabytes = total >= 1000 * gb
     let divisor = terabytes ? gb * 1024 : gb
     let unit = terabytes ? "TB" : "GB"
     let scaledTotal = total / divisor
-    let digits = scaledTotal < 10 ? 1 : 0
-    let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(digits))
-    return "\((used / divisor).formatted(format))/\(scaledTotal.formatted(format)) \(unit)"
+    let format = scaledTotal < 10 ? "%.1f" : "%.0f"
+    return "\(String(format: format, used / divisor))/\(String(format: format, scaledTotal)) \(unit)"
 }
 
 /// One service's blackbox probe snapshot.

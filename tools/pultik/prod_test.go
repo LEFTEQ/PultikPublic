@@ -256,6 +256,17 @@ func TestTopLevelKindsMatchPreferencesSwift(t *testing.T) {
 			t.Errorf("topLevelKinds names %q, which Preferences.init(from:) no longer decodes", key)
 		}
 	}
+	// The synthesized encoder writes every stored property; one init(from:)
+	// skips is saved, then dropped on the next load (codeEditor, 2026-10-08).
+	stored := regexp.MustCompile(`(?m)^    var (\w+): [^{\n]*$`).FindAllSubmatch(src[:start], -1)
+	if len(stored) == 0 {
+		t.Fatal("no stored Preferences properties found above init(from:) — update this test")
+	}
+	for _, s := range stored {
+		if key := string(s[1]); !seen[key] {
+			t.Errorf("Preferences.%s is encoded but init(from:) never decodes it", key)
+		}
+	}
 }
 
 func TestProdAddPreservesUnknownKeysAndRefusesDuplicates(t *testing.T) {

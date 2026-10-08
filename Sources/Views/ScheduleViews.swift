@@ -5,7 +5,7 @@ import SwiftUI
 /// Deliberately a different page from Todos: the backlog is browsed by
 /// priority, an agenda is read by when. Read-only like every todo surface —
 /// rows open the task in vitrinka, and state changes go through
-/// `vitrinka schedule` / the AI.
+/// `vitrinka me schedule` / the AI.
 struct SchedulePageView: View {
     let todos: [TodoItem]
     let isSelected: (String) -> Bool
