@@ -34,7 +34,7 @@ final class ExpiryRadarStore {
     private var timer: Timer?
 
     private static let stateURL = Preferences.directory.appending(path: "expiry-radar.json")
-    /// Local-offset RFC3339 — what `vitrinka schedule --at` parses directly.
+    /// Local-offset RFC3339 — what `vitrinka me schedule add --at` parses directly.
     static let rfc3339: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
@@ -178,7 +178,7 @@ final class ExpiryRadarStore {
             state.bookError = VitrinkaCLI.installHint
             return state
         }
-        // A GUI app has no checkout for `vitrinka schedule` to derive a
+        // A GUI app has no checkout for `vitrinka me schedule` to derive a
         // project from; the radar files into the configured one.
         guard let project = StatusStore.shared.todoProject else {
             state.bookError = VitrinkaCLI.projectHint
@@ -192,8 +192,8 @@ final class ExpiryRadarStore {
         // Off the main actor: this shells out to the CLI, which talks to
         // vitrinka over the mesh before it returns.
         let output = await VitrinkaCLI.runAsync([
-            "schedule", title, "--at", at, "--lead", item.lead, "--priority", "high",
-            "--project", project,
+            "me", "schedule", "add", title, "--at", at, "--lead", item.lead, "--priority", "high",
+            "--project", project, "--no-input",
             "--body", "Booked by pultik's expiry radar (\(item.label)). Expires \(at).",
         ])
         if let output, output.status == 0 {
@@ -378,7 +378,7 @@ final class ExpiryRadarIntegration: Integration {
     }
 
     /// Blank means "use the radar's default", not "use the CLI's": an empty
-    /// lead reaches `schedule` without a --lead and lands on its 2h fallback,
+    /// lead reaches `me schedule add` without a --lead and lands on its 2h fallback,
     /// which for a certificate is two hours' notice instead of three weeks.
     private var leadOrDefault: String {
         let trimmed = newLead.trimmingCharacters(in: .whitespaces)

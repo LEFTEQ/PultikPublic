@@ -407,13 +407,13 @@ struct NotesPageView: View {
     }
 
     /// The escape hatch for a note that outgrew the envelope. Todos have
-    /// exactly one writer — `vitrinka todo` — so this shells out rather than
+    /// exactly one writer — `vitrinka me todo` — so this shells out rather than
     /// re-deriving the engine's field contract here.
     private func promote(_ note: SavedNote) {
         promoteNotice = "promoting…"
         Task {
             switch await NotePromoter.promote(note, project: StatusStore.shared.todoProject) {
-            case .success(let label):
+            case .success(let notice):
                 // Remove only the exact text that was promoted — an edit that
                 // landed while the CLI ran is a newer draft, not ours to delete.
                 if let current = store.notes.first(where: { $0.id == note.id }),
@@ -421,7 +421,7 @@ struct NotesPageView: View {
                     store.remove(id: note.id)
                 }
                 await StatusStore.shared.refreshIfStale(minimumInterval: 0)
-                promoteNotice = "promoted to todo \(label) — vitrinka todo show \(label)"
+                promoteNotice = notice
             case .failure(let message):
                 promoteNotice = "could not promote: \(message)"
             }
@@ -433,11 +433,12 @@ struct NotesPageView: View {
 
 enum NotePromoter {
     enum Outcome {
+        /// The notice to show: where the todo landed, or that it is queued.
         case success(String)
         case failure(String)
     }
 
-    /// Runs the CLI off the main actor — `todo add` goes over the mesh, and
+    /// Runs the CLI off the main actor — `me todo add` goes over the mesh, and
     /// the panel must not freeze for its duration.
     static func promote(_ note: SavedNote, project: String?) async -> Outcome {
         await withCheckedContinuation { continuation in
@@ -450,8 +451,11 @@ enum NotePromoter {
     /// The first ~8 words become the title; the whole note is the body,
     /// staged to a temp file and passed as `--body-file` — never argv, so a
     /// pasted spec cannot trip ARG_MAX (the file goes away after the run).
-    /// `--json` gives back the id the engine filed it under. The project is
-    /// the configured one: a GUI app has no checkout to derive it from.
+    /// `--json` gives back the CLI's envelope — the filed task's id in `data`,
+    /// or `data.queued` when vitrinka was unreachable and the write waits in
+    /// the CLI's outbox — and its failure detail, which then never reaches
+    /// stderr. The project is the configured one: a GUI app has no checkout
+    /// to derive it from.
     private static func promoteBlocking(_ note: SavedNote, project: String?) -> Outcome {
         guard VitrinkaCLI.path != nil else { return .failure(VitrinkaCLI.installHint) }
         guard let project else { return .failure(VitrinkaCLI.projectHint) }
@@ -469,24 +473,30 @@ enum NotePromoter {
         }
         defer { try? FileManager.default.removeItem(at: bodyFile) }
         guard let output = VitrinkaCLI.run([
-            "todo", "add", title,
+            "me", "todo", "add", title,
             "--project", project,
             "--body-file", bodyFile.path,
             "--trigger", "promoted from a pultik note",
-            "--json",
+            "--json", "--no-input",
         ]) else {
             return .failure(VitrinkaCLI.installHint)
         }
+        let envelope = try? JSONSerialization.jsonObject(with: Data(output.stdout.utf8)) as? [String: Any]
         guard output.status == 0 else {
-            let message = output.trimmedError
-            return .failure(message.isEmpty ? "vitrinka todo add exited \(output.status)" : message)
+            let detail = ((envelope?["diagnostics"] as? [[String: Any]])?.first?["detail"] as? String)
+                ?? output.trimmedError
+            return .failure(detail.isEmpty ? "vitrinka me todo add exited \(output.status)" : detail)
         }
-        if let payload = try? JSONSerialization.jsonObject(with: Data(output.stdout.utf8)) as? [String: Any],
-           let id = payload["id"] as? Int {
-            return .success("#\(id)")
+        let data = envelope?["data"] as? [String: Any]
+        if let id = data?["id"] as? Int {
+            return .success("promoted to todo #\(id) — vitrinka me todo show \(id)")
+        }
+        if let queued = data?["queued"] as? [String: Any] {
+            let entry = queued["short"] as? String ?? "an outbox entry"
+            return .success("vitrinka unreachable — queued as \(entry), files on its next reachable call")
         }
         // Exit 0 with unparseable output: the todo exists — degrade to the
         // title rather than claiming failure over a formatting skew.
-        return .success("“\(title)”")
+        return .success("promoted to todo “\(title)”")
     }
 }

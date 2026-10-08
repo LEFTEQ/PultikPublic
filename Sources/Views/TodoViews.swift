@@ -14,7 +14,7 @@ extension TodoItem {
 
 /// The todos tab — the vitrinka todo engine at a glance, in the center
 /// column where the project page also lives. Read-only by design: rows open
-/// the task in vitrinka, and state changes go through `vitrinka todo` / the AI.
+/// the task in vitrinka, and state changes go through `vitrinka me todo` / the AI.
 struct TodosPageView: View {
     let todoStore: TodoStore
     /// Pre-filtered by the caller — the panel owns query + resolved-hiding,
@@ -54,7 +54,7 @@ struct TodosPageView: View {
 
                 if todos.isEmpty {
                     Text(todoStore.isReachable
-                         ? "nothing here — `vitrinka todo add` or /todo in a session"
+                         ? "nothing here — `vitrinka me todo add` or /todo in a session"
                          : "vitrinka unreachable — off the mesh, or not signed in (vitrinka login)")
                         .font(.system(size: 12))
                         .foregroundStyle(.tertiary)

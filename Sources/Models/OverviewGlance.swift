@@ -149,6 +149,13 @@ struct CIGlance {
         runningRuns = repos.reduce(0) { $0 + $1.runs.filter(\.isRunning).count + $1.deploys.filter(\.isRunning).count }
         githubUnreachable = !repos.isEmpty && repos.allSatisfy { $0.error != nil }
     }
+
+    /// The one "running" every CI surface shows. A running workflow run is
+    /// also a running job, on our lanes or elsewhere, so the two never add:
+    /// lane jobs while the fleet reports, GitHub's running runs otherwise.
+    func runningCount(lanesReport: Bool) -> Int {
+        lanesReport ? running : runningRuns
+    }
 }
 
 /// The CI section's pool line (2026-09-26): every Docker lane draws on one

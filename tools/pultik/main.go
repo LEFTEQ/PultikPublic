@@ -139,7 +139,12 @@ func main() {
 		err = listReleases(os.Args[2:])
 	case "todo", "schedule", "hook-context":
 		// Moved into the vitrinka CLI (2026-09-05): one binary owns the model.
-		err = fmt.Errorf("pultik %s is gone — todos live in vitrinka now: vitrinka %s (vitrinka import pultik moves an old vault)", os.Args[1], os.Args[1])
+		// Its todo verbs sit under `me` since vitrinka 5.19.
+		verb := os.Args[1]
+		if verb != "hook-context" {
+			verb = "me " + verb
+		}
+		err = fmt.Errorf("pultik %s is gone — todos live in vitrinka now: vitrinka %s (vitrinka import pultik moves an old vault)", os.Args[1], verb)
 	case "note":
 		err = noteCmd(os.Args[2:])
 	case "install":
@@ -174,7 +179,7 @@ USAGE
   pultik init [--force]      draft a release.yaml for this repo (AI-assisted)
   pultik releases [app]      list what's on the counter (downloads.example.invalid)
   pultik note <cmd>          scratch notes for the panel rail (add/list/rm)
-                             (todos + reminders: vitrinka todo | schedule)
+                             (todos + reminders: vitrinka me todo | schedule)
   pultik install [flags]     install app + CLI + Claude integration
   pultik doctor [--json]     diagnose the local Pultik installation
   pultik prod <cmd>          prod watch pointers: schema | validate | add

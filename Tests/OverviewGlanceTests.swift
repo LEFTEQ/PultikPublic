@@ -113,6 +113,9 @@ final class OverviewGlanceTests: XCTestCase {
         XCTAssertEqual(glance.lanesDown, 1)
         XCTAssertEqual(glance.failedRuns, 3)
         XCTAssertEqual(glance.runningRuns, 2)
+        // A running run is also a lane job: one source, never the sum.
+        XCTAssertEqual(glance.runningCount(lanesReport: true), 3)
+        XCTAssertEqual(glance.runningCount(lanesReport: false), 2)
         XCTAssertFalse(glance.githubUnreachable)
         XCTAssertTrue(CIGlance(board: board, repos: [RepoStatus(slug: "a/x", error: "offline")]).githubUnreachable)
     }

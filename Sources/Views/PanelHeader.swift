@@ -37,7 +37,7 @@ struct PanelFooter: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
-                .help("\(todoCount) open todo\(todoCount == 1 ? "" : "s") — pultik-memory")
+                .help("\(todoCount) open todo\(todoCount == 1 ? "" : "s") in vitrinka — open the list")
             }
             Spacer(minLength: 8)
             if let chip = macHealth.status.chip {

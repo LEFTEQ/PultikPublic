@@ -76,9 +76,9 @@ final class IntegrationRegistry {
     }
 }
 
-/// Shared helper: run the vitrinka CLI — the writer for todos (`todo add`,
-/// `schedule`) when the panel itself needs to file one. Blocking — call from a
-/// background task.
+/// Shared helper: run the vitrinka CLI — the writer for todos (`me todo add`,
+/// `me schedule add`) when the panel itself needs to file one. Blocking — call
+/// from a background task.
 ///
 /// The shim `vitrinka install` writes is preferred: the bun/npm launcher is
 /// a JavaScript file that needs a runtime on PATH, and a GUI app launched
