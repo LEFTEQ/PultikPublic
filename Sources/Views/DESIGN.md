@@ -171,7 +171,7 @@ Corners are concentric: `inner = outer − inset`.
 | stale | values at 60 % opacity plus an `ink3` caption `as of 15:08` with `clock` | the snapshot is older than its schedule |
 | prod blind | hollow `idle` ring, `blind since 14:52` in `warn` | prod is never green from a snapshot |
 | partial | dashed `hairlineStrong` chip, e.g. `logs not shipped` | the coverage gap is named |
-| unreachable | the module, tile and status-strip item are **hidden** | never an alert or modal (CLAUDE.md) |
+| unreachable | tiles and rails are **hidden**; the module and its strip chip stay, the chip without a signal | never an alert or modal (CLAUDE.md) |
 | all quiet | one row: `ok` check, `All quiet`, `as of 15:12` | never a blank tile |
 | needs you | `warn` dot, and the count appears in the status strip | |
 
