@@ -206,7 +206,7 @@ private struct ScheduleRow: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .background(selected ? Color.accentColor.opacity(0.18) : .clear)
+            .background(selected ? Theme.selection : .clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -59,6 +59,12 @@ final class PanelMetrics {
     static let widthShare: CGFloat = 0.8
     static let widthRange: ClosedRange<CGFloat> = 1240...1600
 
+    #if DEBUG
+    /// The Debug driver's `size WxH`: AC 13's 1240 × 720 and 1600 pt frames on
+    /// whichever test display is connected — still never past the working area.
+    var debugSize: NSSize?
+    #endif
+
     /// Re-read the working area of `screen` (its frame minus menu bar and Dock).
     func update(for screen: NSScreen?) {
         guard let screen = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
@@ -66,7 +72,12 @@ final class PanelMetrics {
         if abs(height - maxHeight) >= 1 { maxHeight = height }
         let width = max(680, screen.visibleFrame.width - Self.margin * 2)
         if abs(width - maxWidth) >= 1 { maxWidth = width }
-        let size = Self.panelSize(for: screen.visibleFrame.size, maxWidth: width, maxHeight: height)
+        var size = Self.panelSize(for: screen.visibleFrame.size, maxWidth: width, maxHeight: height)
+        #if DEBUG
+        if let debugSize {
+            size = NSSize(width: min(debugSize.width, width), height: min(debugSize.height, height))
+        }
+        #endif
         if abs(size.width - panelSize.width) >= 1 || abs(size.height - panelSize.height) >= 1 {
             panelSize = size
         }
@@ -247,7 +258,10 @@ final class StatusPanel: NSPanel {
     /// `NSScreen.main` is the screen holding the key window — the
     /// one the user is working on — falling back to the mouse's screen.
     /// Native test summons can supply a preferred screen explicitly.
-    func showCentered(on preferredScreen: NSScreen? = nil) {
+    /// `takeKey: false` is the Debug driver's summon: the panel comes forward
+    /// without taking the keyboard, so the operator's typing elsewhere never
+    /// lands in the field (synthetic keys need no key window).
+    func showCentered(on preferredScreen: NSScreen? = nil, takeKey: Bool = true) {
         let screen = preferredScreen ?? NSScreen.main
             ?? NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             ?? NSScreen.screens.first
@@ -258,7 +272,7 @@ final class StatusPanel: NSPanel {
         let vf = screen.visibleFrame
         pin = .topCenter(NSPoint(x: vf.midX, y: vf.maxY - vf.height * (1 - PanelMetrics.heightShare) / 2))
         applyPin()
-        present()
+        present(takeKey: takeKey)
     }
 
     /// Run the first layout while the newly created panel is still hidden.
@@ -370,11 +384,11 @@ final class StatusPanel: NSPanel {
         isPinning = false
     }
 
-    private func present() {
+    private func present(takeKey: Bool = true) {
         // A visible panel was only repositioned; keep its one dismiss monitor.
         guard !isVisible else { return }
         previousApp = NSWorkspace.shared.frontmostApplication
-        makeKeyAndOrderFront(nil)
+        if takeKey { makeKeyAndOrderFront(nil) } else { orderFrontRegardless() }
         refreshShadow()
 
         // A nonactivating panel doesn't reliably resign key when the user clicks
@@ -402,11 +416,7 @@ final class StatusPanel: NSPanel {
         guard let restore, restore.bundleIdentifier != Bundle.main.bundleIdentifier,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == restore.processIdentifier
         else { return }
-        if #available(macOS 14.0, *) {
-            NSApp.yieldActivation(to: restore)
-            restore.activate()
-        } else {
-            restore.activate(options: .activateIgnoringOtherApps)
-        }
+        NSApp.yieldActivation(to: restore)
+        restore.activate()
     }
 }

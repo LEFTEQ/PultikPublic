@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-11T08:00:00.000+02:00",
+  "codexAt": null,
+  "cmux": { "state": "ok", "socket": "/tmp/cmux.sock", "version": "0.64.25" },
+  "counts": { "total": 2, "waiting": 1, "busy": 1, "idle": 0, "shell": 0, "dead": 0, "ended": 0, "unknown": 0 },
+  "projects": [
+    { "project": "fixture", "root": "/tmp/fixture",
+      "counts": { "total": 2, "waiting": 1, "busy": 1, "idle": 0, "shell": 0, "dead": 0, "ended": 0, "unknown": 0 } }
+  ],
+  "sessions": [
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "pid": 1,
+      "name": "fixture-waiting",
+      "project": "fixture",
+      "root": "/tmp/fixture",
+      "cwd": "/tmp/fixture",
+      "status": "waiting",
+      "state": "waiting",
+      "waitingFor": "permission: Bash",
+      "statusSince": "2026-10-11T07:40:00.000+02:00",
+      "ageSeconds": 1200,
+      "startedAt": "2026-10-11T07:00:00.000+02:00",
+      "version": "2.1.300",
+      "kind": "interactive",
+      "entrypoint": "cli",
+      "liveness": "alive",
+      "openJobs": 0,
+      "resume": "cd /tmp/fixture && claude --resume 00000000-0000-4000-8000-000000000001",
+      "surface": { "surfaceId": "S1", "workspaceId": "W1" },
+      "actions": ["focus", "screen", "reply"]
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000002",
+      "pid": 2,
+      "name": "fixture-busy",
+      "project": "fixture",
+      "root": "/tmp/fixture",
+      "cwd": "/tmp/fixture",
+      "status": "busy",
+      "state": "busy",
+      "statusSince": "2026-10-11T07:55:00.000+02:00",
+      "ageSeconds": 300,
+      "liveness": "alive",
+      "openJobs": 1,
+      "resume": "cd /tmp/fixture && claude --resume 00000000-0000-4000-8000-000000000002",
+      "surface": { "surfaceId": "S2", "workspaceId": "W1" },
+      "actions": ["focus"]
+    }
+  ],
+  "codex": [],
+  "hidden": 0,
+  "diagnostics": []
+}

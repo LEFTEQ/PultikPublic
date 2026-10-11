@@ -1,18 +1,78 @@
 import AppKit
 import SwiftUI
 
-/// claude-switcheroo's iOS 26 language (panel Home, 2026-10-07 D6): one glass
-/// panel, quiet tiles on it, sentence-case titles with a trailing caption, SF
-/// Pro text with monospaced digits only. System semantic colors carry state;
-/// the red accent survives only for brand moments (✦ eve, quick commands).
+/// The D11 tokens (copilot shell, 2026-10-08): Apple's macOS 26 language,
+/// vitrinka's palette, Switcheroo's density. `DESIGN.md` beside this file is
+/// the reference — one meaning per colour; views consume these and never
+/// retype a literal.
 enum Theme {
-    static let accent = Color(red: 1.0, green: 0.231, blue: 0.341)          // #ff3b57
-    static let accentSoft = accent.opacity(0.10)
-    /// Eve's color — purple, matching the session chips.
-    static let eve = Color(red: 0.749, green: 0.353, blue: 0.949)           // #bf5af2
+    // Content layer
+    static let canvas = Color(hex: 0x141213)
+    static let canvasDeep = Color(hex: 0x0F0E0F)
+    static let surface = Color(hex: 0x1D1A1B)
+    static let surfaceRaised = Color(hex: 0x252122)
+    static let hairline = Color(hex: 0x292526)
+    static let hairlineStrong = Color(hex: 0x363132)
+    // Text
+    static let ink = Color(hex: 0xF0EAE4)
+    static let ink2 = Color(hex: 0xA8A099)
+    static let ink3 = Color(hex: 0x8C857F)
+    // Selection edge, focus, primary action, brand — never a status.
+    static let accent = Color(hex: 0xFF3B57)
+    static let accentSoft = accent.opacity(0.12)
+    /// The selected row's neutral lift (vitrinka's sidebar grey).
+    static let selection = Color.white.opacity(0.085)
+    // Status
+    static let ok = Color(hex: 0x53C07E)
+    static let warn = Color(hex: 0xF5B83D)
+    static let danger = Color(hex: 0xFF6369)
+    static let idle = ink3
+    /// Eve and agent identity: glyphs and the eve chip only.
+    static let eve = Color(hex: 0xBF5AF2)
     static let eveSoft = eve.opacity(0.12)
-    static let hairline = Color.white.opacity(0.08)
-    static let panelRadius: CGFloat = 20
+    // Charts
+    static let data = Color(hex: 0xD6C7B6)
+    static let dataMuted = Color(hex: 0x6B625B)
+    static let heat = Color(hex: 0xE8703A)
+
+    static let panelRadius: CGFloat = 26
+    /// The content sheet's inset inside the window glass.
+    static let sheetInset: CGFloat = 8
+
+    /// Type scale (DESIGN.md §3). Not `Type`: `Theme.Type` is the metatype.
+    enum Typo {
+        static let hero = Font.system(size: 44, weight: .bold, design: .rounded).monospacedDigit()
+        static let heroUnit = Font.title3.weight(.medium)
+        static let stat = Font.system(size: 22, weight: .semibold, design: .rounded).monospacedDigit()
+        static let statCompact = Font.system(size: 18, weight: .semibold, design: .rounded).monospacedDigit()
+        static let detailTitle = Font.system(size: 20, weight: .semibold)
+        static let title = Font.system(size: 13, weight: .semibold)
+        static let body = Font.system(size: 13)
+        static let meta = Font.system(size: 11)
+        /// Uppercase via `.microLabel()`, which also sets the tracking.
+        static let micro = Font.system(size: 10, weight: .semibold, design: .monospaced)
+        static let figure = Font.system(size: 12, design: .monospaced)
+        static let code = Font.system(size: 11.5, design: .monospaced)
+    }
+
+    /// Corner radii (DESIGN.md §4): concentric, `inner = outer − inset`.
+    enum Radius {
+        static let sheet: CGFloat = 18
+        static let tile: CGFloat = 14
+        static let row: CGFloat = 8
+        static let kbd: CGFloat = 4
+    }
+}
+
+extension Color {
+    /// `0xRRGGBB` in sRGB — the form DESIGN.md writes tokens in.
+    init(hex: UInt32, opacity: Double = 1) {
+        self.init(.sRGB,
+                  red: Double((hex >> 16) & 0xFF) / 255,
+                  green: Double((hex >> 8) & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255,
+                  opacity: opacity)
+    }
 }
 
 /// The numbers behind a tile — a Home tile or a glance — so both sit on one
@@ -81,6 +141,8 @@ enum KickerActionRole {
 struct Kicker: View {
     let text: String
     var count: Int = 0
+    /// The count is a floor (a capped read): it draws `5+`.
+    var countIsFloor = false
     var tone: Color = .secondary
     var action: (() -> Void)?
     var actionRole: KickerActionRole = .button
@@ -119,7 +181,7 @@ struct Kicker: View {
                 .foregroundStyle(titleTone)
                 .lineLimit(1)
             if count > 0 {
-                Text("\(count)")
+                Text(verbatim: countIsFloor ? "\(count)+" : "\(count)")
                     .font(.system(size: 10, weight: .semibold))
                     .monospacedDigit()
                     .padding(.horizontal, 5)
@@ -151,7 +213,8 @@ struct RailBadge: Identifiable {
     var id: String { text + help }
 }
 
-/// THE row of the left column (2026-09-14): one grammar for a task, a
+/// THE row of the rails (2026-09-14; the left column it began in retired
+/// with WP8): one grammar for a task, a
 /// listener, a board and a devbox workspace, so the column reads as one list
 /// rather than three apps. Dot · title · trailing meta, an optional second
 /// line in mono, badges at the edge; hover lifts the row onto the same slab
@@ -173,6 +236,8 @@ struct RailRow: View {
     var badges: [RailBadge] = []
     var help: String = ""
     var accessibilityLabel: String? = nil
+    /// The keyboard's selection in a module list: the Kit's neutral lift.
+    var selected = false
     let action: () -> Void
     @State private var hovering = false
 
@@ -214,15 +279,21 @@ struct RailRow: View {
         }
         .padding(.horizontal, RailRowMetrics.inset)
         .padding(.vertical, RailRowMetrics.verticalInset)
-        .background(hovering ? RailRowMetrics.hoverFill : .clear,
-                    in: RoundedRectangle(cornerRadius: RailRowMetrics.radius))
+        .background {
+            if selected {
+                RowBackground(selected: true)
+            } else {
+                RoundedRectangle(cornerRadius: RailRowMetrics.radius)
+                    .fill(hovering ? RailRowMetrics.hoverFill : .clear)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
         .help(help)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel ?? [title, subtitle, meta].compactMap { $0 }.joined(separator: ", "))
-        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
     @ViewBuilder
@@ -269,7 +340,7 @@ struct RailNote: View {
 
 /// The rail-flavoured search field: magnifier + plain text on a soft slab,
 /// the same slab the rail rows hover onto (RailViews). `.roundedBorder` was
-/// the second Aqua control in the left column.
+/// an Aqua control on the rails' glass.
 struct RailSearchField: View {
     let prompt: String
     @Binding var text: String
@@ -355,8 +426,9 @@ struct RailSection<Content: View>: View {
 
             if !collapsed { content() }
         }
-        // A tile like the glances (D6), on their padding, so a rail's rows
-        // start where a glance's do.
-        .glanceTile()
+        // A Kit tile on the rows' own inset: a rail's rows keep their padding.
+        .padding(.vertical, 10)
+        .padding(.horizontal, 4)
+        .kitTile(padding: 0)
     }
 }

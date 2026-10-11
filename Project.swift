@@ -11,12 +11,16 @@ let project = Project(
             // macOS 26's status-item service holds broken per-bundle-id state for it,
             // the item scene never leaves "reconnecting". 2026-07-20.)
             bundleId: "dev.example.pultik",
-            deploymentTargets: .macOS("14.0"),
+            deploymentTargets: .macOS("26.0"),
             infoPlist: .extendingDefault(with: [
                 "LSUIElement": true,
                 "CFBundleDisplayName": "Pultík",
-                "CFBundleShortVersionString": "2.21",
-                "CFBundleVersion": "25",
+                "CFBundleShortVersionString": "3.0",
+                "CFBundleVersion": "27",
+                // pultik://pr/<owner>/<repo>/<n> opens a PR's detail (PultikLink).
+                "CFBundleURLTypes": [
+                    ["CFBundleURLName": "dev.example.pultik", "CFBundleURLSchemes": ["pultik"]],
+                ],
                 // EventKit read grant (Integrations → Calendar access).
                 "NSCalendarsFullAccessUsageDescription":
                     "Pultík shows today's events beside the schedule agenda. Read-only.",
@@ -52,7 +56,7 @@ let project = Project(
             destinations: .macOS,
             product: .unitTests,
             bundleId: "dev.example.pultik.tests",
-            deploymentTargets: .macOS("14.0"),
+            deploymentTargets: .macOS("26.0"),
             sources: ["Tests/**"],
             dependencies: [.target(name: "Pultik")],
             settings: .settings(base: [
@@ -69,7 +73,7 @@ let project = Project(
             product: .commandLineTool,
             productName: "pultik-fan-control-helper",
             bundleId: "dev.example.pultik.fan-helper",
-            deploymentTargets: .macOS("14.0"),
+            deploymentTargets: .macOS("26.0"),
             sources: ["Sources/SMC/**", "Sources/Helper/**"],
             settings: .settings(base: [
                 "CODE_SIGN_IDENTITY": "-",

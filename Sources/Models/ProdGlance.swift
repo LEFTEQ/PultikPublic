@@ -8,18 +8,18 @@ import Foundation
 
 /// `GET /api/v1/prod` — the shape pinned in
 /// docs/specs/2026-10-03-prod-watch-contracts.md §5.
-struct HlidacDigest: Decodable, Equatable, Sendable {
+struct HlidacDigest: Codable, Equatable, Sendable {
     let generatedAt: Date
     let sources: [String: Source]
     let deployments: [Deployment]
 
-    struct Source: Decodable, Equatable, Sendable {
+    struct Source: Codable, Equatable, Sendable {
         let ok: Bool
         let since: Date?
         let error: String?
     }
 
-    enum Verdict: String, Decodable, Equatable, Sendable {
+    enum Verdict: String, Codable, Equatable, Sendable {
         case ok, degraded, down, blind, unmonitored
 
         /// An unknown verdict from a newer Hlídač is never read as healthy.
@@ -27,9 +27,15 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
             let raw = try decoder.singleValueContainer().decode(String.self)
             self = Verdict(rawValue: raw) ?? .blind
         }
+
+        /// The bare string `init(from:)` reads, so a snapshot decodes back.
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
     }
 
-    struct Deployment: Decodable, Equatable, Identifiable, Sendable {
+    struct Deployment: Codable, Equatable, Identifiable, Sendable {
         let key: String
         let project: String
         let title: String
@@ -49,7 +55,7 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         }
     }
 
-    struct Check: Decodable, Equatable, Identifiable, Sendable {
+    struct Check: Codable, Equatable, Identifiable, Sendable {
         let id: String
         let title: String
         /// 1 ok · 0.5 degraded · 0 down · nil = no series.
@@ -58,29 +64,29 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         let page: Bool
     }
 
-    struct Logs: Decodable, Equatable, Sendable {
+    struct Logs: Codable, Equatable, Sendable {
         /// 24 buckets, oldest first; the last is the current partial hour.
         let hours: [Hour]?
         let today: Counts?
         let yesterday: Counts?
     }
 
-    struct Hour: Decodable, Equatable, Sendable {
+    struct Hour: Codable, Equatable, Sendable {
         let start: Date
         let error: Int
         let warn: Int
     }
 
-    struct Counts: Decodable, Equatable, Sendable {
+    struct Counts: Codable, Equatable, Sendable {
         let error: Int
         let warn: Int
     }
 
-    struct Edge: Decodable, Equatable, Sendable {
+    struct Edge: Codable, Equatable, Sendable {
         let today: EdgeCounts
     }
 
-    struct EdgeCounts: Decodable, Equatable, Sendable {
+    struct EdgeCounts: Codable, Equatable, Sendable {
         let serverErrors: Int
         let throttled: Int
 
@@ -90,7 +96,7 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         }
     }
 
-    struct Issue: Decodable, Equatable, Identifiable, Sendable {
+    struct Issue: Codable, Equatable, Identifiable, Sendable {
         let id: String
         let shortId: String
         let title: String
@@ -104,7 +110,7 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         let isNew: Bool
     }
 
-    struct Alert: Decodable, Equatable, Sendable {
+    struct Alert: Codable, Equatable, Sendable {
         let name: String
         let severity: String
         let summary: String
@@ -117,14 +123,14 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         }
     }
 
-    struct Pool: Decodable, Equatable, Sendable {
+    struct Pool: Codable, Equatable, Sendable {
         let pools: [GatewayPool]
         let canary: Canary?
         let failoversToday: Int?
         let backupTurnsToday: Int?
     }
 
-    struct GatewayPool: Decodable, Equatable, Identifiable, Sendable {
+    struct GatewayPool: Codable, Equatable, Identifiable, Sendable {
         let gateway: String
         let usable: Int
         let total: Int
@@ -134,7 +140,7 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         }
     }
 
-    struct Account: Decodable, Equatable, Identifiable, Sendable {
+    struct Account: Codable, Equatable, Identifiable, Sendable {
         let id: String
         /// usable · cooling · benched · disabled · logged_out
         let state: String
@@ -145,7 +151,7 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         let observedAt: Date?
     }
 
-    struct Window: Decodable, Equatable, Sendable {
+    struct Window: Codable, Equatable, Sendable {
         /// A LENGTH name — `five_hour`, `seven_day`, `fable_weekly`, `<n>m` —
         /// never a codex `primary`/`secondary` position (contracts §5).
         let name: String
@@ -153,15 +159,28 @@ struct HlidacDigest: Decodable, Equatable, Sendable {
         let resetsAt: Date?
     }
 
-    struct Canary: Decodable, Equatable, Sendable {
+    struct Canary: Codable, Equatable, Sendable {
         let lastSuccess: Date?
         let durationSeconds: Double?
         let consecutiveFailures: Int
     }
 
-    struct Link: Decodable, Equatable, Sendable {
+    struct Link: Codable, Equatable, Sendable {
         let title: String
         let url: String
+    }
+
+    /// `GET /api/v1/prod/{key}`: the digest's deployment, with up to 25
+    /// Sentry issues where the digest keeps 5.
+    static func decodeDeployment(_ data: Data) -> Deployment? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601Flexible
+        do {
+            return try decoder.decode(Deployment.self, from: data)
+        } catch {
+            NSLog("pultik: hlidac deployment unreadable — %@", ConfigIssueSink.describe(error))
+            return nil
+        }
     }
 
     /// RFC 3339 with or without fractional seconds (Go emits either).
@@ -276,8 +295,12 @@ struct ProdGlance: Equatable {
     ///   - digest: the last answer, kept through an outage for context.
     ///   - unreachableSince: set while Hlídač is not answering — every card
     ///     reads blind from then, whatever the cached digest says.
-    static func make(pointers: [ProdPointer], digest: HlidacDigest?, unreachableSince: Date?,
+    ///   - asOf: the digest is the snapshot restored at launch, fetched then,
+    ///     and Hlídač has not answered since: the same no-green, no-siren
+    ///     rules as blind, worded "as of HH:MM" (copilot shell D8).
+    static func make(pointers: [ProdPointer], digest: HlidacDigest?, unreachableSince: Date?, asOf: Date? = nil,
                      now: Date, timeZone: TimeZone = .current) -> ProdGlance {
+        let unconfirmed: Unconfirmed? = unreachableSince.map { .blind(since: $0) } ?? asOf.map { .asOf($0) }
         let byKey = Dictionary((digest?.deployments ?? []).map { ($0.key, $0) },
                                uniquingKeysWith: { first, _ in first })
         let wanted: [ProdPointer] = pointers.isEmpty
@@ -290,11 +313,10 @@ struct ProdGlance: Equatable {
                     tone: .blind,
                     status: digest == nil ? blindLine(unreachableSince, timeZone: timeZone)
                         : "unknown to Hlídač — add it to deployments.yaml",
-                    emergency: false, stale: unreachableSince != nil, chips: [], hours: nil, logsLine: nil, edgeLine: nil,
+                    emergency: false, stale: unconfirmed != nil, chips: [], hours: nil, logsLine: nil, edgeLine: nil,
                     topIssue: nil, deployment: nil)
             }
-            return card(deployment, pointer: pointer, unreachableSince: unreachableSince,
-                        now: now, timeZone: timeZone)
+            return card(deployment, pointer: pointer, unconfirmed: unconfirmed, now: now, timeZone: timeZone)
         }
         guard cards.isEmpty else { return ProdGlance(cards: cards) }
         let waiting = unreachableSince != nil ? blindLine(unreachableSince, timeZone: timeZone)
@@ -302,13 +324,31 @@ struct ProdGlance: Equatable {
         return ProdGlance(cards: [], waiting: waiting)
     }
 
+    /// Why a cached digest may not be trusted: Hlídač failing, or the digest
+    /// being the snapshot restored at launch.
+    private enum Unconfirmed {
+        case blind(since: Date)
+        case asOf(Date)
+
+        var blindSince: Date? {
+            if case let .blind(since) = self { return since }
+            return nil
+        }
+    }
+
     private static func card(_ deployment: HlidacDigest.Deployment, pointer: ProdPointer,
-                             unreachableSince: Date?, now: Date, timeZone: TimeZone) -> Card {
-        let blind = unreachableSince != nil || deployment.verdict == .blind
+                             unconfirmed: Unconfirmed?, now: Date, timeZone: TimeZone) -> Card {
+        let unreachableSince = unconfirmed?.blindSince
+        let blind = unconfirmed != nil || deployment.verdict == .blind
         let since = unreachableSince ?? deployment.blindSince
         let status: String?
         switch deployment.verdict {
-        case _ where blind: status = blindLine(since, timeZone: timeZone)
+        case _ where blind:
+            if case let .asOf(fetched) = unconfirmed {
+                status = "as of \(clock(fetched, timeZone: timeZone))"
+            } else {
+                status = blindLine(since, timeZone: timeZone)
+            }
         case .unmonitored: status = "not monitored"
         default: status = nil
         }
@@ -320,18 +360,18 @@ struct ProdGlance: Equatable {
             status: status,
             // Hlídač's own blind verdict can still carry an emergency from
             // Alertmanager; only a stale cached digest must never siren.
-            emergency: unreachableSince == nil && deployment.emergency,
-            stale: unreachableSince != nil,
+            emergency: unconfirmed == nil && deployment.emergency,
+            stale: unconfirmed != nil,
             chips: deployment.checks.map { check in
                 Chip(id: check.id,
                      label: [check.title, check.value].compactMap { $0 }.joined(separator: " "),
-                     tone: unreachableSince != nil ? .blind : chipTone(check.status))
+                     tone: unconfirmed != nil ? .blind : chipTone(check.status))
             },
             hours: deployment.logs.hours,
             logsLine: logsLine(deployment.logs),
             edgeLine: deployment.edge.map { "5xx \($0.today.serverErrors) · 429 \($0.today.throttled)" },
             topIssue: topIssue(deployment, now: now).map { issue in
-                unreachableSince == nil ? issue : issue.withTone(.blind)
+                unconfirmed == nil ? issue : issue.withTone(.blind)
             },
             deployment: deployment)
     }
@@ -347,11 +387,15 @@ struct ProdGlance: Equatable {
 
     private static func blindLine(_ since: Date?, timeZone: TimeZone) -> String {
         guard let since else { return "waiting for Hlídač" }
+        return "blind since \(clock(since, timeZone: timeZone))"
+    }
+
+    private static func clock(_ date: Date, timeZone: TimeZone) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
         formatter.dateFormat = "HH:mm"
-        return "blind since \(formatter.string(from: since))"
+        return formatter.string(from: date)
     }
 
     /// "0 err · 818 warn ▾4%": the arrow compares today's lines (errors plus

@@ -18,7 +18,7 @@ struct CITile: View {
         return lanes || runs
     }
 
-    private static let sky = Color(red: 0.37, green: 0.78, blue: 0.98)
+    private static let sky = Theme.data
 
     var body: some View {
         let glance = CIGlance(board: store.laneBoard, repos: store.repos)
@@ -38,7 +38,7 @@ struct CITile: View {
             if !runningRuns.isEmpty {
                 section("Running") {
                     ForEach(runningRuns.prefix(4), id: \.run.id) { item in
-                        runRow(item.repo, item.run, tone: .blue)
+                        runRow(item.repo, item.run, tone: Theme.ok)
                     }
                 }
             }
@@ -58,7 +58,13 @@ struct CITile: View {
     /// The CI glance's own count — a running run is also a lane job, so
     /// adding the two counted every self-hosted build twice.
     private func running(_ glance: CIGlance) -> Int {
-        glance.runningCount(lanesReport: CIWidget.lanesReport(store))
+        glance.runningCount(lanesReport: Self.lanesReport(store))
+    }
+
+    /// The fleet reports: its lane jobs are the "running" count here and in
+    /// CI's list (`CIGlance.runningCount`).
+    static func lanesReport(_ store: StatusStore) -> Bool {
+        store.isSectionVisible("runners") && !store.laneBoard.isEmpty
     }
 
     private func caption(_ glance: CIGlance) -> String {

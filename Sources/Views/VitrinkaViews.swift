@@ -145,13 +145,8 @@ struct VitrinkaListRow: View {
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
-        .background(selected ? Theme.accent.opacity(0.16)
-                    : hovering ? Color.primary.opacity(0.06) : .clear,
-                    in: RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(selected ? Theme.accent.opacity(0.35) : .clear, lineWidth: 1)
-        )
+        // Sessions' selected row: the Kit's neutral lift, never a red fill.
+        .background { RowBackground(selected: selected, hovering: hovering) }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { entry.open() }

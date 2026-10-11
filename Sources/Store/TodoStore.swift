@@ -9,7 +9,7 @@ import Observation
 /// Decoded straight off `GET /api/v1/tasks` and the `task` half of
 /// `GET /api/v1/me/ripe`; the two mutable fields are stamped by the store from
 /// the ripe entry's siblings.
-struct TodoItem: Identifiable, Decodable {
+struct TodoItem: Identifiable, Codable {
     let id: Int64
     let project: String
     let title: String
@@ -67,6 +67,28 @@ struct TodoItem: Identifiable, Decodable {
             trigger = nil
             hasContext = false
         }
+    }
+
+    /// Exactly the wire shape `init(from:)` reads, so a disk snapshot decodes
+    /// back through it: RFC 3339 dates, `lead` in the duration grammar (every
+    /// decoded lead is whole minutes), `context` as a non-empty marker.
+    /// `reason`/`milestoneName` are stamped by the store, never decoded, so
+    /// they are not written either.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(project, forKey: .project)
+        try c.encode(title, forKey: .title)
+        try c.encode(status, forKey: .status)
+        try c.encodeIfPresent(dueAt.map(Self.isoFractional.string(from:)), forKey: .dueAt)
+        try c.encode(priority, forKey: .priority)
+        try c.encodeIfPresent(milestoneId, forKey: .milestoneId)
+        try c.encodeIfPresent(createdAt.map(Self.isoFractional.string(from:)), forKey: .createdAt)
+        var f = c.nestedContainer(keyedBy: FieldKeys.self, forKey: .fields)
+        try f.encodeIfPresent(lead.flatMap { $0 > 0 ? Int(exactly: $0 / 60) : nil }.map { "\($0)m" }, forKey: .lead)
+        try f.encodeIfPresent(every, forKey: .every)
+        try f.encodeIfPresent(trigger, forKey: .trigger)
+        if hasContext { try f.encode("present", forKey: .context) }
     }
 
     /// Hand-built rows (tests, previews).
@@ -293,10 +315,26 @@ final class TodoStore {
             notifyNewTodos(items)
             todos = items
             isReachable = true
+            restored = false
             checkRipeness()
             onChange?()
             return nil
         }
+    }
+
+    /// The lists on screen are the snapshot restored at launch, not a live
+    /// answer: they draw, but never notify or prune the occurrence ledger.
+    private(set) var restored = false
+
+    /// The last known lists from disk at launch, shown until the first poll
+    /// answers (copilot shell D8) — never over a live answer, and never as
+    /// proof the server is reachable.
+    func restore(todos snapshot: [TodoItem], ripe: [TodoItem]) {
+        guard !isReachable, todos.isEmpty, ripeNow.isEmpty else { return }
+        todos = snapshot
+        ripeNow = ripe
+        restored = true
+        onChange?()
     }
 
     /// Off the mesh, signed out, or refused: every todo surface folds. Not a
@@ -304,6 +342,7 @@ final class TodoStore {
     func markUnreachable() {
         guard isReachable || !todos.isEmpty || !ripeNow.isEmpty else { return }
         isReachable = false
+        restored = false
         todos = []
         ripeNow = []
         onChange?()
@@ -360,6 +399,9 @@ final class TodoStore {
     /// one-minute tick, so a reminder whose moment passed while the Mac was
     /// asleep still lands — late, but never silently lost.
     func checkRipeness() {
+        // A restored snapshot may hold todos done since: only a live answer
+        // may announce or prune.
+        guard !restored else { return }
         let candidates = reminderCandidates
         let ripe = candidates.filter { $0.isRipe() }
         var fired = false

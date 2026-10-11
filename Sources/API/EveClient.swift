@@ -81,6 +81,37 @@ actor EveClient {
         }
     }
 
+    /// Workflows parked on an operator approval — eve's own Approvals list,
+    /// unpaginated, so a read that answers is complete. Same breaker as the
+    /// other eve reads.
+    func approvals(settingsToken: String?) async -> ProbeResult<[EveApproval]> {
+        var request = URLRequest(url: base.appending(path: "eve/v1/sessions")
+            .appending(queryItems: [URLQueryItem(name: "view", value: "approvals")]))
+        request.timeoutInterval = 10
+        EveAuth.apply(await EveAuth.shared.token(preferred: settingsToken), to: &request)
+        let data: Data
+        do {
+            let (body, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failed(.unreachable("no response"))
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                return .failed(.classify(HTTPStatusError(status: http.statusCode)))
+            }
+            data = body
+        } catch {
+            return .failed(.classify(error))
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601Flexible
+        do {
+            return .value(EveApproval.group(try decoder.decode(EveApprovalsResponse.self, from: data).sessions))
+        } catch {
+            NSLog("pultik: eve approvals unreadable: %@", String(describing: error))
+            return .failed(.unreachable("unreadable approvals payload"))
+        }
+    }
+
     struct AskEvent {
         let text: String
         let done: Bool

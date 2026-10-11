@@ -155,6 +155,22 @@ final class ExpiryRadarStore {
             states[item.id] = state
         }
         saveStates()
+        recordNowNeeds()
+    }
+
+    /// The watchlist with each item's known expiry and lead window — what
+    /// Now ranks and Estate lists, under the item's id.
+    var watched: [NowInputs.Expiry] {
+        items.map { item in
+            NowInputs.Expiry(id: item.id, label: item.label, expiry: states[item.id]?.expiry,
+                             lead: Self.seconds(item.lead) ?? Self.defaultLead)
+        }
+    }
+
+    /// The watchlist as Now reads it — local and cheap, so every tick and
+    /// every summon records it: a window opens on the clock, not on a probe.
+    func recordNowNeeds(now: Date = Date()) {
+        NowStore.shared.record(NowAdapters.expiries(watched, now: now), now: now)
     }
 
     /// Books the todo once the expiry enters the lead window. The name carries
@@ -169,7 +185,7 @@ final class ExpiryRadarStore {
         // loudest thing this radar can have to say, and skipping it was how
         // the row stayed green over a dead certificate.
         guard let expiry = state.expiry else { return state }
-        let lead = Self.seconds(item.lead) ?? 21 * 86400
+        let lead = Self.seconds(item.lead) ?? Self.defaultLead
         guard Date.now >= expiry.addingTimeInterval(-lead) else { return state }
         if let booked = state.bookedFor, abs(booked.timeIntervalSince(expiry)) < 3600 { return state }
         guard VitrinkaCLI.path != nil else {
@@ -208,6 +224,9 @@ final class ExpiryRadarStore {
         }
         return state
     }
+
+    /// An item whose `lead` does not parse watches three weeks out.
+    private static let defaultLead: TimeInterval = 21 * 86400
 
     private static func seconds(_ duration: String) -> TimeInterval? {
         TodoDuration.parse(duration)

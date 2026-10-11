@@ -5,8 +5,10 @@ import Foundation
 /// BOTH VPSes). No auth; off-mesh every call fails fast and the rails hide.
 actor MetricsClient {
     static let shared = MetricsClient()
+    /// The mesh host the estate's rules are read from — Now's identity for them.
+    static let origin = "192.0.2.10"
 
-    private let base = URL(string: "http://192.0.2.10:9090")!
+    private let base = URL(string: "http://\(MetricsClient.origin):9090")!
     private let session: URLSession
 
     init() {

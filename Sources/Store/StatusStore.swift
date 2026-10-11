@@ -21,7 +21,7 @@ final class StatusStore {
     /// Read cache for the ~30 settings this store surfaces. It is a snapshot
     /// taken at launch, so it must never be written back wholesale — see
     /// `mutate`.
-    private var preferences: Preferences
+    var preferences: Preferences
 
     /// The only way this store changes a setting: apply the change to the
     /// read cache AND to a freshly loaded file, never `preferences.save()`.
@@ -31,13 +31,20 @@ final class StatusStore {
     /// a repo could undo a brightness preset or a fan-curve edit made minutes
     /// earlier, and the bigger this snapshot grew the more it could eat
     /// (docs/specs/2026-09-10-display-preset-drag-decisions.md).
-    private func mutate(_ change: (inout Preferences) -> Void) {
+    func mutate(_ change: (inout Preferences) -> Void) {
         change(&preferences)
         Preferences.update(change)
     }
     var suggestions: [String] = []
     var prodIssues: [ProdIssue] = []
     var eveSessions: [EveSession] = []
+    /// eve workflows parked on an operator approval (Sessions, Now).
+    var eveApprovals: [EveApproval] = []
+    /// The apps shelf's latest releases (Prod's Releases section), read on
+    /// entering Prod — never polled. When they were fetched: a snapshot or a
+    /// failed revalidation leaves them "as of".
+    var shelfReleases: [ShelfRelease] = []
+    var shelfFetchedAt: Date?
     var serverMetrics: [ServerMetrics] = []
     var serviceStatuses: [ServiceStatus] = []
     /// Every alert the Prometheus and Loki rule evaluators report, fetched in
@@ -59,6 +66,12 @@ final class StatusStore {
     var prodUnreachableSince: Date? {
         didSet { if prodUnreachableSince != oldValue { onChange?() } }
     }
+    /// When the digest on screen was fetched, while it is the snapshot
+    /// restored at launch and Hlídač has not answered since: the board reads
+    /// "as of HH:MM", never green (copilot shell D8).
+    var prodRestoredAt: Date? {
+        didSet { if prodRestoredAt != oldValue { onChange?() } }
+    }
     /// Deployments whose red an open panel has already shown — the menu
     /// bar's red dot stops pulsing for those (`markProdSeen`).
     var prodSeenRed: Set<String> = [] {
@@ -67,19 +80,18 @@ final class StatusStore {
     /// settings.json problems, one orange row each: entries a lossy decode
     /// skipped, or the whole file failing while the last good copy runs.
     var configIssues: [String] = []
-    private var prodTask: Task<Void, Never>?
-    private var isRefreshingProd = false
-    private var settingsWatcher: DispatchSourceFileSystemObject?
-    private var settingsSeenStamp: SettingsFile.Stamp?
+    var isRefreshingProd = false
+    var settingsWatcher: DispatchSourceFileSystemObject?
+    var settingsSeenStamp: SettingsFile.Stamp?
     /// False while settings.json does not decode cleanly: the read cache is
     /// the last good copy (or defaults), so nothing may act on its absences.
-    private var settingsWritable = true
-    private var settingsReload: Task<Void, Never>?
+    var settingsWritable = true
+    var settingsReload: Task<Void, Never>?
     /// Semafor's `/overview`, refreshed at most every `throughputInterval`
     /// inside the pool's breaker; nil whenever Semafor is not answering.
     var ciThroughput: CIThroughput?
-    private var throughputFetchedAt: Date?
-    private static let throughputInterval: TimeInterval = 60
+    var throughputFetchedAt: Date?
+    static let throughputInterval: TimeInterval = 60
     var vitrinkaListening: [VitrinkaListening] { selectedVitrinkaWorkspace?.tray.listeners ?? [] }
     var vitrinkaBoards: [VitrinkaBoard] { selectedVitrinkaWorkspace?.tray.boards ?? [] }
     var vitrinkaWorkspaces: [VitrinkaWorkspaceSnapshot] = []
@@ -97,52 +109,52 @@ final class StatusStore {
     var devboxFetchedAt: Date?
     /// Every devbox guest to poll (spec 2026-09-25) — today's single
     /// endpoint until `devbox boxes --json` first answers.
-    private(set) var devboxBoxes: [DevboxEndpoint] = [.fallback]
+    var devboxBoxes: [DevboxEndpoint] = [.fallback]
     /// Each box's last answer; a box that fails drops out, one on hold
     /// keeps what it had — the one-box rules, per box.
-    private var devboxSnapshots: [String: DevboxSnapshot] = [:]
-    private var devboxDiscoveredAt: Date?
+    var devboxSnapshots: [String: DevboxSnapshot] = [:]
+    var devboxDiscoveredAt: Date?
     var lastRefresh: Date?
-    /// When a refresh last RAN, as opposed to when it last produced data —
-    /// the floor `refreshIfStale` enforces on panel opens.
-    private var lastRefreshAttempt: Date?
-    private var lastSentryRefresh: Date?
-    private var githubPollCursor = 0
-    private var githubPolledAt: [String: Date] = [:]
-    var isRefreshing = false
+    var lastSentryRefresh: Date?
+    var githubPollCursor = 0
+    var githubPolledAt: [String: Date] = [:]
+    /// Any backend lane in flight — the footer's "Syncing".
+    var isRefreshing: Bool { schedule.isRunning }
+    /// One lane per backend; see `startPolling`.
+    let schedule = BackendSchedule()
+    var pollingStarted = false
     var globalError: String?
 
-    private let client = GitHubClient()
-    private var prIndex = GitHubPRIndex()
-    private let prIndexDisk = GitHubPRIndexDisk()
-    private var prIndexIdentity: String?
-    private var prIndexLoad: (identity: String, task: Task<GitHubPRIndex, Never>)?
-    private var prIndexRevision = 0
-    private var archiveCursor = 0
-    private var archiveAttemptedAt: Date?
+    let client = GitHubClient()
+    var prIndex = GitHubPRIndex()
+    let prIndexDisk = GitHubPRIndexDisk()
+    var prIndexIdentity: String?
+    var prIndexLoad: (identity: String, task: Task<GitHubPRIndex, Never>)?
+    var prIndexRevision = 0
+    var archiveCursor = 0
+    var archiveAttemptedAt: Date?
     /// Circuit breaker in front of every remote host Pultík polls — including
     /// GitHub, which won't ban the machine but will happily let a broken token
     /// burn the hourly budget a hundred requests at a time.
-    private let gate = ProbeGate.shared
+    let gate = ProbeGate.shared
     // runId → was-running, used to notify only on observed transitions
-    private var previousRunning: [Int: Bool] = [:]
-    private var previousDeployRunning: [Int: Bool] = [:]
+    var previousRunning: [Int: Bool] = [:]
+    var previousDeployRunning: [Int: Bool] = [:]
     /// Each box's last parked count, for the pressure-park notification.
     /// Absent until that box's first snapshot so a launch never announces
     /// history. Per box: a silent box answering again rejoins the merged
     /// total, which must never read as a park.
-    private var previousDevboxParked: [String: Int] = [:]
+    var previousDevboxParked: [String: Int] = [:]
     /// Sentry issue ids already seen — notify only on genuinely new issues,
     /// and never on the first load after launch.
-    private var seenSentryIssues: Set<String>?
+    var seenSentryIssues: Set<String>?
     // Eve alert ids already fetched this app run — same idiom: notify only on
     // genuinely new visible-lane alerts, first load silent. Read-state proper
     // (the unread badge) is AlertSeenStore, which persists.
-    private var notifiedAlertIds: Set<Int>?
+    var notifiedAlertIds: Set<Int>?
     /// Critical firing-alert transitions — this app run only, first answer
     /// silent; the badge's seen-state is FiringSeenStore, which persists.
-    private var firingWatch = FiringWatch()
-    private var pollTask: Task<Void, Never>?
+    var firingWatch = FiringWatch()
 
     init() {
         let snapshot = Preferences.loadSnapshot()
@@ -230,533 +242,79 @@ final class StatusStore {
             }
     }
 
-    // MARK: - PR search (the archive)
+    // MARK: - Search state (its code: Backends/StatusStore+Search.swift)
 
     var searchResults: [ArchivedPR] = []
     var isSearching = false
     var searchError: String?
     var searchFetchedAt: Date?
     var searchIsPartial = false
-    private(set) var localSearchMilliseconds: Double = 0
-    private var searchTask: Task<Void, Never>?
-    private var searchQuery = ""
-    private var searchScope = ""
-
-    #if DEBUG
-    func githubRequestCounts() async -> (network: Int, shared: Int, lookups: Int, searches: Int) {
-        (await client.networkRequests, await client.sharedRequests,
-         await client.prLookupRequests, await client.prSearchRequests)
-    }
-    #endif
-
-    private func ensurePRIndex() async throws {
-        let identity = try await client.cacheIdentity()
-        guard prIndexIdentity != identity else { return }
-        if prIndexLoad?.identity != identity {
-            if prIndexIdentity != nil {
-                searchTask?.cancel()
-                searchScope = ""
-                repos = []
-            }
-            prIndex = GitHubPRIndex()
-            searchResults = []
-            searchFetchedAt = nil
-            prIndexIdentity = nil
-            let disk = prIndexDisk
-            prIndexLoad = (identity, Task { await disk.load(identity: identity) })
-        }
-        guard let load = prIndexLoad else { return }
-        let index = await load.task.value
-        guard prIndexLoad?.identity == identity else { return }
-        prIndex = index
-        prIndexIdentity = identity
-        prIndexLoad = nil
-        if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
-        if searchScope.isEmpty, searchQuery.count >= 2 { search(searchQuery) }
-    }
-
-    private func persistPRIndex() {
-        guard let identity = prIndexIdentity else { return }
-        prIndexRevision += 1
-        let revision = prIndexRevision
-        let index = prIndex
-        let disk = prIndexDisk
-        Task { await disk.save(index, identity: identity, revision: revision) }
-    }
-
-    @discardableResult
-    private func showLocalPRs(query: String, repos: [String]) -> GitHubPRIndex.Answer {
-        let start = DispatchTime.now().uptimeNanoseconds
-        let answer = prIndex.answer(query: query, repos: repos, now: Date())
-        searchResults = answer.hits
-        searchFetchedAt = answer.fetchedAt
-        searchIsPartial = !answer.isFresh
-        localSearchMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-        return answer
-    }
-
-    /// Every repo a search may reach: the pinned ones first, then the project
-    /// registry's — a project repo is "active" even when it isn't pinned to
-    /// the dashboard (BookingBack has no tile but its PRs are still ours).
-    var searchableRepos: [String] {
-        var seen = Set<String>()
-        return (pinned + preferences.projects.flatMap(\.repos))
-            .filter { seen.insert($0.lowercased()).inserted }
-    }
-
-    /// Search hits that aren't already on the dashboard above — the open PRs
-    /// live in the inbox, so the archive section shows what the inbox can't.
-    var searchMatches: [ArchivedPR] {
-        let onDashboard = Set(inbox.map { "\($0.repoSlug)#\($0.info.pr.number)".lowercased() })
-        return searchResults.filter { prIndex.contains(repo: $0.repoSlug, in: searchableRepos)
-            && !onDashboard.contains($0.id.lowercased()) }
-    }
-
-    /// Answer locally before debounce or breaker admission. Fresh complete
-    /// queries spend zero calls; remote work fills coverage without blanking rows.
-    func search(_ raw: String) {
-        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Sentry rides the same keystrokes but keeps its own task and state —
-        // GitHub being slow or erroring must not delay or blank prod hits.
-        searchSentry(query)
-        let repos = searchableRepos
-        let scope = GitHubPRIndex.key(query: query, repos: repos)
-        guard query != searchQuery || scope != searchScope else { return }
-        searchQuery = query
-        searchScope = scope
-        searchTask?.cancel()
-        searchError = nil
-        guard query.count >= 2 else {
-            searchResults = []
-            searchFetchedAt = nil
-            searchIsPartial = false
-            isSearching = false
-            return
-        }
-        let cached = showLocalPRs(query: query, repos: repos)
-        guard !cached.isFresh else { isSearching = false; return }
-        guard !gate.isPaused(.github) else {
-            searchError = "GitHub paused; saved results remain available"
-            isSearching = false
-            return
-        }
-
-        isSearching = true
-        searchTask = Task { [client] in
-            defer { if !Task.isCancelled, scope == searchScope { isSearching = false } }
-            do {
-                try await Task.sleep(for: .milliseconds(350))
-                try await ensurePRIndex()
-                guard !Task.isCancelled, scope == searchScope else { return }
-                let local = showLocalPRs(query: query, repos: repos)
-                if local.isFresh { isSearching = false; return }
-                let identity = prIndexIdentity
-                let found: GitHubPRSearchResult
-                if let number = Self.typedNumber(in: query) {
-                    let missing = prIndex.reposNeedingLookup(number: number, repos: repos, now: Date())
-                    let lookup = try await client.lookupPullRequests(number: number, repos: missing)
-                    guard !Task.isCancelled, scope == searchScope, identity == prIndexIdentity,
-                          try await client.cacheIdentity() == identity else { return }
-                    prIndex.rememberLookup(number: number, repos: lookup.confirmedRepos, hits: lookup.hits, now: Date())
-                    if let failure = lookup.failure { gate.failed(.github, failure) }
-                    let combined = prIndex.answer(query: query, repos: repos, now: Date()).hits
-                    found = .init(hits: combined, complete: lookup.warning == nil, warning: lookup.warning)
-                } else {
-                    found = try await client.searchPullRequests(terms: query, repos: repos)
-                }
-                guard !Task.isCancelled, scope == searchScope, identity == prIndexIdentity,
-                      try await client.cacheIdentity() == identity else { return }
-                prIndex.remember(query: query, repos: repos, hits: found.hits, complete: found.complete, now: Date())
-                showLocalPRs(query: query, repos: repos)
-                searchError = found.warning
-                persistPRIndex()
-            } catch is CancellationError {
-                return
-            } catch {
-                guard !Task.isCancelled else { return }
-                // A palette failure is a host failure like any other — feed
-                // the breaker, or a refusal first seen here never opens it
-                // and every further keystroke keeps knocking.
-                if let failure = ProbeFailure.tripping(error) { gate.failed(.github, failure) }
-                guard scope == searchScope else { return }
-                searchError = error.localizedDescription
-            }
-        }
-    }
-
-    /// "520" and "#520" mean item number 520; anything else is full text.
-    private static func typedNumber(in query: String) -> Int? {
-        GitHubPRIndex.number(in: query)
-    }
-
-    // MARK: - Sentry search (palette full text)
+    var localSearchMilliseconds: Double = 0
+    var searchTask: Task<Void, Never>?
+    var searchQuery = ""
+    var searchScope = ""
 
     var sentryResults: [ProdIssue] = []
     var isSearchingSentry = false
-    private var sentrySearchTask: Task<Void, Never>?
-    private var sentryQuery = ""
-
-    /// Search hits that aren't already on the prod strip above — same contract
-    /// as `searchMatches`: the section shows what the dashboard can't.
-    var sentryMatches: [ProdIssue] {
-        let onStrip = Set(prodIssues.map(\.id))
-        return sentryResults.filter { !onStrip.contains($0.id) }
-    }
-
-    /// Debounced org-wide Sentry search — resolves short ids ("EXAMPLEAPP-API-86")
-    /// and full text alike. Same cancel/stale-guard contract as `search(_:)`.
-    private func searchSentry(_ query: String) {
-        guard query != sentryQuery else { return }
-        sentryQuery = query
-        sentrySearchTask?.cancel()
-
-        // A paused breaker holds for typing too: a keystroke-driven search is
-        // the fastest way to turn one refused request into fifty.
-        guard query.count >= 2, isSectionVisible("prod"), !gate.isPaused(.sentry) else {
-            sentryResults = []
-            isSearchingSentry = false
-            return
-        }
-
-        isSearchingSentry = true
-        // `sentryToken`, never `preferences.sentryToken`: the keychain is the
-        // runtime store and the legacy plaintext copy is blanked on migration.
-        let settingsToken = sentryToken
-        sentrySearchTask = Task {
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            do {
-                let found = try await SentryClient.shared.searchIssues(query, settingsToken: settingsToken)
-                guard !Task.isCancelled, query == sentryQuery else { return }
-                sentryResults = found.map { ProdIssue(project: $0.project?.slug ?? "", issue: $0) }
-            } catch {
-                guard !Task.isCancelled else { return }
-                // Feed the breaker: a refusal first seen from the palette
-                // must open it like a poll failure would.
-                gate.failed(.sentry, .classify(error))
-                guard query == sentryQuery else { return }
-                // Off-mesh every keystroke fails — hide like the prod strip
-                // does rather than painting the palette red, but keep the why.
-                NSLog("pultik: sentry search failed: %@", error.localizedDescription)
-                sentryResults = []
-            }
-            isSearchingSentry = false
-        }
-    }
-
-    // MARK: - Issue search (the .issues mode)
+    var sentrySearchTask: Task<Void, Never>?
+    var sentryQuery = ""
 
     /// The mode's resting list: most recently touched issues across the same
     /// repos, kept warm by the poll loop so `.issues` opens with something to
     /// scan instead of an empty box.
     var recentIssues: [ArchivedIssue] = []
     var isPrefetchingIssues = false
-    private var lastIssueRefresh: Date?
+    var lastIssueRefresh: Date?
 
     var issueResults: [ArchivedIssue] = []
     var isSearchingIssues = false
     var issueSearchError: String?
-    private var issueSearchTask: Task<Void, Never>?
-    private var issueQuery = ""
+    var issueSearchTask: Task<Void, Never>?
+    var issueQuery = ""
     /// Session-lifetime LRU of query → hits: backspacing through a query, or
     /// re-running one, redraws instead of re-hitting GitHub. A few minutes of
     /// staleness is irrelevant on an archive.
-    private var issueCache: [String: [ArchivedIssue]] = [:]
-    private var issueCacheOrder: [String] = []
-    private static let issueCacheLimit = 20
+    var issueCache: [String: [ArchivedIssue]] = [:]
+    var issueCacheOrder: [String] = []
 
-    /// What the mode renders: the typed query's hits, or the resting list when
-    /// nothing is typed yet.
-    /// A one-character filter is too short to search, so it narrows the resting
-    /// list locally rather than emptying the mode.
-    var issueMatches: [ArchivedIssue] {
-        showingRecentIssues ? recentIssues : issueResults
-    }
-
-    /// True while the mode is showing the prefetched list rather than a search.
-    var showingRecentIssues: Bool {
-        issueQuery.count < 2
-    }
-
-    /// Debounced issue search, driven by the `.issues` filter on every
-    /// keystroke. Same cancel/stale-guard contract as `search(_:)` — nothing is
-    /// fetched outside the mode, so default typing costs nothing.
-    func searchIssues(_ raw: String) {
-        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query != issueQuery else { return }
-        issueQuery = query
-        issueSearchTask?.cancel()
-
-        guard query.count >= 2 else {
-            issueResults = []
-            issueSearchError = nil
-            isSearchingIssues = false
-            return
-        }
-        if let cached = cachedIssues(query) {
-            issueResults = cached
-            issueSearchError = nil
-            isSearchingIssues = false
-            return
-        }
-        guard !gate.isPaused(.github) else {
-            issueResults = []
-            issueSearchError = "GitHub paused; cached queries remain available"
-            isSearchingIssues = false
-            return
-        }
-
-        isSearchingIssues = true
-        issueSearchTask = Task { [client] in
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            let repos = searchableRepos
-            // Captured WITH the request: these are the repos the hits will have
-            // come from, whatever the scope is by the time they land.
-            let cacheKey = Self.issueCacheKey(repos: repos, query: query)
-            do {
-                let found: [ArchivedIssue]
-                if let number = Self.typedNumber(in: query) {
-                    let lookup = await client.lookupIssues(number: number, repos: repos)
-                    if let failure = lookup.failure { gate.failed(.github, failure) }
-                    found = lookup.hits
-                } else {
-                    found = try await client.searchIssues(terms: query, repos: repos)
-                }
-                // A superseded task must not clear the newer one's spinner.
-                guard !Task.isCancelled, query == issueQuery else { return }
-                issueResults = found
-                issueSearchError = nil
-                remember(cacheKey, found)
-            } catch {
-                guard !Task.isCancelled else { return }
-                if let failure = ProbeFailure.tripping(error) { gate.failed(.github, failure) }
-                guard query == issueQuery else { return }
-                issueResults = []
-                issueSearchError = error.localizedDescription
-            }
-            isSearchingIssues = false
-        }
-    }
-
-    /// Scope + text, never text alone: the repo set is user-editable through
-    /// pin/unpin and the project registry, so a query cached under one scope
-    /// must not answer under another — that would serve hits from repos just
-    /// removed and hide ones just added, for the rest of the session.
-    ///
-    /// Takes `repos` explicitly rather than reading `searchableRepos`: a write
-    /// happens after the await, so re-reading it there would file results under
-    /// whatever scope is current at *completion* — not the one they were
-    /// fetched under. The caller captures the scope with the request.
-    private static func issueCacheKey(repos: [String], query: String) -> String {
-        repos.joined(separator: ",").lowercased() + "|" + query.lowercased()
-    }
-
-    private func cachedIssues(_ query: String) -> [ArchivedIssue]? {
-        // A READ is correctly keyed by the scope in force right now.
-        let key = Self.issueCacheKey(repos: searchableRepos, query: query)
-        guard let hits = issueCache[key] else { return nil }
-        // A hit is a use: move it to the young end so it survives eviction.
-        issueCacheOrder.removeAll { $0 == key }
-        issueCacheOrder.append(key)
-        return hits
-    }
-
-    private func remember(_ key: String, _ found: [ArchivedIssue]) {
-        if issueCache[key] == nil { issueCacheOrder.append(key) }
-        issueCache[key] = found
-        while issueCacheOrder.count > Self.issueCacheLimit {
-            issueCache.removeValue(forKey: issueCacheOrder.removeFirst())
-        }
-    }
-
-    /// Entering the mode with nothing prefetched — first launch, or a sweep
-    /// that failed — should not show an empty box. The five-minute gate still
-    /// applies, so a failing sweep backs off instead of retrying per entry.
-    func warmIssuesIfNeeded() {
-        guard recentIssues.isEmpty else { return }
-        Task { await refreshIssuesIfStale() }
-    }
-
-    /// Prefetch behind a five-minute gate, same idiom as the Sentry refresh.
-    /// ~12 calls an hour against a 30-per-minute search budget — the gate is
-    /// there to keep the poll loop from spending it, not because it's tight.
-    private func refreshIssuesIfStale() async {
-        if let last = lastIssueRefresh, Date().timeIntervalSince(last) < 300 { return }
-        let repos = searchableRepos
-        guard !repos.isEmpty, !gate.isPaused(.github) else { return }
-        // Stamped before the call so a failing prefetch backs off too, instead
-        // of retrying on every 30s poll.
-        lastIssueRefresh = Date()
-        isPrefetchingIssues = true
-        defer { isPrefetchingIssues = false }
-        do {
-            recentIssues = try await client.recentIssues(repos: repos)
-        } catch {
-            NSLog("pultik: recent-issue prefetch failed: %@", error.localizedDescription)
-        }
-    }
+    #if DEBUG
+    /// `tools/panel-drive.sh firing …`: made-up alerts appended to every
+    /// answered fetch until cleared, so notifications, the badge and the
+    /// rail can be exercised without a real rule firing.
+    var debugFiring: [FiringAlert] = []
+    #endif
 
     // MARK: - Polling
 
+    /// One lane per backend (`BackendSchedule`, copilot shell D8), each on its
+    /// own clock behind its own breaker: a slow GitHub fan-out never holds
+    /// back vitrinka or devbox, and prod keeps its 15 s fast lane (decision
+    /// log: one request, every 15 s). A cold start first restores every
+    /// backend's last snapshot, so the panel is never blank.
     func startPolling() {
-        guard pollTask == nil else { return }
+        guard !pollingStarted else { return }
+        pollingStarted = true
         startWatchingSettings()
-        // The prod fast lane runs on its own loop so a slow GitHub fan-out can
-        // never delay prod detection (decision log: one request, every 15 s).
-        prodTask = Task {
-            while !Task.isCancelled {
-                await refreshProd()
-                // One stat: the directory watch misses in-place writes (an
-                // editor that truncates and rewrites keeps the inode).
-                settingsDirectoryChanged()
-                try? await Task.sleep(for: .seconds(15))
-            }
+        schedule.onLaneComplete = { [weak self] in self?.onRefreshComplete?() }
+        let cadence: @MainActor () -> TimeInterval = { [weak self] in (self?.anyRunning ?? false) ? 30 : 90 }
+        schedule.add("prod", every: { 15 }) { [weak self] in
+            await self?.refreshProd()
+            // One stat: the directory watch misses in-place writes (an
+            // editor that truncates and rewrites keeps the inode).
+            self?.settingsDirectoryChanged()
         }
-        pollTask = Task {
-            while !Task.isCancelled {
-                await refresh()
-                let interval: Duration = anyRunning ? .seconds(30) : .seconds(90)
-                try? await Task.sleep(for: interval)
-            }
+        schedule.add("github", every: cadence) { [weak self] in await self?.refreshGitHubLane() }
+        schedule.add("eve", every: cadence) { [weak self] in await self?.refreshEve() }
+        schedule.add("infra", every: cadence) { [weak self] in await self?.refreshInfraMetrics() }
+        schedule.add("vitrinka", every: cadence) { [weak self] in await self?.refreshVitrinka() }
+        schedule.add("devbox", every: cadence) { [weak self] in await self?.refreshDevbox() }
+        // Both keep their own five-minute floors inside.
+        schedule.add("sentry", every: cadence) { [weak self] in await self?.refreshSentryIfStale() }
+        schedule.add("issues", every: cadence) { [weak self] in await self?.refreshIssuesIfStale() }
+        Task {
+            await restoreSnapshots()
+            schedule.start()
         }
-    }
-
-    // MARK: - Prod watch (Hlídač)
-
-    /// The prod board's cards in board order — settings pointers over
-    /// Hlídač's verdicts, blind while Hlídač is not answering.
-    var prodGlance: ProdGlance {
-        ProdGlance.make(pointers: preferences.prodPointers, digest: prodDigest,
-                        unreachableSince: prodUnreachableSince, now: Date())
-    }
-
-    /// The prod board owns this firing alert (`ProdClaims.isClaimed` over the
-    /// board's own deployment selection): FIRING and `.h`'s estate firing
-    /// leave it to the deployment's card.
-    func prodClaims(_ alert: FiringAlert) -> Bool {
-        ProdClaims.isClaimed(alert: alert, digest: prodDigest, unreachableSince: prodUnreachableSince,
-                             pointers: preferences.prodPointers)
-    }
-
-    /// settings.json problems plus doubled prod keys — the orange rows above
-    /// the prod board, shown whatever the board's visibility or fold.
-    var prodConfigIssues: [String] {
-        configIssues + preferences.prodPointerIssues
-    }
-
-    /// `hlidacURL: ""` in settings.json turns the prod board off; unset means
-    /// the default Hlídač.
-    var hlidacConfigured: Bool {
-        preferences.hlidacURL.map { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? true
-    }
-
-    /// The menu bar's health strip (WP7 draws it).
-    var prodDots: [ProdGlance.Dot] {
-        prodGlance.dots(seenRed: prodSeenRed)
-    }
-
-    /// An open panel has shown every red card: stop their dots pulsing.
-    func markProdSeen() {
-        prodSeenRed.formUnion(prodGlance.redKeys)
-    }
-
-    /// One `gated(.hlidac)` call at a time: the fast lane and an explicit
-    /// refresh must not both hold a trial, or the breaker's bookkeeping races.
-    func refreshProd() async {
-        guard !isRefreshingProd else { return }
-        isRefreshingProd = true
-        defer { isRefreshingProd = false }
-        guard hlidacConfigured else {
-            // `hlidacURL: ""` turns the board off — no request, no digest,
-            // so no card claims an alert, no dot draws and FiringWatch keeps
-            // every alert and announcement.
-            prodDigest = nil
-            prodUnreachableSince = nil
-            ProdWatch.shared.observe(digest: nil, unreachableSince: nil, pointers: [], firingAnnounced: [])
-            return
-        }
-        var configured = preferences.hlidacURL ?? Preferences.defaultHlidacURL
-        #if DEBUG
-            // Hands-off verification serves the golden digest locally
-            // (CLAUDE.md "Verification"); release builds never read this.
-            if let override = ProcessInfo.processInfo.environment["PULTIK_HLIDAC_URL"], !override.isEmpty {
-                configured = override
-            }
-        #endif
-        let base = URL(string: configured) ?? URL(string: Preferences.defaultHlidacURL)!
-        await gated(.hlidac, probe: { await HlidacClient.shared.probe(base: base) }) {
-            let (digest, failure) = await HlidacClient.shared.digest(base: base)
-            guard let digest else {
-                if prodUnreachableSince == nil { prodUnreachableSince = Date() }
-                return failure
-            }
-            prodDigest = digest
-            prodUnreachableSince = nil
-            prodSeenRed = ProdGlance.seen(prodSeenRed, keepingOnly: prodGlance.redKeys)
-            return nil
-        }
-        // A held breaker skips the call above; the board must still read
-        // blind rather than keep showing a stale green.
-        if gate.isPaused(.hlidac), prodUnreachableSince == nil { prodUnreachableSince = Date() }
-        // Hlídač owns prod Sentry from this answer on (`refreshSentryIfStale`):
-        // drop the Mac sweep's baseline now, on the 15 s lane, so a fallback
-        // sweep after a short ownership never announces what piled up meanwhile.
-        if ProdClaims.sentryLive(digest: prodDigest, unreachableSince: prodUnreachableSince) {
-            seenSentryIssues = nil
-        }
-        ProdWatch.shared.observe(digest: prodDigest, unreachableSince: prodUnreachableSince,
-                                 pointers: preferences.prodPointers,
-                                 firingAnnounced: firingWatch.announcedDeployments)
-    }
-
-    // MARK: - settings.json hot reload
-
-    /// Directory-level watch, like NoteStore's: atomic writes replace the
-    /// file's inode, so only the containing directory reliably reports them.
-    private func startWatchingSettings() {
-        guard settingsWatcher == nil else { return }
-        let fd = Darwin.open(Preferences.directory.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write], queue: .main)
-        source.setEventHandler { [weak self] in self?.settingsDirectoryChanged() }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        settingsWatcher = source
-    }
-
-    /// Cheap `stat` first: notes.json and links.json share the directory, and
-    /// the app's own `Preferences.save()` must not bounce back as a reload.
-    private func settingsDirectoryChanged() {
-        let stamp = SettingsFile.stamp(of: Preferences.fileURL)
-        guard stamp != settingsSeenStamp else { return }
-        settingsSeenStamp = stamp
-        if let stamp, stamp == Preferences.memory.lastWritten { return }
-        settingsReload?.cancel()
-        settingsReload = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            self?.reloadSettings()
-        }
-    }
-
-    /// Swap in an outside edit (an AI, `pultik prod add`, a hand edit). A
-    /// file that no longer decodes keeps the copy in use and says why.
-    private func reloadSettings() {
-        let snapshot = Preferences.loadSnapshot()
-        configIssues = snapshot.issues
-        settingsWritable = snapshot.writable
-        // Not clean, the snapshot is the last good copy with any skipped
-        // entries standing in — still the best view, just never written.
-        preferences = snapshot.value
-        if pinned != snapshot.value.pinnedRepos {
-            // `pinned`'s didSet writes back: the same value, one harmless save
-            // (refused while the file is not clean).
-            pinned = snapshot.value.pinnedRepos
-        }
-        NSLog("pultik: settings.json reloaded%@",
-              snapshot.issues.isEmpty ? "" : " with \(snapshot.issues.count) issue(s)")
-        onChange?()
     }
 
     /// Runs a remote subsystem's fetch unless its breaker is open.
@@ -767,7 +325,7 @@ final class StatusStore {
     /// for it to prove the host is answering again. The probe returns the
     /// CLASSIFIED failure (or nil for success) — a 403 seen on a trial must
     /// re-arm the pause as `.rejected`, not be flattened to "not answering".
-    private func gated(
+    func gated(
         _ target: ProbeTarget,
         probe: () async -> ProbeFailure? = { nil },
         work: () async -> ProbeFailure?
@@ -798,952 +356,16 @@ final class StatusStore {
     /// thousand GitHub requests) for data that cannot have changed. The footer
     /// button and every explicit action still call `refresh()` directly.
     func refreshIfStale(minimumInterval: TimeInterval = 15) async {
-        // Deliberately NOT `lastRefresh`: that one tracks when the inbox data
-        // last changed hands and stops advancing while GitHub is paused, which
-        // would quietly re-open the floodgate for every other subsystem.
-        if let last = lastRefreshAttempt, Date().timeIntervalSince(last) < minimumInterval { return }
-        await refresh()
+        // Each lane's last ATTEMPT, deliberately not `lastRefresh`: that one
+        // tracks when the inbox data last changed hands and stops advancing
+        // while GitHub is paused, which would quietly re-open the floodgate
+        // for every other subsystem.
+        await schedule.runStale(olderThan: minimumInterval)
     }
 
+    /// Every lane now — the footer's button and explicit actions. A lane
+    /// already in flight is joined, never doubled.
     func refresh() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        lastRefreshAttempt = Date()
-        defer {
-            isRefreshing = false
-            onRefreshComplete?()
-        }
-
-        // No pinned repos skips GitHub only — every other rail (firing
-        // notifications included) still polls.
-        let slugs = pinned
-        if slugs.isEmpty {
-            repos = []
-            lastRefresh = Date()
-        } else {
-            await refreshGitHub(slugs)
-        }
-
-        await refreshEve()
-        await refreshInfraMetrics()
-        await refreshVitrinka()
-        await refreshDevbox()
-        await refreshSentryIfStale()
-        await refreshIssuesIfStale()
-    }
-
-    private func refreshGitHub(_ slugs: [String]) async {
-        // PRs, checks, reviews and deployments for every repo come from one
-        // GraphQL read per chunk. Workflow runs stay REST: missing repos
-        // first, then one repo per tick with a five-minute floor each.
-        do { try await ensurePRIndex() }
-        catch { NSLog("pultik: PR cache identity unavailable: %@", error.localizedDescription) }
-        await gated(.github, probe: { [client] in await client.probeHealth() }) {
-            // An archive page failing (a removed repo's 404) must not hold back
-            // the estate; the estate read alone decides the breaker.
-            await refreshPRArchiveIfNeeded()
-            let identity = prIndexIdentity
-            let scope = searchableRepos
-            let estate: [String: GitHubEstate.Repo]
-            do { estate = try await client.estate(repos: scope) }
-            catch is CancellationError { return nil }
-            catch {
-                NSLog("pultik: GitHub estate failed: %@", error.localizedDescription)
-                globalError = error.localizedDescription
-                return ProbeFailure.tripping(error)
-            }
-
-            var selected = slugs.filter { githubPolledAt[$0] == nil }
-            if selected.isEmpty {
-                for _ in slugs.indices {
-                    let slug = slugs[githubPollCursor % slugs.count]
-                    githubPollCursor = (githubPollCursor + 1) % slugs.count
-                    if Date().timeIntervalSince(githubPolledAt[slug] ?? .distantPast) >= 300 {
-                        selected = [slug]
-                        break
-                    }
-                }
-            }
-            for slug in selected { githubPolledAt[slug] = Date() }
-            let runs = await withTaskGroup(of: (String, Result<[WorkflowRun], Error>).self) { group in
-                var remaining = selected.makeIterator()
-                // Bound simultaneous response decoding across a large estate.
-                for _ in 0..<4 {
-                    guard let slug = remaining.next() else { break }
-                    group.addTask { [client] in await Self.fetchRuns(slug: slug, client: client) }
-                }
-                var collected: [String: Result<[WorkflowRun], Error>] = [:]
-                for await (slug, result) in group {
-                    collected[slug] = result
-                    if let slug = remaining.next() {
-                        group.addTask { [client] in await Self.fetchRuns(slug: slug, client: client) }
-                    }
-                }
-                return collected
-            }
-            if let current = try? await client.cacheIdentity(), current != identity || identity != prIndexIdentity {
-                do { try await ensurePRIndex() }
-                catch { NSLog("pultik: PR cache identity changed during refresh: %@", error.localizedDescription) }
-                return nil
-            }
-
-            // One repo failing keeps its last snapshot and shows its error;
-            // only the estate read failing as a whole opens the breaker.
-            var merged = Dictionary(uniqueKeysWithValues: repos.map { ($0.slug, $0) })
-            var answered = false
-            for slug in slugs {
-                var status = merged[slug] ?? RepoStatus(slug: slug)
-                var errors: [String] = []
-                if let repo = estate[slug] {
-                    if let error = repo.error { errors.append(error) } else {
-                        status.prs = repo.prs
-                        status.deploys = repo.deploys
-                        answered = true
-                    }
-                }
-                switch runs[slug] {
-                case .success(let fetched): status.runs = fetched; answered = true
-                case .failure(let error): errors.append(error.localizedDescription)
-                case nil: break
-                }
-                status.error = errors.first
-                if let error = status.error { NSLog("pultik: %@ error: %@", slug, error) }
-                merged[slug] = status
-            }
-            repos = slugs.compactMap { merged[$0] }
-            if prIndexIdentity != nil {
-                let now = Date()
-                for (slug, repo) in estate where repo.error == nil {
-                    prIndex.rememberRecent(repo: slug, hits: repo.recent, limit: GitHubEstate.recentLimit, now: now)
-                    prIndex.ingest(repo.prs.map { ArchivedPR(pr: $0.pr, repoSlug: slug, fetchedAt: now) }, now: now)
-                }
-                persistPRIndex()
-                if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
-            }
-            notifyTransitions(repos)
-            // Stamped HERE, not once per poll: while GitHub is paused the
-            // inbox is not refreshing, and a footer reading "just now" over
-            // half-hour-old runs would be a lie the pause badge can't undo.
-            if answered { lastRefresh = Date() }
-            onChange?()
-            globalError = !repos.isEmpty && repos.allSatisfy { $0.error != nil } ? repos.first?.error : nil
-            return nil
-        }
-    }
-
-    private func refreshPRArchiveIfNeeded() async {
-        if let at = archiveAttemptedAt, Date().timeIntervalSince(at) < 30 { return }
-        let scope = searchableRepos
-        guard !scope.isEmpty else { return }
-        archiveAttemptedAt = Date() // failed pages back off too
-        do {
-            try await ensurePRIndex()
-            let identity = prIndexIdentity
-            for _ in scope.indices {
-                let repo = scope[archiveCursor % scope.count]
-                archiveCursor = (archiveCursor + 1) % scope.count
-                guard let page = prIndex.archivePage(repo: repo, now: Date()) else { continue }
-                let hits = try await client.archivePage(repo: repo, page: page)
-                guard identity == prIndexIdentity, try await client.cacheIdentity() == identity else { return }
-                prIndex.rememberPage(repo: repo, page: page, hits: hits, now: Date())
-                persistPRIndex()
-                if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
-                return
-            }
-        } catch {
-            NSLog("pultik: PR archive refresh failed: %@", error.localizedDescription)
-        }
-    }
-
-    private nonisolated static func fetchRuns(
-        slug: String, client: GitHubClient
-    ) async -> (String, Result<[WorkflowRun], Error>) {
-        do { return (slug, .success(Self.displayRuns(try await client.workflowRuns(repo: slug)))) }
-        catch { return (slug, .failure(error)) }
-    }
-
-    /// Running runs + recent (24h) completed ones, capped at 5, always at least the latest.
-    private nonisolated static func displayRuns(_ runs: [WorkflowRun]) -> [WorkflowRun] {
-        let cutoff = Date().addingTimeInterval(-24 * 3600)
-        var shown = runs.filter { $0.isRunning || $0.createdAt > cutoff }
-        if shown.isEmpty, let latest = runs.first {
-            shown = [latest]
-        }
-        return Array(shown.prefix(5))
-    }
-
-    // MARK: - Notifications
-
-    private func notifyTransitions(_ statuses: [RepoStatus]) {
-        for status in statuses {
-            for run in status.runs {
-                let wasRunning = previousRunning[run.id]
-                if wasRunning == true, !run.isRunning, run.failed {
-                    Notifier.send(
-                        title: "\(status.slug) — run failed",
-                        body: "\(run.name ?? "workflow") · \(run.headBranch ?? "?")",
-                        url: run.htmlUrl
-                    )
-                }
-                previousRunning[run.id] = run.isRunning
-            }
-            for deploy in status.deploys {
-                let wasRunning = previousDeployRunning[deploy.id]
-                if wasRunning == true, !deploy.isRunning {
-                    Notifier.send(
-                        title: "\(status.slug) — deploy \(deploy.state)",
-                        body: "\(deploy.deployment.environment) · \(deploy.deployment.ref)",
-                        url: deploy.url
-                    )
-                }
-                previousDeployRunning[deploy.id] = deploy.isRunning
-            }
-        }
-    }
-
-    func enableLoginItemOnFirstRun() {
-        let bundleId = Bundle.main.bundleIdentifier ?? "pultik"
-        // A cache standing in for an unclean file may lack the opt-out that
-        // the real file records — never re-enable on its say-so.
-        guard settingsWritable else { return }
-        guard preferences.loginItemConfiguredFor != bundleId else { return }
-        LoginItem.setEnabled(true)
-        mutate { $0.loginItemConfiguredFor = bundleId }
-    }
-
-    // MARK: - Sentry (prod issues)
-
-    /// Unresolved production issues across the configured projects — throttled
-    /// to every 5 minutes; new issues (after the first load) notify.
-    private func refreshSentryIfStale() async {
-        // Decision log (Settled): while Hlídač serves prod Sentry the Mac
-        // stops sweeping it — no polling, no new-issue banners. The first
-        // sweep after Hlídač goes away is a silent baseline, so what arrived
-        // meanwhile does not burst out as banners.
-        if ProdClaims.sentryLive(digest: prodDigest, unreachableSince: prodUnreachableSince) {
-            seenSentryIssues = nil
-            return
-        }
-        if let last = lastSentryRefresh, Date().timeIntervalSince(last) < 300 { return }
-        // The global list plus every project's own: `eve-exampleapp` and
-        // `booking-onboarding` were configured per project and never swept.
-        let projects = preferences.allSentryProjects
-        // `sentryToken`, never `preferences.sentryToken`: the keychain is the
-        // runtime store and the legacy plaintext copy is blanked on migration.
-        let settingsToken = sentryToken
-        guard !projects.isEmpty else { return }
-
-        await gated(.sentry, probe: {
-            await SentryClient.shared.probeHealth(settingsToken: settingsToken)
-        }) {
-            let collected = await withTaskGroup(of: ProbeResult<[ProdIssue]>.self) { group in
-                for project in projects {
-                    group.addTask {
-                        do {
-                            let issues = try await SentryClient.shared.unresolvedIssues(
-                                project: project, settingsToken: settingsToken
-                            )
-                            return .value(issues.map { ProdIssue(project: project, issue: $0) })
-                        } catch {
-                            // Off-mesh / token missing: prod strip just stays empty.
-                            NSLog("pultik: sentry %@ failed: %@", project, error.localizedDescription)
-                            return .failed(.classify(error))
-                        }
-                    }
-                }
-                var all: [ProdIssue] = []
-                var failures: [ProbeFailure] = []
-                for await result in group {
-                    switch result {
-                    case let .value(issues): all.append(contentsOf: issues)
-                    case let .failed(failure): failures.append(failure)
-                    }
-                }
-                return (issues: all, failures: failures)
-            }
-
-            // One project failing is a project problem (permissions, a typo in
-            // the slug); ALL of them failing is a host problem, and only that
-            // is worth pulling the whole strip off Sentry for.
-            guard collected.failures.count < projects.count else {
-                lastSentryRefresh = Date()
-                return collected.failures.first
-            }
-            // Hlídač took Sentry over while this sweep was out: its banners
-            // and rows are no longer the Mac's to publish.
-            if ProdClaims.sentryLive(digest: prodDigest, unreachableSince: prodUnreachableSince) {
-                seenSentryIssues = nil
-                lastSentryRefresh = Date()
-                return nil
-            }
-
-            // "Major" means CURRENT: unresolved is forever in Sentry, so keep only
-            // issues actually seen in the last 24h (kills months-old test noise).
-            let cutoff = Date().addingTimeInterval(-24 * 3600)
-            let sorted = collected.issues
-                .filter { $0.issue.lastSeen > cutoff }
-                .sorted { $0.issue.lastSeen > $1.issue.lastSeen }
-            if let seen = seenSentryIssues {
-                for prodIssue in sorted where !seen.contains(prodIssue.id) {
-                    Notifier.send(
-                        title: "\(prodIssue.productLabel) prod — \(prodIssue.issue.shortId)",
-                        body: prodIssue.issue.title,
-                        url: prodIssue.issue.permalink
-                    )
-                }
-            }
-            seenSentryIssues = (seenSentryIssues ?? []).union(sorted.map(\.id))
-            prodIssues = sorted
-            lastSentryRefresh = Date()
-            return nil
-        }
-    }
-
-    // MARK: - Eve alerts (notifications ledger, WG mesh)
-
-    /// Alerts in the lanes the user actually watches — newest first, as the
-    /// ledger returns them. Every alert surface (rail, bar cell, badge,
-    /// notify) works off this filtered view.
-    var visibleAlerts: [EveAlert] {
-        let lanes = Set(preferences.visibleAlertLanes)
-        return eveAlerts.filter { lanes.contains($0.category) }
-    }
-
-    var unreadAlertIds: Set<Int> {
-        Set(visibleAlerts.map(\.id).filter { !AlertSeenStore.shared.isSeen($0) })
-    }
-
-    var unreadAlertCount: Int {
-        unreadAlertIds.count
-    }
-
-    /// A critical alert is unread — the badge and the bar cell go red.
-    var unreadCriticalAlert: Bool {
-        let unread = unreadAlertIds
-        return visibleAlerts.contains { $0.severity == .critical && unread.contains($0.id) }
-    }
-
-    /// Panel opened with the alerts section visible — everything currently
-    /// shown counts as seen. The badge clears; the rail keeps its unread
-    /// styling from the snapshot the panel took before calling this.
-    func markAlertsSeen() {
-        AlertSeenStore.shared.markSeen(visibleAlerts.map(\.id))
-        onChange?()
-    }
-
-    /// Both eve rails — PR sessions and the alerts ledger — behind ONE
-    /// breaker: same host, so a refusal on either is a refusal for both, and
-    /// the health endpoint is the cheapest way back in.
-    private func refreshEve() async {
-        await gated(.eve, probe: { [token = preferences.eveToken] in
-            await EveClient.shared.probeHealth(settingsToken: token)
-        }) {
-            var failure: ProbeFailure?
-            switch await EveClient.shared.prSessions(settingsToken: preferences.eveToken) {
-            case let .failed(why): failure = why
-            case let .value(sessions): eveSessions = sessions
-            }
-            // The ledger's verdict wins when it has one — it distinguishes a
-            // refusal from silence, which the sessions call cannot.
-            return await refreshEveAlerts() ?? failure
-        }
-    }
-
-    private func refreshEveAlerts() async -> ProbeFailure? {
-        guard isSectionVisible("alerts") else {
-            eveAlerts = []
-            return nil
-        }
-        // .failed = the fetch FAILED (off-mesh, endpoint absent): keep the last
-        // known list, or a transient failure would resurrect every alert as
-        // "new" on recovery. An EMPTY array is a real answer — the ledger is
-        // clear — and must be allowed to empty the rail.
-        let fetched: [EveAlert]
-        switch await EveNotificationsClient.shared.recent(settingsToken: preferences.eveToken) {
-        case let .failed(failure): return failure
-        case let .value(alerts): fetched = alerts
-        }
-        let lanes = Set(preferences.visibleAlertLanes)
-        if let notified = notifiedAlertIds {
-            for alert in fetched.reversed()
-                where lanes.contains(alert.category) && !notified.contains(alert.id)
-            {
-                Notifier.send(
-                    title: "eve · \(alert.category)\(alert.severity == .critical ? " — critical" : "")",
-                    body: alert.title,
-                    url: nil
-                )
-            }
-        }
-        notifiedAlertIds = (notifiedAlertIds ?? []).union(fetched.map(\.id))
-        eveAlerts = fetched
-        if let floor = fetched.map(\.id).min() {
-            AlertSeenStore.shared.prune(keepingAtOrAbove: floor)
-        }
-        onChange?()
-        return nil
-    }
-
-    // MARK: - Firing alerts (Prometheus + Loki rules, WG mesh)
-
-    /// Firing criticals the panel has not shown yet — the icon's bell counts
-    /// them with the unread eve alerts. Warnings never badge.
-    var unseenFiringCount: Int {
-        FiringWatch.criticals(firingAlerts)
-            .filter { !FiringSeenStore.shared.isSeen(FiringWatch.episodeKey($0)) }.count
-    }
-
-    /// The icon's one alert indicator: unread eve alerts plus unseen firing
-    /// criticals, red whenever either carries a critical.
-    var badgeAlertCount: Int { unreadAlertCount + unseenFiringCount }
-    var badgeAlertCritical: Bool { unreadCriticalAlert || unseenFiringCount > 0 }
-
-    /// Panel opened with the Firing section visible: every critical it
-    /// shows counts as seen and leaves the badge.
-    func markFiringSeen() {
-        FiringSeenStore.shared.markSeen(FiringWatch.criticals(firingAlerts).map(FiringWatch.episodeKey))
-        onChange?()
-    }
-
-    /// One answered fetch: shown in the rail, watched for critical
-    /// transitions (notified unless muted), seen-state pruned. nil —
-    /// Prometheus silent — empties the rail but tells the watch nothing, so
-    /// an outage never announces a wave of resolves.
-    private func applyFiring(_ fetched: (alerts: [FiringAlert], answered: Set<FiringAlert.Source>)?) {
-        guard let fetched else {
-            firingAlerts = []
-            return
-        }
-        firingAlerts = fetched.alerts
-        let notices = firingWatch.update(fetched.alerts, answered: fetched.answered,
-                                         quiet: { ProdWatch.shared.claims($0) })
-        if preferences.notifyFiring {
-            for notice in notices {
-                Notifier.send(title: notice.title, body: notice.body, url: Notifier.firingPanelURL)
-            }
-        }
-        if fetched.answered == [.prometheus, .loki] {
-            FiringSeenStore.shared.prune(keeping: Set(FiringWatch.criticals(fetched.alerts).map(FiringWatch.episodeKey)))
-        }
-    }
-
-    var notifyFiring: Bool {
-        preferences.notifyFiring
-    }
-
-    /// Settings ▸ Panel: mute critical-firing notifications. The watch keeps
-    /// running, so un-muting announces only what changes from then on.
-    func setNotifyFiring(_ on: Bool) {
-        mutate { $0.notifyFiring = on }
-    }
-
-    #if DEBUG
-    /// `tools/panel-drive.sh firing …`: made-up alerts appended to every
-    /// answered fetch until cleared, so notifications, the badge and the
-    /// rail can be exercised without a real rule firing.
-    private var debugFiring: [FiringAlert] = []
-
-    func debugSetFiring(_ spec: String) {
-        debugFiring = spec.split(separator: ",").map { item in
-            let parts = item.split(separator: ":", maxSplits: 1).map(String.init)
-            let (severity, name) = parts.count == 2 ? (parts[0], parts[1]) : ("critical", parts[0])
-            return FiringAlert(name: name, state: "firing", severity: severity,
-                               summary: "\(name) (injected by panel-drive)", description: nil,
-                               labels: ["alertname": name, "severity": severity,
-                                        "app": "pultik", "environment": "debug"],
-                               activeAt: Date(), source: .prometheus)
-        }
-        Task {
-            let fetched = await MetricsClient.shared.firingAlerts()
-            applyFiring((alerts: (fetched?.alerts ?? []) + debugFiring,
-                         answered: fetched?.answered ?? [.prometheus, .loki]))
-        }
-    }
-    #endif
-
-    // MARK: - Infra metrics (mesh Prometheus)
-
-    /// A dozen PromQL queries per refresh — by far the widest fan-out Pultík
-    /// has, and worth the cheapest possible way back after a pause.
-    private func refreshInfraMetrics() async {
-        let servers = preferences.servers.map { (name: $0.name, instance: $0.ref) }
-        let services = preferences.services.map { (name: $0.name, probe: $0.ref, host: $0.host, job: $0.job) }
-        var lanesRefreshed = false
-        await gated(.prometheus, probe: {
-            await MetricsClient.shared.reachable()
-                ? nil : .unreachable("prometheus not answering")
-        }) {
-            async let metrics = MetricsClient.shared.serverMetrics(servers: servers)
-            async let statuses = MetricsClient.shared.serviceStatuses(services: services)
-            (serverMetrics, serviceStatuses) = await (metrics, statuses)
-
-            // Every configured server has node_exporter series and every
-            // configured service a blackbox probe, so "asked about some, got
-            // nothing back" is not an empty answer — it is no answer, and the
-            // only failure signal these queries give.
-            if !servers.isEmpty || !services.isEmpty,
-               serverMetrics.isEmpty, serviceStatuses.isEmpty
-            {
-                laneBoard = CILaneBoard()
-                firingAlerts = []
-                return .unreachable("no answer from Prometheus")
-            }
-
-            if isSectionVisible("firing") {
-                let fetched = await MetricsClient.shared.firingAlerts()
-                #if DEBUG
-                applyFiring(fetched.map { (alerts: $0.alerts + debugFiring, answered: $0.answered) })
-                #else
-                applyFiring(fetched)
-                #endif
-            } else {
-                firingAlerts = []
-            }
-
-            if isSectionVisible("runners") {
-                laneBoard = await MetricsClient.shared.laneBoard()
-                lanesRefreshed = true
-            } else {
-                laneBoard = CILaneBoard()
-            }
-            return nil
-        }
-        // The shared pool line is Semafor's, another host: its failures back
-        // off on their own breaker instead of riding Prometheus's success, and
-        // while it holds the line stays hidden. Only a board this pass fetched
-        // is labelled — a board kept through a Prometheus pause keeps its
-        // last pool rather than pairing a new head with old lanes.
-        guard lanesRefreshed, !laneBoard.isEmpty else { return }
-        let lanes = laneBoard.lanes
-        laneBoard.pool = nil
-        var semaforAnswered = false
-        await gated(.semafor) {
-            let (pool, failure) = await SemaforClient.shared.pool(lanes: lanes)
-            laneBoard.pool = pool
-            guard failure == nil else { return failure }
-            semaforAnswered = true
-            // The overview is a day-scale read: once a minute, like Semafor's
-            // own SPA. A failed overview hides its lines but is no reason to
-            // back off the pool that just answered.
-            if Date().timeIntervalSince(throughputFetchedAt ?? .distantPast) >= Self.throughputInterval {
-                let (throughput, overviewFailure) = await SemaforClient.shared.overview()
-                ciThroughput = throughput
-                throughputFetchedAt = throughput == nil ? nil : Date()
-                if let overviewFailure {
-                    NSLog("pultik: semafor overview — %@", String(describing: overviewFailure))
-                }
-            }
-            return nil
-        }
-        if !semaforAnswered {
-            ciThroughput = nil
-            throughputFetchedAt = nil
-        }
-    }
-
-    // MARK: - Vitrinka listeners (own host, own breaker)
-
-    /// One host, one credential, one breaker: the listener rail and the todo
-    /// engine (`TodoStore`) refresh inside the same `gated(.vitrinka)` pass,
-    /// so an off-mesh Mac backs off once and every vitrinka surface folds
-    /// together. Hiding the listener section skips its requests, not the
-    /// todos'.
-    private func refreshVitrinka() async {
-        let wantListeners = isSectionVisible("vitrinka")
-        if !wantListeners { vitrinkaWorkspaces = [] }
-        // A half-open trial spends ONE request (`probe`) before the fan-out
-        // is allowed back — without it the default probe reports success,
-        // clears the strike ladder, and a still-dead host restarts at the
-        // gentle 2-minute step every round.
-        await gated(.vitrinka, probe: { await VitrinkaClient.shared.probe() }) {
-            // Atomic from the rails' point of view: nothing is published until
-            // BOTH halves answered, and any failure folds both — one hide,
-            // one breaker, never a listener rail showing a stale success
-            // beside a hidden todo rail.
-            var workspaces: [VitrinkaWorkspaceSnapshot] = []
-            if wantListeners {
-                switch await VitrinkaClient.shared.dailyWorkspaces(preferring: vitrinkaWorkspace) {
-                case let .failed(failure):
-                    vitrinkaWorkspaces = []
-                    TodoStore.shared.markUnreachable()
-                    return failure
-                case let .value(value):
-                    workspaces = value.snapshots
-                    if let rejection = value.rejection {
-                        vitrinkaWorkspaces = workspaces
-                        TodoStore.shared.markUnreachable()
-                        return rejection
-                    }
-                }
-            }
-            if let failure = await TodoStore.shared.refresh(using: VitrinkaClient.shared) {
-                vitrinkaWorkspaces = []
-                return failure
-            }
-            vitrinkaWorkspaces = workspaces
-            return nil
-        }
-    }
-
-    // MARK: - Devbox (one ws-v2 snapshot over ssh)
-
-    /// Workspace identity, units, fleet cpu/mem and public hosts all arrive in
-    /// one ssh process. A repo-local `ws ls --json` pass adds Mac-only app
-    /// ports and sync paths without touching sshd.
-    ///
-    /// Deliberately independent of the other sections: the box being asleep or
-    /// this Mac being off-network empties devbox and leaves GitHub/Sentry alone.
-    ///
-    /// This is the only poll that talks to sshd, so it is the one that got
-    /// this Mac banned: a failing poll is an authentication attempt repeated
-    /// every 90 seconds, forever. Its breaker matters more than the rest —
-    /// and its one-request way back in stays `DevboxClient.status()`, the
-    /// cheap probe, never this heavier call.
-    ///
-    /// Every discovered box is polled concurrently behind ITS OWN breaker
-    /// (spec 2026-09-25): a silent box drops out of the merge and is marked
-    /// silent, and never blanks the rail or delays the other box.
-    private func refreshDevbox() async {
-        guard isSectionVisible("devbox") else {
-            devboxWorkspaces = []
-            devboxSummary = nil
-            devboxFetchedAt = nil
-            devboxSnapshots = [:]
-            return
-        }
-        await discoverDevboxBoxesIfDue()
-        let boxes = devboxBoxes
-        await withTaskGroup(of: Void.self) { group in
-            for box in boxes {
-                group.addTask { await self.refreshDevbox(box) }
-            }
-        }
-        // Keyed by name, so a box whose host, port or alias changed would
-        // otherwise keep a held snapshot stamped with its OLD endpoint —
-        // and its rows would act there. Only an exact endpoint match stays.
-        devboxSnapshots = devboxSnapshots.filter { _, snapshot in boxes.contains(snapshot.endpoint) }
-        let estate = DevboxEstate(boxes: boxes, snapshots: Array(devboxSnapshots.values))
-        // The overview lists hot AND parked identities (parking contract,
-        // 2026-09-02): a parked workspace still holds its slot and ports and
-        // is one `up` from hot, so it stays on the rail as a parked card —
-        // vanishing is what a reaped workspace does. Anything the box calls
-        // neither is not a slot and is not shown.
-        devboxWorkspaces = estate.workspaces.filter { $0.isHot || $0.isParked }
-        devboxSummary = estate.summary
-        // A hidden rail must not keep a stale "as of" for its return.
-        devboxFetchedAt = estate.generated
-        for box in boxes {
-            guard let snapshot = devboxSnapshots[box.name] else { continue }
-            notifyDevboxPressure(snapshot.summary, box: box.name, named: boxes.count > 1)
-        }
-    }
-
-    /// One box's overview behind that box's breaker.
-    private func refreshDevbox(_ box: DevboxEndpoint) async {
-        await gated(.devbox(box: box.name), probe: {
-            // The cheap one-request way back in for a half-open breaker —
-            // `status()`, never the docker-stats-heavy hub call. A successful
-            // trial then proceeds to `work` like every other gated target.
-            if case let .failed(failure) = await DevboxClient.shared.status(box) {
-                return failure
-            }
-            return nil
-        }) {
-            switch await DevboxClient.shared.hub(box) {
-            case let .failed(failure):
-                devboxSnapshots[box.name] = nil
-                return failure
-            case let .value(snapshot):
-                devboxSnapshots[box.name] = snapshot
-                return nil
-            }
-        }
-    }
-
-    /// `devbox boxes --json` at launch and every `DevboxDiscovery.interval`.
-    /// A failed discovery (older CLI, no answer) keeps the last good list;
-    /// with none, today's single endpoint stays. The stamp is taken before
-    /// the await so an overlapping refresh does not discover twice.
-    private func discoverDevboxBoxesIfDue() async {
-        if let last = devboxDiscoveredAt, Date().timeIntervalSince(last) < DevboxDiscovery.interval { return }
-        devboxDiscoveredAt = Date()
-        let discovered = await DevboxClient.shared.discoverBoxes()
-        let boxes = DevboxDiscovery.resolve(discovered: discovered, previous: devboxBoxes)
-        if boxes != devboxBoxes {
-            NSLog("pultik: devbox boxes → %@",
-                  boxes.map { "\($0.name)=\($0.host):\($0.port)" }.joined(separator: ", "))
-            devboxBoxes = boxes
-        }
-    }
-
-    /// The sweep parked something because the box was short, not because a
-    /// workspace went quiet: parked rose while memory PSI was non-zero. A
-    /// stale park at PSI 0 is routine housekeeping and stays silent. Only a
-    /// rise counts — a revive that lowers the count is the user's own doing.
-    private func notifyDevboxPressure(_ summary: DevboxOverviewSummary, box: String, named: Bool) {
-        defer { previousDevboxParked[box] = summary.parked }
-        guard let previous = previousDevboxParked[box],
-              summary.parked > previous,
-              summary.pressureSome > 0
-        else { return }
-        let parked = summary.parked - previous
-        let psi = String(format: "%.1f", summary.pressureSome)
-        let free = String(format: "%.0fG", summary.availableGB)
-        Notifier.send(
-            title: "\(named ? "devbox \(box)" : "devbox") — parked \(parked) under memory pressure",
-            body: "\(summary.running) hot of \(summary.hotCeiling) · PSI some \(psi) · \(free) free / \(summary.floorGB)G floor",
-            url: nil
-        )
-    }
-
-    /// A card action (park / hold / up) just changed the box; the next
-    /// scheduled poll is up to 90 s away. Same gated path, so a box that has
-    /// gone away is still never hammered.
-    func refreshDevboxNow() async {
-        await refreshDevbox()
-    }
-
-    #if DEBUG
-        /// Targeted native-UI verification hook. It deliberately calls the same
-        /// gated production path; only the scheduling shortcut is Debug-only.
-        func debugRefreshDevbox() async {
-            await refreshDevbox()
-        }
-    #endif
-
-    // MARK: - Sections, projects & config
-
-    var projects: [ProjectSpec] {
-        preferences.projects
-    }
-
-    func isSectionVisible(_ key: String) -> Bool {
-        !preferences.hiddenSections.contains(key)
-    }
-
-    /// Configured VPSes — `/ssh` resolves its argument against these.
-    var servers: [Preferences.NamedRef] {
-        preferences.servers
-    }
-
-    /// Server display names in configured order — the services rail groups by
-    /// these, so an unconfigured host never invents a heading of its own.
-    var serverNames: [String] {
-        preferences.servers.map(\.name)
-    }
-
-    var vitrinkaWorkspace: String { preferences.vitrinkaWorkspace ?? VitrinkaClient.shared.workspace ?? "" }
-    /// Rail and palette derive their data from this pick, including when a
-    /// refresh finishes after a switch or the picked workspace is unavailable.
-    func setVitrinkaWorkspace(_ value: String) {
-        mutate { $0.vitrinkaWorkspace = value }
-    }
-
-    /// Right-rail collapse state (decision D11). Persisted, so a folded rail
-    /// stays folded across relaunches.
-    func isRailCollapsed(_ key: String) -> Bool {
-        preferences.collapsedRails.contains(key)
-    }
-
-    func setRail(_ key: String, collapsed: Bool) {
-        mutate {
-            $0.collapsedRails.removeAll { $0 == key }
-            if collapsed { $0.collapsedRails.append(key) }
-        }
-    }
-
-    /// The vitrinka project the panel's own writers file into (a promoted
-    /// note, an expiry-radar reminder); nil = unset, and they refuse.
-    var todoProject: String? {
-        preferences.todoProject
-    }
-
-    /// Settings ▸ General ▸ Todos.
-    func setTodoProject(_ slug: String?) {
-        mutate { $0.todoProject = slug }
-    }
-
-    var codeEditor: String? {
-        preferences.codeEditor
-    }
-
-    /// `/editor <name>` and the Settings picker; nil = autodetect.
-    func setCodeEditor(_ id: String?) {
-        mutate { $0.codeEditor = id }
-    }
-
-    func setSection(_ key: String, visible: Bool) {
-        mutate {
-            $0.hiddenSections.removeAll { $0 == key }
-            if !visible { $0.hiddenSections.append(key) }
-        }
-    }
-
-    func isAlertLaneVisible(_ lane: String) -> Bool {
-        preferences.visibleAlertLanes.contains(lane)
-    }
-
-    func setAlertLane(_ lane: String, visible: Bool) {
-        mutate {
-            $0.visibleAlertLanes.removeAll { $0 == lane }
-            if visible { $0.visibleAlertLanes.append(lane) }
-        }
-        onChange?()
-    }
-
-    /// Query → project, matched on key/title prefix ("fix" → ExampleApp).
-    func matchProject(_ query: String) -> ProjectSpec? {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard q.count >= 2 else { return nil }
-        return preferences.projects.first {
-            $0.key.lowercased().hasPrefix(q) || $0.title.lowercased().hasPrefix(q)
-        }
-    }
-
-    // MARK: - Sentry settings
-
-    /// The Sentry token lives in the login keychain (service `pultik-sentry`).
-    /// A token found in settings.json — where it sat in plaintext before the
-    /// integrations hub — is migrated in and blanked on first read, so old
-    /// installs upgrade themselves without losing access mid-poll.
-    var sentryToken: String? {
-        if let token = Keychain.read(service: "pultik-sentry", account: "token") {
-            return token
-        }
-        guard let legacy = preferences.sentryToken else { return nil }
-        if let failure = Keychain.write(service: "pultik-sentry", account: "token", value: legacy) {
-            NSLog("pultik: sentry token migration failed (%@) — keeping settings.json copy", failure)
-            return legacy
-        }
-        mutate { $0.sentryToken = nil }
-        NSLog("pultik: sentry token migrated from settings.json to the keychain")
-        return legacy
-    }
-
-    /// Read-only view for the Integrations pane (preferences itself stays
-    /// private — every mutation goes through a store method). What is
-    /// actually swept, so the pane's "watching …" matches the rail.
-    var sentryProjects: [String] {
-        preferences.allSentryProjects
-    }
-
-    /// Returns nil on success, or the keychain's complaint — the Settings
-    /// editor shows it rather than reporting a token as saved that is not.
-    @discardableResult
-    func setSentryToken(_ token: String?) -> String? {
-        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let failure: String? = if let trimmed, !trimmed.isEmpty {
-            Keychain.write(service: "pultik-sentry", account: "token", value: trimmed)
-        } else {
-            Keychain.delete(service: "pultik-sentry", account: "token")
-        }
-        if let failure {
-            // A failed write leaves the keychain WITHOUT the new token, so the
-            // legacy plaintext copy may be the only credential left — blanking
-            // it here would log the user out of Sentry with nothing to fall
-            // back on. Same for a failed delete: the old keychain value is
-            // still live, so the caller has not actually been cleared.
-            NSLog("pultik: sentry token keychain write failed: %@", failure)
-        } else if preferences.sentryToken != nil {
-            // Only once the keychain really holds the truth may the legacy
-            // copy go — it must not linger to shadow the keychain value.
-            mutate { $0.sentryToken = nil }
-        }
-        lastSentryRefresh = nil
-        Task { await refresh() }
-        return failure.map { "keychain refused the token: \($0)" }
-    }
-
-    // MARK: - eve settings
-
-    var eveToken: String? {
-        preferences.eveToken
-    }
-
-    /// nil on success, matching `setSentryToken` — settings.json writes have
-    /// no failure channel of their own, so this one is always nil today.
-    @discardableResult
-    func setEveToken(_ token: String?) -> String? {
-        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        mutate { $0.eveToken = (trimmed?.isEmpty ?? true) ? nil : trimmed }
-        Task { await refresh() }
-        return nil
-    }
-
-    // MARK: - Pin management & discovery
-
-    /// Whether `slug` is a shape GitHub can actually resolve.
-    ///
-    /// Guarding this matters more than it looks: a pin that 404s does so on
-    /// EVERY refresh, forever, and when it is the only pin the all-failed
-    /// branch above reads a permanent 404 as "GitHub is down" and trips the
-    /// probe breaker. Note `split` omits empty subsequences by default, so
-    /// the obvious two-part check waves through `/owner/repo` and
-    /// `owner//repo` — both of which build `…/repos//owner/repo`.
-    nonisolated static func isRepoSlug(_ slug: String) -> Bool {
-        let parts = slug.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 2 else { return false }
-        let owner = parts[0], name = parts[1]
-        // GitHub: owner is alphanumeric-or-hyphen, no hyphen at either end,
-        // ≤39 chars; a repo name adds "_" and "." and stops at 100.
-        guard !owner.isEmpty, owner.count <= 39,
-              !owner.hasPrefix("-"), !owner.hasSuffix("-"),
-              owner.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") })
-        else { return false }
-        guard !name.isEmpty, name.count <= 100, name != ".", name != "..",
-              name.allSatisfy({
-                  $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ".")
-              })
-        else { return false }
-        return true
-    }
-
-    /// The single writer of `pinned`, so the slug rule is enforced here rather
-    /// than trusted to each caller. Rejection is a silent no-op, matching the
-    /// empty/duplicate guards — callers that can show a message check first.
-    func pin(_ slug: String) {
-        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.isRepoSlug(trimmed), !pinned.contains(trimmed) else { return }
-        pinned.append(trimmed)
-        Task { await refresh() }
-    }
-
-    func unpin(_ slug: String) {
-        pinned.removeAll { $0 == slug }
-        repos.removeAll { $0.slug == slug }
-    }
-
-    func loadSuggestions() async {
-        guard !gate.isPaused(.github) else { return }
-        do {
-            let discovered = try await client.discoverRepos()
-            suggestions = discovered.filter { !pinned.contains($0) }
-        } catch {
-            globalError = error.localizedDescription
-        }
-    }
-
-    // MARK: - Run actions
-
-    func rerun(repo: String, runId: Int, failedJobsOnly: Bool) {
-        Task {
-            do {
-                try await client.rerun(repo: repo, runId: runId, failedJobsOnly: failedJobsOnly)
-                await refresh()
-            } catch {
-                globalError = error.localizedDescription
-            }
-        }
-    }
-
-    func cancel(repo: String, runId: Int) {
-        Task {
-            do {
-                try await client.cancel(repo: repo, runId: runId)
-                await refresh()
-            } catch {
-                globalError = error.localizedDescription
-            }
-        }
+        await schedule.runAll()
     }
 }

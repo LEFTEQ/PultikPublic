@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A prod notification's deployment, held until the panel view takes it
     /// (`takePendingProdKey`) — the view may not exist yet when it lands.
     private var pendingProdKey: String?
+    /// A `pultik://` link, held the same way (`takePendingLink`).
+    private var pendingLink: PultikLink?
     /// The menu bar flips light/dark without any store change; a coloured
     /// icon (prod dots) resolves `.primary` at render time, so re-render then.
     private var appearanceObservation: NSKeyValueObservation?
@@ -270,6 +272,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return pendingProdKey
     }
 
+    /// A `pultik://` click: the panel opens (never toggles shut) on what the
+    /// link names, handed over like a prod notification's key. An unknown
+    /// link is logged and dropped.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let link = PultikLink(url) else {
+                NSLog("pultik: ignored link %@", url.absoluteString)
+                continue
+            }
+            pendingLink = link
+            let wasVisible = panel?.isVisible == true
+            if !wasVisible { togglePanel(nil) }
+            if wasVisible {
+                NotificationCenter.default.post(name: .pultikOpenLink, object: nil)
+            }
+        }
+    }
+
+    /// The pending link, once: nil after the first taker.
+    func takePendingLink() -> PultikLink? {
+        defer { pendingLink = nil }
+        return pendingLink
+    }
+
     func closePanel() {
         guard let panel, panel.isVisible else { return }
         panel.close()
@@ -315,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screens = NSScreen.screens
         let preferredScreen = PanelTestDisplay.preferredIndex(in: screens.map(\.localizedName))
             .map { screens[$0] }
-        panel.showCentered(on: preferredScreen)
+        panel.showCentered(on: preferredScreen, takeKey: false)
         debugLastSummonMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000
         Task { await store.refreshIfStale() }
     }
@@ -416,4 +442,7 @@ extension Notification.Name {
     /// Posted by `AppDelegate.showProd(key:)`; `userInfo["key"]` is the
     /// deployment the panel should open on the `.h` matrix.
     static let pultikOpenProd = Notification.Name("dev.example.pultik.openProd")
+    /// Posted by `AppDelegate.application(_:open:)` while the panel is up;
+    /// the view takes the link through `takePendingLink()`.
+    static let pultikOpenLink = Notification.Name("dev.example.pultik.openLink")
 }

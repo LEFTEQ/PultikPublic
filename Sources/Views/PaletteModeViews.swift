@@ -2,20 +2,11 @@ import SwiftUI
 
 // MARK: - Glass
 
-/// Liquid Glass where the OS has it (macOS 26+), regular material below —
-/// the floating completion card's background.
+/// Liquid Glass — the floating completion card's background (a popover-like
+/// control floating over content, DESIGN.md §1).
 struct GlassCard: ViewModifier {
     func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        } else {
-            content
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
-                )
-        }
+        content.glassEffect(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -222,13 +213,15 @@ struct IssueSearchView: View {
 
 // MARK: - .vit mode — all listeners
 
+/// The Sessions module's list until the fleet reader lands (WP7): every
+/// vitrinka listener (`.v` is its alias).
 struct VitrinkaAllView: View {
     let entries: [VitrinkaListening]
-    let isSelected: (String) -> Bool
+    var selectedID: String?
     let onBack: () -> Void
 
     var body: some View {
-        ScrollView {
+        SelectionScrollView(selection: selectedID) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
                     Button(action: onBack) {
@@ -253,13 +246,35 @@ struct VitrinkaAllView: View {
                         .padding(.vertical, 24)
                 }
                 ForEach(entries) { entry in
-                    VitrinkaListRow(entry: entry, selected: isSelected("vit:\(entry.id)"))
+                    VitrinkaListRow(entry: entry, selected: selectedID == "vit:\(entry.id)")
                         .opacity(ResolvedStore.shared.isResolved("vit:\(entry.id)") ? 0.35 : 1)
                         .id("vit:\(entry.id)")
                 }
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 8)
+        }
+    }
+}
+
+extension VitrinkaAllView: ModulePage {
+    var objects: [ModuleObject] {
+        entries.map { entry in
+            var facts = [ModuleObject.Fact(label: "scope", value: entry.scopeKind == "all" ? "every board" : entry.scope),
+                         ModuleObject.Fact(label: "kind", value: entry.scopeKind),
+                         ModuleObject.Fact(label: "open", value: "\(entry.openCount)"),
+                         ModuleObject.Fact(label: "questions", value: "\(entry.questionCount)"),
+                         ModuleObject.Fact(label: "last seen", value: "\(entry.lastSeen.shortAge) ago")]
+            if !entry.session.isEmpty { facts.append(.init(label: "session", value: entry.session)) }
+            if !entry.actor.isEmpty { facts.append(.init(label: "actor", value: entry.actor)) }
+            if let activity = entry.activity { facts.append(.init(label: "activity", value: activity)) }
+            return ModuleObject(
+                id: "vit:\(entry.id)", title: entry.title,
+                status: entry.isLive ? Chip("listening", .ok) : Chip("gone", .neutral),
+                meta: entry.scope, symbol: "dot.radiowaves.left.and.right", project: "vitrinka",
+                url: entry.url.flatMap(URL.init(string:)),
+                context: entry.openCount > 0 ? [Chip("\(entry.openCount) open", .warn)] : [],
+                facts: facts)
         }
     }
 }

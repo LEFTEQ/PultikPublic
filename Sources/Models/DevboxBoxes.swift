@@ -41,7 +41,7 @@ enum DevboxName {
 /// Where one guest's forced-command sshd listens. `sshAlias` is the Mac's
 /// full-shell alias for the same guest — only a human's Warp attach uses it;
 /// the poll addresses `host:port` directly with Pultík's dedicated key.
-struct DevboxEndpoint: Hashable, Sendable {
+struct DevboxEndpoint: Hashable, Sendable, Codable {
     let name: String
     let sshAlias: String
     let host: String
@@ -161,7 +161,7 @@ enum DevboxDiscovery {
 // MARK: - The merged estate
 
 /// One box's overview answer, untagged — the merge stamps its rows.
-struct DevboxSnapshot {
+struct DevboxSnapshot: Codable {
     let endpoint: DevboxEndpoint
     /// The BOX-side stamp — nil when the payload carried none.
     let generated: Date?
@@ -171,7 +171,7 @@ struct DevboxSnapshot {
 
 /// One discovered box in the per-box breakdown: its free memory above the
 /// floor, or silent when it did not answer.
-struct DevboxBoxShare: Equatable {
+struct DevboxBoxShare: Equatable, Codable {
     let name: String
     /// MemAvailable above the floor; negative below it; nil while silent.
     let headroomBytes: Double?

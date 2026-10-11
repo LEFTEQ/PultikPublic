@@ -6,7 +6,7 @@ struct WorkflowRunsResponse: Decodable {
     let workflowRuns: [WorkflowRun]
 }
 
-struct WorkflowRun: Decodable, Identifiable {
+struct WorkflowRun: Codable, Identifiable {
     let id: Int
     let name: String?
     let headBranch: String?
@@ -25,14 +25,14 @@ struct WorkflowRun: Decodable, Identifiable {
     }
 }
 
-struct Deployment: Decodable, Identifiable {
+struct Deployment: Codable, Identifiable {
     let id: Int
     let environment: String
     let ref: String
     let createdAt: Date
 }
 
-struct PullRequest: Decodable, Identifiable {
+struct PullRequest: Codable, Identifiable {
     let id: Int
     let number: Int
     let title: String
@@ -41,7 +41,7 @@ struct PullRequest: Decodable, Identifiable {
     let head: Head
     let updatedAt: Date?
 
-    struct Head: Decodable {
+    struct Head: Codable {
         let sha: String
         let ref: String
     }
@@ -336,7 +336,7 @@ struct ProdIssue: Identifiable {
 // MARK: - Infra metrics (mesh Prometheus)
 
 /// One VPS's node-exporter snapshot, percentages 0–100.
-struct ServerMetrics: Identifiable {
+struct ServerMetrics: Identifiable, Codable {
     let name: String // "BuildServer"
     let instance: String // prometheus instance label, e.g. "build-vps"
     var cpu: Double?
@@ -387,7 +387,7 @@ func formatSize(used: Double, total: Double) -> String {
 }
 
 /// One service's blackbox probe snapshot.
-struct ServiceStatus: Identifiable {
+struct ServiceStatus: Identifiable, Codable {
     let name: String // "exampleapp-prod"
     let probe: String // probe instance label (URL)
     /// The `servers[].name` of the box this service runs on — the rail's group
@@ -411,7 +411,7 @@ struct ServiceStatus: Identifiable {
 /// instance (`ci_kvm_controller_up`). Runners are per-job, ephemeral and
 /// nameless since 2026-08-30, so the lane is the stable unit and its running
 /// jobs are the occupancy (spec 2026-09-09).
-struct CILane: Identifiable {
+struct CILane: Identifiable, Codable {
     let name: String // "exampleapp-ci"
     let backend: String // "docker" | "kvm"
     let trustGroup: String // "firefly" (CI) | "bastion" (deploys)
@@ -433,7 +433,7 @@ struct CILane: Identifiable {
 
 /// A job executing on the fleet right now (`ci_runner_job_info`, one series
 /// per running job, link included — no GitHub lookup needed).
-struct CIJob: Identifiable {
+struct CIJob: Identifiable, Codable {
     let org: String
     let repo: String // "ExampleApp"
     let lane: String
@@ -451,7 +451,7 @@ struct CIJob: Identifiable {
 
 /// The whole CI picture for one poll: every enabled lane plus the jobs the
 /// collector saw on lanes that are not ours (`github-hosted`, `unknown`).
-struct CILaneBoard {
+struct CILaneBoard: Codable {
     var lanes: [CILane] = []
     var elsewhere: [CIJob] = []
     var elsewhereQueued: Int = 0
@@ -465,7 +465,7 @@ struct CILaneBoard {
 /// The one Docker JIT pool every CI lane draws on (build-server-infra priority
 /// decisions 4-6, 2026-09-26): slots and reservation budget, and the head of
 /// its priority queue — the waiter that places next.
-struct CIPool: Equatable {
+struct CIPool: Equatable, Codable {
     var slotsUsed: Int
     var slotsMax: Int
     var reservedMiB: Int
@@ -481,19 +481,19 @@ struct CIPool: Equatable {
     var refusals: [CIRefusal] = []
 }
 
-struct CIPartitionLoad: Equatable {
+struct CIPartitionLoad: Equatable, Codable {
     let slotsUsed: Int
     let slotsMax: Int
     let reservedMiB: Int
     let budgetMiB: Int
 }
 
-struct CIRefusal: Equatable {
+struct CIRefusal: Equatable, Codable {
     let reason: String
     let count: Int
 }
 
-struct CIPoolHead: Equatable {
+struct CIPoolHead: Equatable, Codable {
     let lane: String
     let tier: Int?
     let kind: String?
@@ -587,13 +587,13 @@ struct SemaforAdmission: Decodable {
 /// widget reads: today's throughput against yesterday at the same time,
 /// today's queue wait, and the 24 local hours. "Today" is Semafor's
 /// Europe/Prague day, so `hour` is the current bucket in `tz`.
-struct CIThroughput: Equatable, Decodable {
-    struct Queue: Equatable, Decodable {
+struct CIThroughput: Equatable, Codable {
+    struct Queue: Equatable, Codable {
         let p50: Double
         let p95: Double
     }
 
-    struct Hour: Equatable, Decodable {
+    struct Hour: Equatable, Codable {
         let hour: Int
         let jobs: Int
     }
@@ -642,8 +642,8 @@ struct CIThroughput: Equatable, Decodable {
 /// the Loki ruler's `/prometheus/api/v1/alerts` (same shape). Alertmanager
 /// itself is loopback-only on build-server, so these are the rules' own view:
 /// every firing rule, before routing — manual silences are not applied.
-struct FiringAlert: Equatable, Identifiable {
-    enum Source: String, Equatable {
+struct FiringAlert: Equatable, Identifiable, Codable {
+    enum Source: String, Equatable, Codable {
         case prometheus, loki
     }
 
@@ -660,6 +660,10 @@ struct FiringAlert: Equatable, Identifiable {
         ([source.rawValue, name] + labels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" })
             .joined(separator: "|")
     }
+
+    /// The always-firing dead man's switch: it firing is the healthy state,
+    /// so no rail, badge, notification or Now need ever shows it.
+    var isHeartbeat: Bool { name == "Watchdog" }
 
     /// `app · environment`, when labelled — the rail row's and the
     /// notification's context.
@@ -772,9 +776,29 @@ struct ProdPointer: Codable, Equatable, Identifiable {
     var title: String?
     var tier: String? // critical | important | watch
     var order: Int?
+    /// Where the deployment's release line is read (Shipping inside Prod,
+    /// copilot shell D9): GitHub environments, since Hlídač carries no
+    /// release data. Absent = the shipped sources for the key; [] = none.
+    var release: [GitHubRelease.Source]?
     var id: String {
         key
     }
+
+    /// The sources a pointer reads its release line from.
+    var releaseSources: [GitHubRelease.Source] {
+        release ?? Self.shippedReleases[key] ?? []
+    }
+
+    /// The estate's deployments as GitHub records them (2026-10-11): ExampleApp
+    /// and vitrinka deploy `main` to `production`, Booking SK deploys
+    /// `canary` to `sk` from both of its app repos. eve has no GitHub
+    /// deployments; Booking CZ is not monitored.
+    static let shippedReleases: [String: [GitHubRelease.Source]] = [
+        "exampleapp-prod": [GitHubRelease.Source(repo: "example-org/ExampleApp", environment: "production")],
+        "vitrinka": [GitHubRelease.Source(repo: "example-org/vitrinka", environment: "production")],
+        "booking-sk": [GitHubRelease.Source(repo: "Booking/BookingBack", environment: "sk", branch: "canary"),
+                         GitHubRelease.Source(repo: "Booking/Booking", environment: "sk", branch: "canary")],
+    ]
 }
 
 /// Where decode problems in settings.json are collected instead of failing
@@ -878,14 +902,14 @@ struct EveSessionsResponse: Decodable {
     let sessions: [EveSession]
 }
 
-struct EveSession: Decodable, Identifiable {
+struct EveSession: Codable, Identifiable {
     let id: String
     let status: String? // running | completed | failed | waiting
     let updatedAt: Date?
     let source: Source?
     let prompt: String?
 
-    struct Source: Decodable {
+    struct Source: Codable {
         let repo: String?
         let prNumber: Int?
     }
@@ -914,6 +938,112 @@ struct EveSession: Decodable, Identifiable {
     }
 }
 
+// MARK: - Eve approvals (a workflow parked on the operator)
+
+/// `GET /eve/v1/sessions?view=approvals`: every session genuinely parked on
+/// an approval (`approvalKind == "approval"`, non-terminal — a subagent's
+/// park stays `running`) plus its whole ancestor chain, unpaginated, so the
+/// list is eve's own badge. Questions are not in it.
+struct EveApprovalsResponse: Decodable {
+    let sessions: [EveRecordedSession]
+}
+
+/// The fields of eve's `RecordedSession` the approvals list needs.
+struct EveRecordedSession: Decodable {
+    let id: String
+    let title: String
+    let status: String
+    let parentSessionId: String?
+    let approvalKind: String?
+    let waitingTool: String?
+    let workflowFlow: String?
+    let flow: String?
+    let updatedAt: Date
+    /// Parked before eve's process booted: it survived a restart, so it is
+    /// a dismiss-or-redrive candidate rather than a live prompt.
+    let stalled: Bool
+    let source: EveSession.Source?
+
+    var isParkedApproval: Bool {
+        status != "done" && status != "failed" && approvalKind == "approval"
+    }
+}
+
+/// One workflow waiting on the operator: its root (the answerable session,
+/// carrying the continuation) and the approvals parked under it, deepest
+/// first — the one eve's Approvals page answers.
+struct EveApproval: Codable, Equatable, Identifiable, Sendable {
+    struct Node: Codable, Equatable, Sendable {
+        let id: String
+        let title: String
+        let tool: String?
+        let updatedAt: Date
+        let stalled: Bool
+
+        /// Stalled (it survived an eve restart) and parked over a week: a
+        /// dismiss-or-redrive candidate that drifts, never a live ask on
+        /// you (the operator, 2026-10-11 — 77 parked 109 days read "78 waiting").
+        func drifts(now: Date) -> Bool {
+            stalled && now.timeIntervalSince(updatedAt) > EveApproval.driftAfter
+        }
+    }
+
+    static let driftAfter: TimeInterval = 7 * 86_400
+
+    let rootID: String
+    let title: String
+    let flow: String?
+    let repo: String?
+    let prNumber: Int?
+    /// Never empty; deepest first, then the most recently parked.
+    let parked: [Node]
+
+    var id: String { rootID }
+    var display: Node { parked[0] }
+
+    /// Every parked node drifts: the workflow no longer waits on you.
+    func drifts(now: Date) -> Bool { parked.allSatisfy { $0.drifts(now: now) } }
+
+    /// The Sessions module's object id, the one Now's need opens.
+    static func objectID(_ rootID: String) -> String { "approval:\(rootID)" }
+
+    /// eve's Approvals page for the node it answers.
+    var url: URL {
+        URL(string: "https://eve.ops.example.invalid/approvals/\(display.id)")!
+    }
+
+    /// Groups the view's rows by top-level root, walking `parentSessionId`
+    /// inside the returned subset (eve sends the full ancestor chain).
+    static func group(_ sessions: [EveRecordedSession]) -> [EveApproval] {
+        let byID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func lineage(_ session: EveRecordedSession) -> [EveRecordedSession] {
+            var chain = [session]
+            var seen: Set<String> = [session.id]
+            while let parent = chain.last?.parentSessionId.flatMap({ byID[$0] }), seen.insert(parent.id).inserted {
+                chain.append(parent)
+            }
+            return chain
+        }
+        var groups: [String: (root: EveRecordedSession, parked: [(node: EveRecordedSession, depth: Int)])] = [:]
+        for session in sessions where session.isParkedApproval {
+            let chain = lineage(session)
+            let root = chain.last ?? session
+            groups[root.id, default: (root, [])].parked.append((session, chain.count - 1))
+        }
+        return groups.values.map { group in
+            let parked = group.parked.sorted {
+                $0.depth != $1.depth ? $0.depth > $1.depth : $0.node.updatedAt > $1.node.updatedAt
+            }
+            return EveApproval(
+                rootID: group.root.id, title: group.root.title, flow: group.root.workflowFlow ?? group.root.flow,
+                repo: group.root.source?.repo, prNumber: group.root.source?.prNumber,
+                parked: parked.map { Node(id: $0.node.id, title: $0.node.title, tool: $0.node.waitingTool,
+                                          updatedAt: $0.node.updatedAt, stalled: $0.node.stalled) })
+        }
+        .sorted { $0.display.updatedAt < $1.display.updatedAt }
+    }
+}
+
 // MARK: - Eve alerts (notifications ledger)
 
 struct EveAlertsResponse: Decodable {
@@ -922,27 +1052,27 @@ struct EveAlertsResponse: Decodable {
 
 /// One eve notification — what lands in the Telegram forum topics, mirrored
 /// into the Postgres ledger at the `sendFlowTelegram` chokepoint.
-struct EveAlert: Decodable, Identifiable {
+struct EveAlert: Codable, Identifiable {
     let id: Int
     let ts: Date
-    let flow: String // "monitor", "exampleapp_prod", …
+    let flow: String? // "monitor", "exampleapp_prod", …; null when the ledger row has none
     let category: String // lane: "incidents", "priority", …
     let severity: Severity? // null when the emitter doesn't know
     let title: String
     let body: String
 
-    enum Severity: String, Decodable {
+    enum Severity: String, Codable {
         case critical, warning
     }
 }
 
 // MARK: - Aggregated view models
 
-enum CheckState {
+enum CheckState: Codable {
     case running, success, failure, none
 }
 
-struct DeployInfo: Identifiable {
+struct DeployInfo: Identifiable, Codable {
     let deployment: Deployment
     let state: String
     let url: String?
@@ -959,11 +1089,11 @@ struct DeployInfo: Identifiable {
     }
 }
 
-enum ReviewState {
+enum ReviewState: Codable {
     case approved, changesRequested, awaiting
 }
 
-struct PRInfo: Identifiable {
+struct PRInfo: Identifiable, Codable {
     let pr: PullRequest
     let state: CheckState
     let review: ReviewState
@@ -984,7 +1114,7 @@ struct PRInfo: Identifiable {
     }
 }
 
-struct RepoStatus: Identifiable {
+struct RepoStatus: Identifiable, Codable {
     let slug: String // "owner/name"
     var runs: [WorkflowRun] = []
     var deploys: [DeployInfo] = []
@@ -1095,7 +1225,7 @@ struct DevboxHost: Identifiable, Codable {
 
 /// One process exposed by a ws-v2 workspace. Its runtime state comes from the
 /// box, while port/FQDN/source are enriched by this Mac's `devbox ws ls`.
-struct DevboxWorkspaceApp: Identifiable {
+struct DevboxWorkspaceApp: Identifiable, Codable {
     let name: String
     let port: Int?
     let fqdn: String?
@@ -1162,7 +1292,7 @@ struct DevboxWorkspaceApp: Identifiable {
 /// A distinct local checkout feeding a workspace. Multi-repo committed
 /// workspaces can carry several; per-branch recipe instances normally carry
 /// one worktree shared by all their app processes.
-struct DevboxWorkspaceSource: Identifiable {
+struct DevboxWorkspaceSource: Identifiable, Codable {
     let app: String
     let path: String
     var id: String {
@@ -1174,7 +1304,7 @@ struct DevboxWorkspaceSource: Identifiable {
 /// partial truths: `.ws-meta` (identity), systemd (runtime), local manifests
 /// (apps/ports/source), hub vhosts (public URLs), and exact compose projects
 /// (fleet metrics). No one source covers both committed and per-branch forms.
-struct DevboxWorkspace: Identifiable {
+struct DevboxWorkspace: Identifiable, Codable {
     let name: String
     let project: String?
     let branch: String?
@@ -1352,7 +1482,7 @@ struct DevboxOverviewCapacity: Codable {
 /// The overview's capacity + resources block. Modern guests admit by RAM;
 /// hotCeiling is retained for older payloads. floorGB is the protected
 /// MemAvailable line the park sweep defends.
-struct DevboxOverviewSummary {
+struct DevboxOverviewSummary: Codable {
     let identitySlots: Int
     let targetHot: Int
     let hotCeiling: Int
@@ -1382,7 +1512,7 @@ struct DevboxOverviewSummary {
     /// PSI some ≥ 5 (the sweep's hysteresis floor) or under 8G above the
     /// floor (its recovery target); critical at PSI some ≥ 10 or below the
     /// floor (when it parks).
-    enum Pressure: Comparable {
+    enum Pressure: Comparable, Codable {
         case normal, elevated, critical
     }
 

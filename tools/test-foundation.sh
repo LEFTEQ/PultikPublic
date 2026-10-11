@@ -8,15 +8,21 @@ mkdir -p "$harness/Sources/Pultik" "$harness/Tests/PultikTests"
 sources=(Sources/Models/Models.swift Sources/Models/OverviewGlance.swift
   Sources/Models/DevboxBoxes.swift Sources/Models/DevboxClear.swift Sources/Models/FiringWatch.swift Sources/API/PollingSession.swift
   Sources/Support/GHToken.swift Sources/Support/ProcessOutput.swift Sources/Support/ProbeGate.swift Sources/Support/DevboxClearWorktree.swift
-  Sources/Support/PanelTestDisplay.swift
+  Sources/Support/PanelTestDisplay.swift Sources/Support/PultikLink.swift
   Sources/Models/ProdGlance.swift Sources/Models/ProdMatrix.swift Sources/Models/SettingsFile.swift
   Sources/Support/DateAge.swift Sources/Models/ProdTransitions.swift Sources/Models/ProdClaims.swift
-  Sources/Models/NotificationContent.swift Sources/Models/PRDigest.swift)
+  Sources/Models/NotificationContent.swift Sources/Models/PRDigest.swift Sources/Support/PultikFormat.swift
+  Sources/Data/QuerySnapshots.swift Sources/Data/QueryRepository.swift
+  Sources/Views/Shell/PanelModule.swift Sources/Views/Shell/PaletteMode.swift Sources/Views/Shell/ModuleRouter.swift
+  Sources/Views/Shell/KeyboardCoordinator.swift Sources/Models/FleetContract.swift
+  "$repo"/Sources/Models/Now/*.swift "$repo"/Sources/Models/Now/Adapters/*.swift)
 tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/DevboxBoxesTests.swift
   Tests/FiringWatchTests.swift Tests/DevboxClearTests.swift Tests/DevboxClearWorktreeTests.swift
-  Tests/PanelTestDisplayTests.swift
+  Tests/PanelTestDisplayTests.swift Tests/PultikLinkTests.swift
   Tests/ProdGlanceTests.swift Tests/SettingsFileTests.swift Tests/ProdTransitionsTests.swift
-  Tests/ProdClaimsTests.swift Tests/PRDigestTests.swift)
+  Tests/ProdClaimsTests.swift Tests/PRDigestTests.swift Tests/PultikFormatTests.swift Tests/QueryRepositoryTests.swift
+  Tests/ModuleRouterTests.swift Tests/NowQueueTests.swift Tests/ObservationLedgerTests.swift Tests/NowAdaptersTests.swift
+  Tests/FleetContractTests.swift)
 # Golden payloads the contract tests read beside themselves (#filePath).
 cp -R "$repo/Tests/Fixtures" "$harness/Tests/PultikTests/Fixtures"
 for file in "${sources[@]}" "$repo"/Sources/API/GitHub*.swift; do

@@ -75,10 +75,19 @@ var prodTiers = map[string]bool{"critical": true, "important": true, "watch": tr
 
 // prodPointer mirrors the app's ProdPointer (Sources/Models/Models.swift).
 type prodPointer struct {
-	Key   string `json:"key"`
-	Title string `json:"title,omitempty"`
-	Tier  string `json:"tier,omitempty"`
-	Order *int   `json:"order,omitempty"`
+	Key     string          `json:"key"`
+	Title   string          `json:"title,omitempty"`
+	Tier    string          `json:"tier,omitempty"`
+	Order   *int            `json:"order,omitempty"`
+	Release []releaseSource `json:"release,omitempty"`
+}
+
+// releaseSource mirrors GitHubRelease.Source (Sources/API/GitHubRelease.swift):
+// the GitHub environment a deployment's release line is read from.
+type releaseSource struct {
+	Repo        string `json:"repo"`
+	Environment string `json:"environment"`
+	Branch      string `json:"branch,omitempty"`
 }
 
 // The subset of Hlídač's digest that validation reads.
@@ -214,6 +223,19 @@ func prodSchema() map[string]any {
 					"title": map[string]any{"type": "string", "description": "card title; Hlídač's title when absent"},
 					"tier":  map[string]any{"enum": []string{"critical", "important", "watch"}, "default": "critical", "description": "a red on a critical deployment (and every emergency) posts a Time Sensitive notification; reds on other tiers post normal banners"},
 					"order": map[string]any{"type": "integer", "description": "board position; lower first"},
+					"release": map[string]any{
+						"type": "array", "items": map[string]any{"$ref": "#/$defs/releaseSource"},
+						"description": "GitHub environments the deployment's release line is read from. Absent = the app's shipped sources for the key; [] = none.",
+					},
+				},
+			},
+			"releaseSource": map[string]any{
+				"type":     "object",
+				"required": []string{"repo", "environment"},
+				"properties": map[string]any{
+					"repo":        map[string]any{"type": "string", "description": "owner/name"},
+					"environment": map[string]any{"type": "string", "description": "the GitHub deployment environment (production, sk, …)"},
+					"branch":      map[string]any{"type": "string", "description": "the branch it deploys from; absent = the newest deployment's ref, else the default branch"},
 				},
 			},
 		},
@@ -386,7 +408,8 @@ func decodeProject(i int, raw json.RawMessage) (key string, pointers []prodPoint
 }
 
 // decodePointer mirrors the synthesized ProdPointer decode: key String
-// required, title/tier String?, order Int? — a wrong type skips the pointer.
+// required, title/tier String?, order Int?, release [{repo, environment:
+// String, branch: String?}]? — a wrong type skips the pointer.
 func decodePointer(raw json.RawMessage) (prodPointer, error) {
 	var p prodPointer
 	var m map[string]json.RawMessage
@@ -412,6 +435,30 @@ func decodePointer(raw json.RawMessage) (prodPointer, error) {
 			return p, errors.New("expected Int at order")
 		}
 		p.Order = &order
+	}
+	if rawRelease, ok := m["release"]; ok && !isNull(rawRelease) {
+		var elems []json.RawMessage
+		if json.Unmarshal(rawRelease, &elems) != nil {
+			return p, errors.New("expected [GitHubRelease.Source] at release")
+		}
+		for k, elem := range elems {
+			var s map[string]json.RawMessage
+			if json.Unmarshal(elem, &s) != nil {
+				return p, fmt.Errorf("expected GitHubRelease.Source at release[%d]", k)
+			}
+			var source releaseSource
+			if source.Repo, err = requiredString(s, "repo"); err != nil {
+				return p, fmt.Errorf("release[%d]: %w", k, err)
+			}
+			if source.Environment, err = requiredString(s, "environment"); err != nil {
+				return p, fmt.Errorf("release[%d]: %w", k, err)
+			}
+			if err = optionalString(s, "branch"); err != nil {
+				return p, fmt.Errorf("release[%d]: %w", k, err)
+			}
+			_ = json.Unmarshal(s["branch"], &source.Branch)
+			p.Release = append(p.Release, source)
+		}
 	}
 	return p, nil
 }
@@ -441,7 +488,7 @@ var topLevelKinds = map[string]jsonKind{
 	"eveToken": kindString, "sentryProjects": kindStringArray, "hotkey": kindString,
 	"hiddenSections": kindStringArray, "servers": kindArray, "services": kindArray, "projects": kindArray,
 	"hlidacURL": kindString, "repoOrder": kindStringArray, "visibleAlertLanes": kindStringArray,
-	"notifyFiring": kindBool, "activeFanCurve": kindString, "fanCurves": kindObject,
+	"notifyFiring": kindBool, "homeStyle": kindString, "activeFanCurve": kindString, "fanCurves": kindObject,
 	"fanCurveSmoothing": kindNumber, "expiryWatch": kindArray, "focusHoldsNotifications": kindBool,
 	"vaultPath": kindString, "todoProject": kindString, "codeEditor": kindString, "collapsedRails": kindStringArray,
 	"leftRailTab": kindString, "leftRailSplit": kindNumber, "vitrinkaWorkspace": kindString,

@@ -46,11 +46,20 @@ final class MacHealthStore {
         timer = nil
     }
 
-    /// A few KB from the local disk — read inline on main.
+    /// A few KB from the local disk — read inline on main. Every read is
+    /// Now's read of this Mac's findings too.
     func reread() {
-        let next = MacHealthStatus.make(read(), now: now())
+        let health = read()
+        let at = now()
+        let next = MacHealthStatus.make(health, now: at)
         if next != status { status = next }
+        NowStore.shared.record(NowAdapters.macFindings(health.map(NowInputs.MacReport.init), machine: Self.machine,
+                                                       now: at), now: at)
     }
+
+    /// This Mac's name in Now's keys: findings belong to the machine that
+    /// published them.
+    private static let machine = Host.current().localizedName ?? "this-mac"
 
     private func read() -> MacHealth? {
         let data: Data

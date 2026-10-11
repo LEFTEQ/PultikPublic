@@ -2,9 +2,11 @@ import Foundation
 
 // MARK: - Overview glances (spec 2026-09-23)
 //
-// What the left column's widgets show, derived once from state `StatusStore`
-// already publishes. Pure values, Foundation-only, so the focused contract
-// harness can test them without the app. Views format; they never derive.
+// What the module strip's signals, Home's tiles and the module pages show,
+// derived once from state `StatusStore` already publishes (the left column
+// these began in retired with WP8). Pure values, Foundation-only, so the
+// focused contract harness can test them without the app. Views format;
+// they never derive.
 
 /// The Devbox widget's numbers: capacity, the workspace pile, and the alert
 /// line that appears only when something past a threshold explains a slow box.
@@ -280,7 +282,7 @@ struct AlertGlance {
 
     init(_ alerts: [FiringAlert]) {
         let shown = alerts.filter {
-            $0.state == "firing" && $0.name != "Watchdog" && Self.shownSeverities.contains($0.severity ?? "")
+            $0.state == "firing" && !$0.isHeartbeat && Self.shownSeverities.contains($0.severity ?? "")
         }
         let groups = Dictionary(grouping: shown, by: \.name)
         rows = groups.map { name, group in
