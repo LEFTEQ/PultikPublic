@@ -27,147 +27,40 @@ enum OverviewURL {
     }
 }
 
-private struct ContentHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-/// Height of the footer strip — measured rather than hard-coded so the column
-/// budget stays right if the chrome ever grows a line.
-private struct FooterHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-/// The Devbox and Estate widgets' combined rendered height — the Vitrinka
-/// widget above them fits its recent boards into what they leave of the
-/// column budget.
-private struct MachineWidgetsHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-/// Everything in the centre column that sits OUTSIDE the capped list — the
-/// palette, its hairline, and the pinned prod/links strips. Summed, not maxed:
-/// these are stacked siblings, and the cap has to leave room for all of them.
-private struct CentreChromeKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value += nextValue()
-    }
-}
-
-private extension View {
-    func measuringCentreChrome() -> some View {
-        background(
-            GeometryReader { proxy in
-                Color.clear.preference(key: CentreChromeKey.self, value: proxy.size.height)
-            }
-        )
-    }
-}
-
-/// A rail column that scrolls inside a height budget instead of growing.
-///
-/// The panel body is `.fixedSize(vertical:)` — SwiftUI proposes nil height all
-/// the way down, and a `ScrollView` handed a nil proposal reports its content's
-/// full height and never scrolls. (`.frame(maxHeight:)` doesn't fix it: with no
-/// finite proposal there is nothing for it to clamp against.) So the content is
-/// measured and the scroller given a DEFINITE height: its content's, capped at
-/// `maxHeight`. Short rails still size to their content — only a rail that
-/// would overrun the screen becomes a scroller.
-///
-/// Internal, not fileprivate: any view file that caps a column has to obey the
-/// same rule. A second copy would drift into the rigid `.frame(height:)` this
-/// replaced. (The overview column is one of these too; its Vitrinka widget
-/// fits its recent boards to an explicit `maxHeight`, so that column only
-/// scrolls when even the widget's floor cannot fit.)
-struct ScrollColumn<Content: View>: View {
-    let maxHeight: CGFloat
-    @ViewBuilder var content: Content
-    @State private var measured: CGFloat = 0
-
-    var body: some View {
-        ScrollView(.vertical) {
-            content
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
-                    }
-                )
-        }
-        // Content that fits must neither rubber-band nor scroll.
-        .scrollBounceBehavior(.basedOnSize)
-        // Quantised for the same reason as the centre column: every write
-        // re-renders the panel AND resizes the window, which re-pins it.
-        // Rounded UP: half a point short would leave fitting content scrollable.
-        .onPreferenceChange(ContentHeightKey.self) { value in
-            let rounded = value.rounded(.up)
-            if abs(rounded - measured) >= 1 { measured = rounded }
-        }
-        // Before the first measurement lands there is nothing to cap against —
-        // stay unconstrained for that one pass rather than flashing a 1pt
-        // column. The window's own clamp keeps even that frame on-screen.
-        .frame(height: measured > 0 ? min(measured, maxHeight) : nil)
-    }
-}
-
-/// Full-bleed native material for the borderless panel window.
-private struct VibrancyBackground: NSViewRepresentable {
-    func makeNSView(context _: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .popover
-        view.blendingMode = .behindWindow
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_: NSVisualEffectView, context _: Context) {}
-}
-
-/// The panel's shell: Liquid Glass on macOS 26, the classic popover vibrancy
-/// below. One modifier so the whole hub swaps chrome with the OS, not per-view.
-private struct PanelChrome: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content
-                .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous))
-                .glassEffect(in: RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous))
-        } else {
-            content
-                .background(VibrancyBackground())
-                .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.10), lineWidth: 0.5)
-                )
-        }
-    }
-}
-
-/// The PR-first command center (redesign 2026-07-22): palette on top, the
-/// cross-repo PR inbox in fixed repo order, a red prod strip pinned at the
-/// bottom when Sentry is non-quiet, and a one-line status footer. Typing
-/// filters the inbox; Eve is only invoked through `/ask <prompt>`.
+/// The panel's wiring (copilot shell WP3): it owns the state and hands it to
+/// `PanelShell` — the top bar, the body and the footer in the fixed frame.
+/// The body is an entered module in its `ModuleFrame`, or the global search:
+/// Home at rest, results once typed, and the palette's pages (`.t`, `.n`,
+/// the todos tab, a project page) beside the side columns. `ModuleRouter`
+/// holds where the panel is; `KeyboardCoordinator` routes every key.
 struct StatusPanelView: View {
     let store: StatusStore
     /// Show/hide signal from the warm panel — this view lives through quick
     /// summons until the idle release, so per-open work hangs off this, not
     /// off `onAppear`.
     let session: PanelSession
-    /// Which of Home's PR folds are open — repo slugs for their ready lines,
-    /// `PRDigest.foldKey` for drafts · stale. Kept here, not in the tile, so
+    /// Which of Now first's PR-tile folds are open — repo slugs for their
+    /// ready lines, `PRDigest.foldKey` for drafts · stale.
+    @State var homeExpanded: Set<String> = []
+    /// Home's open Now folds and ×N series (D15), by row key. Kept here so
     /// keyboard selection walks exactly the rows on screen.
-    @State private var homeExpanded: Set<String> = []
+    @State var nowExpanded: Set<String> = []
+    /// A selected Now row that left the queue, held in place until the next
+    /// arrow (`HomeNow.swift`).
+    @State var nowTombstone: NowTombstone?
 
-    @State private var query = ""
-    @FocusState private var paletteFocused: Bool
+    /// The entered module, the field's text, the selection and the detail.
+    @State var router = ModuleRouter()
+    @FocusState var paletteFocused: Bool
+    let keyToken = UUID()
+
+    /// The field's text: the global query, or the entered module's filter.
+    /// Writing it applies the dot grammar (`.c failed` enters CI).
+    var query: String {
+        get { router.text }
+        nonmutating set { router.type(newValue) }
+    }
+
     /// The highlighted row's id. nil = the text field owns ↵ (open the best
     /// deterministic match); non-nil = ↵ activates that row.
     ///
@@ -176,452 +69,151 @@ struct StatusPanelView: View {
     /// each time — O(n²) filtering + string-lowercasing every PR title, which
     /// is exactly what made the list stutter. A string compare is free, and the
     /// selection now survives the list changing under it.
-    @State private var selectedID: String?
-    private let keyToken = UUID()
-    @Namespace private var paletteMorph
-    private var links: LinkStore {
+    var selectedID: String? {
+        get { router.selection }
+        nonmutating set { router.select(newValue) }
+    }
+    var links: LinkStore {
         LinkStore.shared
     }
 
-    private var notes: NoteStore {
+    var notes: NoteStore {
         NoteStore.shared
     }
 
     /// Feedback line for the last slash command ("saved “Grafana”").
-    @State private var commandNotice: SlashResult?
+    @State var commandNotice: SlashResult?
     /// A pasted path, repaired and checked on disk (decision log
     /// 2026-09-03). Set from the query `onChange`, not computed per render:
     /// detection stats the disk.
-    @State private var pathTarget: PathTarget?
+    @State var pathTarget: PathTarget?
     /// Which of `pathTarget.verbs` ↵ runs; ⇥ moves it.
-    @State private var pathVerbIndex = 0
+    @State var pathVerbIndex = 0
 
-    @State private var eveOnline: Bool?
-    @State private var eveAskedPrompt: String?
-    @State private var eveReply = ""
-    @State private var eveDone = false
-    @State private var eveError: String?
-    @State private var eveExpanded = false
-    @State private var askTask: Task<Void, Never>?
-    @State private var activeProject: ProjectSpec?
+    @State var eveOnline: Bool?
+    @State var eveAskedPrompt: String?
+    @State var eveReply = ""
+    @State var eveDone = false
+    @State var eveError: String?
+    @State var eveExpanded = false
+    @State var askTask: Task<Void, Never>?
+    @State var activeProject: ProjectSpec?
     /// AppStorage so the tab survives panel close/reopen and app relaunch —
     /// `panelDidDismiss` deliberately leaves it alone, matching the old
     /// rebuilt-per-summon behavior where only this survived.
-    @AppStorage("todosTabOpen") private var showTodos = false
-    private var todoStore: TodoStore {
+    @AppStorage("todosTabOpen") var showTodos = false
+    var todoStore: TodoStore {
         TodoStore.shared
     }
 
-    private var resolvedStore: ResolvedStore {
+    var resolvedStore: ResolvedStore {
         ResolvedStore.shared
     }
 
-    private var prodArchive: ProdArchive {
+    var prodArchive: ProdArchive {
         ProdArchive.shared
     }
 
     /// Ids resolved BEFORE this panel opened — hidden entirely. A resolve
     /// made while the panel is up only dims (⇥ can still undo it).
-    @State private var hiddenResolved: Set<String> = []
+    @State var hiddenResolved: Set<String> = []
     /// The note expanded in the CENTER column (results section or `.notes`),
     /// and the one expanded in the rail — independent, so reading a note in
     /// one column never unfolds its twin in the other. Both live here because
     /// Esc has to be able to fold whichever is open.
-    @State private var expandedNoteID: String?
+    @State var expandedNoteID: String?
     /// The note being edited in `.notes` — Esc cancels the edit before it is
     /// allowed to close the panel.
-    @State private var editingNoteID: String?
+    @State var editingNoteID: String?
 
-    // MARK: - Palette modes ("." prefix — easy on a Czech keyboard, unlike ">")
-
-    /// A scoped ALL-view the palette can enter: ".p" → every prod error,
-    /// ".t" → every todo, ".v" → every listener. Text after the mode token
-    /// filters within the mode. Esc exits.
-    enum PaletteMode: String, CaseIterable {
-        case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate, health, mac
-
-        var title: String {
-            switch self {
-            case .todos: "All todos"
-            case .schedule: "Schedule"
-            case .prod: "All prod errors"
-            case .vit: "Vitrinka listeners"
-            case .boards: "Boards"
-            case .issues: "GitHub issues"
-            case .fans: "Fan deck"
-            case .notes: "All notes"
-            case .organize: "Organize workspaces"
-            case .work: "Today’s work"
-            case .devbox: "Devbox workspaces"
-            case .ci: "CI jobs"
-            case .estate: "Estate"
-            case .health: "Prod"
-            case .mac: "Mac health"
-            }
-        }
-
-        var blurb: String {
-            switch self {
-            case .todos: "vitrinka todos, every open item — all projects"
-            case .schedule: "scheduled vitrinka todos — today, this week, later"
-            case .prod: "sentry, last 12 days, staggered"
-            case .vit: "boards a session is tuned into"
-            case .boards: "recent vitrinka boards, newest first — all projects"
-            case .issues: "search every issue in your repos"
-            case .fans: "this Mac — fans, temps, vitals"
-            case .notes: "scratch notes — read, edit, promote"
-            case .organize: "route Warp windows to their displays — hammerspoon"
-            case .work: "vitrinka work that needs you — grouped by reason"
-            case .devbox: "every workspace — running, held, parked; verbs on hover"
-            case .ci: "running jobs, queues and failed runs across lanes"
-            case .estate: "servers and every service probe, with latency"
-            case .health: "every prod deployment — checks, logs, issues, eve accounts"
-            case .mac: "this Mac — likely orphans, memory by family, network (toolkit)"
-            }
-        }
-
-        var systemImage: String {
-            switch self {
-            case .todos: "checklist"
-            case .schedule: "calendar.badge.clock"
-            case .prod: "exclamationmark.triangle"
-            case .vit: "dot.radiowaves.left.and.right"
-            case .boards: "rectangle.on.rectangle"
-            case .issues: "smallcircle.filled.circle"
-            case .fans: "fanblades"
-            case .notes: "square.text.square"
-            case .organize: "rectangle.3.group"
-            case .work: "tray.full"
-            case .devbox: "shippingbox"
-            case .ci: "gearshape.2"
-            case .estate: "server.rack"
-            case .health: "waveform.path.ecg"
-            case .mac: "memorychip"
-            }
-        }
-
-        /// The palette's placeholder inside the mode. Issues are the one mode
-        /// whose field searches GitHub rather than filtering what's loaded.
-        var fieldHint: String {
-            switch self {
-            case .issues: "Search issues — text, or #812…"
-            case .fans: "Filter sensors…"
-            case .organize: "Layout — ↵ runs the top match…"
-            default: "Filter \(title.lowercased())…"
-            }
-        }
-    }
-
-    /// ".prod redis" → (.prod, "redis"). A mode is entered the moment its
-    /// prefix is unambiguous — ".p" is already prod, no ↵ needed.
-    ///
-    /// Static so the query's `onChange` can parse the incoming text directly
-    /// instead of trusting `query` to have settled.
-    static func paletteMode(in text: String) -> (mode: PaletteMode, filter: String)? {
-        guard text.hasPrefix(".") else { return nil }
-        let body = text.dropFirst()
-        // Any whitespace ends the token: `.note` followed by a pasted blob
-        // that starts with a newline is still the notes mode.
-        let token = body.prefix(while: { !$0.isWhitespace }).lowercased()
-        guard !token.isEmpty else { return nil }
-        let matches = PaletteMode.allCases.filter { $0.rawValue.hasPrefix(token) }
-        guard matches.count == 1, let mode = matches.first else { return nil }
-        let rest = body.dropFirst(token.count).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (mode, rest)
-    }
-
-    private var activeMode: (mode: PaletteMode, filter: String)? {
-        Self.paletteMode(in: query)
+    /// The palette page the global query names (`.t`, `.n`, `.p`…). A mode
+    /// that is a module's alias never lands here — the router enters the
+    /// module the moment its token is typed.
+    var activeMode: (mode: PaletteMode, filter: String)? {
+        guard router.module == nil, let parsed = PaletteMode.parse(query), parsed.mode.module == nil else { return nil }
+        return (parsed.mode, parsed.filter)
     }
 
     /// "." (or an ambiguous partial) shows the mode picker instead.
-    private var modePickerMatches: [PaletteMode] {
-        guard query.hasPrefix("."), activeMode == nil else { return [] }
+    var modePickerMatches: [PaletteMode] {
+        guard router.module == nil, query.hasPrefix("."), PaletteMode.parse(query) == nil else { return [] }
         let token = query.dropFirst().prefix(while: { !$0.isWhitespace }).lowercased()
         return PaletteMode.allCases.filter { token.isEmpty || $0.rawValue.hasPrefix(token) }
     }
 
     /// A widget opens its page pre-filtered (`.work overdue`, `.devbox pultik`)
-    /// through the same query text a typed mode uses.
-    private func enterMode(_ mode: PaletteMode, filter: String = "") {
+    /// through the same query text a typed mode uses; a module's alias
+    /// enters the module with the filter in its field.
+    func enterMode(_ mode: PaletteMode, filter: String = "") {
         query = ".\(mode.rawValue) \(filter)"
         DispatchQueue.main.async { moveCaretToEnd() }
-    }
-
-    /// Open todos narrowed by the palette — one query, every surface.
-    private var filteredTodos: [TodoItem] {
-        todoStore.openTodos.filter {
-            $0.matches(query) && !hiddenResolved.contains("todo:\($0.id)")
-        }
-    }
-
-    /// Notes matching the typed query. Unlike todos and listeners, notes have
-    /// NO resting section: the rail is their glance, so they only enter the
-    /// center column when you actually search for one.
-    private var filteredNotes: [SavedNote] {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard q.count >= 2, !q.hasPrefix("."), !q.hasPrefix("/") else { return [] }
-        return notes.ordered.filter { $0.matches(q) }
-    }
-
-    /// The widget draws only from a summary — the same condition it hides on.
-    private var showDevbox: Bool {
-        store.isSectionVisible("devbox") && store.devboxSummary != nil
-    }
-
-    /// The overview column's CI widget: lanes reporting, or GitHub answering —
-    /// with neither there is nothing true to say, so it hides like any widget
-    /// whose backend is off the mesh.
-    private var showCIWidget: Bool {
-        let lanes = store.isSectionVisible("runners") && !store.laneBoard.isEmpty
-        let runs = store.isSectionVisible("ci") && !store.repos.isEmpty
-            && !store.repos.allSatisfy { $0.error != nil }
-        return lanes || runs
-    }
-
-    /// Mirrors `EstateWidget`'s own hide rule — off-mesh both halves are empty.
-    private var showEstateWidget: Bool {
-        (store.isSectionVisible("servers") && !store.serverMetrics.isEmpty)
-            || (store.isSectionVisible("services") && !store.serviceStatuses.isEmpty)
-    }
-
-    /// The overview column (spec 2026-09-23): any widget with data keeps it
-    /// alive. It is also the first thing to fold when the screen is too
-    /// narrow for all three columns (scaled laptop displays go below the
-    /// 1240pt the full panel needs) — a hidden column beats a window
-    /// overhanging the screen edge; every widget's page stays reachable by
-    /// typing its mode.
-    private var showLeftRail: Bool {
-        guard showVitrinkaRail || !machineWidgets.isEmpty || hasAttentionRails else { return false }
-        // Both side columns beside a usable centre; the fixed frame (D4) is
-        // at least 1240 pt, so only a screen narrower than that folds it.
-        return PanelMetrics.shared.panelSize.width >= Self.sideColumnWidth * 2 + 560
-    }
-
-    private var showVitrinkaRail: Bool {
-        store.isSectionVisible("vitrinka")
-            && store.vitrinkaWorkspaces.contains(where: { !$0.unavailable })
-    }
-
-    /// Todos worth interrupting for — overdue, inside their lead window, or
-    /// milestone-ripe per the server (decision D4=B). A reminder that is not
-    /// yet due is not yet information; a backend we cannot reach yields none,
-    /// so the rail folds instead of alerting.
-    private var reminders: [TodoItem] {
-        RemindersRail.attentionWorthy(todoStore.reminderCandidates)
-    }
-
-    private var showAlerts: Bool {
-        store.isSectionVisible("alerts") && !store.visibleAlerts.isEmpty
     }
 
     /// Unread at the moment the panel opened — the open marks everything
     /// seen (badge clears), but the rail keeps these visually unread for the
     /// rest of the session, same contract as the resolved snapshot.
-    @State private var unreadAlertsSnapshot: Set<Int> = []
+    @State var unreadAlertsSnapshot: Set<Int> = []
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
-    @State private var fanTicking = false
+    @State var fanTicking = false
     /// True while this panel holds MacHealthStore's re-read, the same way.
-    @State private var macHealthWatching = false
-    @State private var presentedGeneration: Int?
-    /// The right rail is the prod board (decision D2 C, 2026-10-03): one card
-    /// per deployment over Hlídač, with links and notes as one reference line
-    /// at its foot. Reminders, estate firing and eve alerts moved to the left
-    /// column and fall back here only when that column is hidden.
-    private var showServiceRail: Bool {
-        showProdBoard
-            || !store.prodConfigIssues.isEmpty
-            || needsYou
-            // An answering estate holds the rail open for its all-clear line.
-            || sourcesAnswered
-            // Links and notes are local — they must be able to hold the rail
-            // open on their own, or off-mesh they'd vanish with the probes.
-            || !links.links.isEmpty
-            || !notes.notes.isEmpty
-    }
-
-    /// The side columns' width — the D5 glance grid is laid out against it.
-    static let sideColumnWidth: CGFloat = 300
-
-    /// Home (panel Home D2, 2026-10-07) owns the right region while nothing
-    /// is typed and nothing else is open; any query, mode, page or Eve reply
-    /// swaps it back to results beside the prod rail.
-    private var showsHome: Bool {
-        query.isEmpty && activeMode == nil && !showTodos && activeProject == nil
-            && eveAskedPrompt == nil
-    }
-
-    /// Home's PR tile, folded (D3) — resolved-and-hidden PRs already gone.
-    private var homeDigest: PRDigest<StatusStore.InboxPR> {
-        PRDigest(filteredInbox, repo: \.repoSlug, info: \.info)
-    }
-
+    @State var macHealthWatching = false
+    @State var presentedGeneration: Int?
     /// Measured chrome, subtracted from the panel's height below.
-    @State private var footerHeight: CGFloat = 0
-    /// Tallest a column may be before it has to scroll: the panel's fixed
-    /// frame (`PanelMetrics.panelSize`, D4) less the footer beneath it. The
-    /// floor keeps the hub usable on a very short screen.
-    private var columnBudget: CGFloat {
-        max(280, PanelMetrics.shared.panelSize.height - footerHeight - 1)
-    }
-
-    @State private var centreChrome: CGFloat = 0
-    /// The Devbox, CI, Estate and This Mac widgets as rendered — what the
-    /// Vitrinka widget's recent boards must leave room for.
-    @State private var machineWidgetsHeight: CGFloat = 0
-
-    private enum MachineWidget: Hashable {
-        case devbox, ci, estate, mac
-    }
-
-    /// The machine widgets with something to show, in column order.
-    private var machineWidgets: [MachineWidget] {
-        var widgets: [MachineWidget] = []
-        if showDevbox { widgets.append(.devbox) }
-        if showCIWidget { widgets.append(.ci) }
-        if showEstateWidget { widgets.append(.estate) }
-        if MacWidget.isShown(store: store, fanStore: FanStore.shared) { widgets.append(.mac) }
-        return widgets
-    }
-
-    /// The overview column (spec 2026-09-23, 2026-09-27): Vitrinka · Devbox ·
-    /// CI · Estate · This Mac in that fixed order, hairlines only between
-    /// widgets that draw. The machine widgets are content-sized and measured;
-    /// the Vitrinka widget fits its (at most five) recent boards into the
-    /// rest of the column budget, so no split is stored. The body wraps the
-    /// column in a `ScrollColumn` capped at the SAME `columnBudget`: it
-    /// scrolls only when the machines leave Vitrinka below its floor (head +
-    /// 3 recents). One-way on purpose — machines → Vitrinka's budget →
-    /// content → scroller frame; nothing measured on the scroller may feed
-    /// Vitrinka, or the two would chase.
-    @ViewBuilder
-    private var leftColumn: some View {
-        let machines = machineWidgets
-        let gap = TileMetrics.gap
-        VStack(spacing: gap) {
-            if showVitrinkaRail {
-                // Until the machine widgets have been measured, Vitrinka keeps
-                // its floor: a cold tree's first pass must not fill the whole
-                // budget with recents and hand the window an over-tall fit.
-                // The column's padding and the gap below it come off too.
-                let below = !machines.isEmpty || hasAttentionRails
-                VitrinkaWidget(store: store, snapshots: store.vitrinkaWorkspaces,
-                               maxHeight: below && machineWidgetsHeight == 0 ? 0
-                                   : max(0, columnBudget - machineWidgetsHeight - gap * 2
-                                       - (below ? gap : 0)),
-                               onOpenWork: { enterMode(.work, filter: $0) },
-                               onOpenBoards: { enterMode(.boards) })
-            }
-            // The attention rails sit in the measured block: Vitrinka's recent
-            // boards must leave room for them exactly as for the machines.
-            VStack(spacing: gap) {
-                ForEach(machines, id: \.self) { widget in
-                    machineWidget(widget)
-                }
-                if hasAttentionRails {
-                    attentionRails
-                }
-                // Home hides the right rail, whose foot this was.
-                if showsHome, !links.links.isEmpty || !notes.notes.isEmpty {
-                    RailFoot(links: links.ordered, notes: notes.notes.count,
-                             onOpenLink: { openLink($0) },
-                             onOpenNotes: { enterMode(.notes) })
-                }
-            }
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(key: MachineWidgetsHeightKey.self,
-                                           value: proxy.size.height)
-                }
-            )
-        }
-        .padding(gap)
-    }
-
-    @ViewBuilder
-    private func machineWidget(_ widget: MachineWidget) -> some View {
-        switch widget {
-        case .devbox:
-            DevboxWidget(store: store, onOpen: { enterMode(.devbox, filter: $0) })
-        case .ci:
-            CIWidget(store: store, onOpen: { enterMode(.ci, filter: $0) })
-        case .estate:
-            EstateWidget(store: store, onOpen: { enterMode(.estate, filter: $0) })
-        case .mac:
-            MacWidget(store: store, fanStore: FanStore.shared, onHealth: { enterMode(.mac) })
-        }
-    }
-
-    /// The centre's list height: the fixed frame less the palette and the
-    /// pinned strips stacked around it (D4 — the old 560 pt design cap and
-    /// the tallest-side stretch went with content sizing).
-    private var centreCap: CGFloat {
-        max(160, columnBudget - centreChrome)
-    }
-
+    @State var footerHeight: CGFloat = 0
+    @State var topBarHeight: CGFloat = 0
+    @State var centreChrome: CGFloat = 0
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 0) {
-                if showLeftRail {
-                    ScrollColumn(maxHeight: columnBudget) {
-                        leftColumn
-                    }
-                    .frame(width: Self.sideColumnWidth)
-                    // A fixed-width frame centers (never clips) an oversized
-                    // child, so any row that escapes the rail would bleed into
-                    // the centre column — clip here so it can't, whatever the
-                    // data looks like.
-                    .clipped()
-                    hairlineV
-                }
-                // Home takes the centre and the right rail's room (D2); the
-                // prod rail returns beside any results.
-                centerColumn
-                    .frame(maxWidth: .infinity)
-                if showServiceRail, !showsHome {
-                    hairlineV
-                    ScrollColumn(maxHeight: columnBudget) {
-                        railsColumn
-                    }
-                    .frame(width: Self.sideColumnWidth)
-                    .clipped()
-                }
+        PanelShell(current: stripModule, scope: searchScope,
+                   signals: ModuleSignals.make(store: store, fanStore: FanStore.shared,
+                                               macHealth: MacHealthStore.shared),
+                   chatting: eveAskedPrompt != nil,
+                   showsHints: selectedID == nil && query.isEmpty,
+                   onSelectModule: selectModule,
+                   topBarHeight: $topBarHeight, footerHeight: $footerHeight) {
+            palette
+        } content: {
+            if let module = router.module, let page = modulePage(module) {
+                // An entered module takes the whole body (D5-A: the strip is
+                // the awareness, so no side column costs it width).
+                hosted(page)
+                    .frame(height: columnBudget)
+            } else {
+                globalBody
             }
-            .frame(maxHeight: .infinity, alignment: .top)
-            hairline
+        } footer: {
             PanelFooter(
                 store: store,
                 eveOnline: eveOnline,
                 todoCount: todoStore.openTodos.count,
-                onTodos: { showTodos = true },
+                // A module owns the body: leave it, or the tab would open unseen.
+                onTodos: {
+                    leaveModule()
+                    showTodos = true
+                },
                 onMacHealth: { enterMode(.mac) }
-            )
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(key: FooterHeightKey.self, value: proxy.size.height)
-                }
             )
         }
         .environment(\.panelIsPresented, session.isPresented)
-        // One fixed frame (D4): the window takes this size and content never
-        // resizes it.
-        .frame(width: PanelMetrics.shared.panelSize.width, height: PanelMetrics.shared.panelSize.height)
-        .onPreferenceChange(FooterHeightKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - footerHeight) >= 1 { footerHeight = rounded }
+        // On the root, the search field's ancestor: it lives in the top bar,
+        // and Esc from it must peel one layer, never fall through to the
+        // panel's cancelOperation and close everything.
+        .onExitCommand { escapeOneLayer() }
+        // A click while the panel is already up: no new summon, so switch here.
+        .onReceive(NotificationCenter.default.publisher(for: .pultikOpenProd)) { _ in
+            if let key = AppDelegate.shared?.takePendingProdKey() { enterMode(.health, filter: key) }
         }
-        .onPreferenceChange(MachineWidgetsHeightKey.self) { value in
-            // Rounded UP: Vitrinka fits into the budget less this, and the
-            // column's scroller caps at that same budget — half a point
-            // under would leave an exactly-fitting column scrollable.
-            let rounded = value.rounded(.up)
-            if abs(rounded - machineWidgetsHeight) >= 1 { machineWidgetsHeight = rounded }
+        .onReceive(NotificationCenter.default.publisher(for: .pultikOpenLink)) { _ in
+            if let link = AppDelegate.shared?.takePendingLink() { openLink(link) }
         }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: PanelDriver.paletteNotification)) { note in
+            driveFromDebugger(note.userInfo ?? [:])
+        }
+        #endif
         .onPreferenceChange(CentreChromeKey.self) { value in
             let rounded = value.rounded()
             if abs(rounded - centreChrome) >= 1 { centreChrome = rounded }
         }
-        .modifier(PanelChrome())
         .onAppear {
             // A cold summon can mark the session presented before the first
             // body appears. Warm summons use the session changes below.
@@ -645,12 +237,14 @@ struct StatusPanelView: View {
         .onChange(of: session.isPresented) { _, presented in
             if !presented { panelDidDismiss() }
         }
+        .onChange(of: NowStore.shared.queue) { old, new in nowQueueChanged(from: old, to: new) }
+        .onChange(of: router.selection) { _, id in nowSelectionChanged(to: id) }
         .onDisappear { panelDidDismiss() }
     }
 
     /// Per-open work — what lived in `onAppear` back when every summon built a
     /// fresh view tree.
-    private func panelDidPresent() {
+    func panelDidPresent() {
         guard presentedGeneration != session.generation else { return }
         presentedGeneration = session.generation
         // An ordered-out host can coalesce dismiss + reopen before SwiftUI
@@ -675,6 +269,12 @@ struct StatusPanelView: View {
         if store.isSectionVisible("prod") { store.markProdSeen() }
         // A prod notification click opened this summon: land on its row.
         if let key = AppDelegate.shared?.takePendingProdKey() { enterMode(.health, filter: key) }
+        // A pultik:// click opened this summon: land on what it names.
+        if let link = AppDelegate.shared?.takePendingLink() { openLink(link) }
+        // Now's ages move and its Handled window slides with the clock; an
+        // expiry window opens on the clock too, not on the radar's daily probe.
+        ExpiryRadarStore.shared.recordNowNeeds()
+        NowStore.shared.refresh()
         // Focus once the panel is key; a zero-delay hop is enough. The tree
         // outlives the summon now, so a dismiss inside those 50 ms would
         // otherwise re-focus a hidden palette — and leave the binding already
@@ -707,7 +307,7 @@ struct StatusPanelView: View {
                 if isCurrentOpen(generation) { eveOnline = failure == nil }
             }
         }
-        PaletteKeyRouter.shared.claim(keyToken) { handleKey($0) }
+        KeyboardCoordinator.claim(keyToken, context: { keyContext() }, perform: { perform($0, $1) })
         // Local SMC reads are cheap but pointless off-screen — tick only
         // while the panel is up. (The fan keep-alive runs independently.)
         // `!fanTicking` keeps the hold balanced if a present ever fires twice
@@ -718,8 +318,10 @@ struct StatusPanelView: View {
             fanTicking = true
         }
         // toolkit republishes once a minute; read on open, re-read while up.
+        // Its fleet snapshot (Sessions, WP7) rides the same hold.
         if !macHealthWatching {
             MacHealthStore.shared.startWatching()
+            FleetStore.shared.startWatching()
             macHealthWatching = true
         }
     }
@@ -727,17 +329,17 @@ struct StatusPanelView: View {
     /// Is `generation` still the open on screen? Async work started by a
     /// present writes view state only while this holds — the tree is never
     /// torn down, so nothing else stops a stale completion.
-    private func isCurrentOpen(_ generation: Int) -> Bool {
+    func isCurrentOpen(_ generation: Int) -> Bool {
         session.isPresented && session.generation == generation
     }
 
     /// Per-dismiss teardown AND state reset: the tree stays mounted between
     /// summons, so everything deallocation used to reset for free is reset
     /// here by hand — each ⌥Space still opens a fresh palette.
-    private func panelDidDismiss() {
+    func panelDidDismiss() {
         askTask?.cancel()
         askTask = nil
-        PaletteKeyRouter.shared.resign(keyToken)
+        KeyboardCoordinator.resign(keyToken)
         // Balanced with the conditional start above — an unmatched stop
         // would cancel someone else's hold on the tick (Settings' chart).
         if fanTicking {
@@ -746,11 +348,13 @@ struct StatusPanelView: View {
         }
         if macHealthWatching {
             MacHealthStore.shared.stopWatching()
+            FleetStore.shared.stopWatching()
             macHealthWatching = false
         }
         paletteFocused = false
-        query = ""
-        selectedID = nil
+        // Each summon opens on Home; remembered selections survive.
+        router.reset()
+        nowTombstone = nil
         commandNotice = nil
         activeProject = nil
         pathTarget = nil
@@ -769,973 +373,197 @@ struct StatusPanelView: View {
         eveExpanded = false
     }
 
-    /// The original 680px panel — palette, prod strip, inbox (or a project
-    /// page), CI footer — with the eve reply floating over the scroll area.
-
-    /// The right rail's stacked sections — extracted so the scroller can be
-    /// measured (RightRailsHeightKey) without burying the GeometryReader
-    /// eight indentation levels deep in the body.
-    private var railsColumn: some View {
-        VStack(alignment: .leading, spacing: TileMetrics.gap) {
-            // F4: settings problems stand on their own above the board — a
-            // folded or hidden board must not hide a broken settings.json.
-            let issues = store.prodConfigIssues
-            if !issues.isEmpty {
-                ProdConfigIssues(issues: issues)
-            }
-            if showProdBoard {
-                ProdBoardSection(glance: store.prodGlance,
-                                 now: Date(), onOpen: { enterMode(.health, filter: $0) })
-            }
-            // Until Hlídač has answered once, the Mac's own Sentry sweep keeps
-            // prod issues visible — nothing is lost while it is not deployed.
-            if !prodSentryLive, !railProdIssues.isEmpty {
-                RailSection(key: "prodSentry", title: "Sentry", count: railProdIssues.count, tone: .red) {
-                    ProdRail(issues: railProdIssues,
-                             isResolved: { resolvedStore.isResolved("prod:\($0.id)") })
-                }
-            }
-            if !showLeftRail { attentionRails }
-            if !needsYou, sourcesAnswered, !showProdBoard {
-                // An empty rail still says something: the sources answered
-                // and none of them needs you. Off the mesh it says nothing.
-                Text("✓ all clear")
-                    .font(RailRowMetrics.metaFont)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, RailRowMetrics.inset + 2)
-                    .padding(.top, 12)
-            }
-            if !links.links.isEmpty || !notes.notes.isEmpty {
-                RailFoot(links: links.ordered, notes: notes.notes.count,
-                         onOpenLink: { openLink($0) },
-                         onOpenNotes: { enterMode(.notes) })
-            }
-        }
-        .padding(TileMetrics.gap)
+    /// Esc from the field's own cancel: the same ladder the key monitor peels.
+    func escapeOneLayer() {
+        _ = perform(.escape(KeyboardCoordinator.escape(keyContext())))
     }
 
-    /// Reminders, estate firing and eve alerts — what needs you that is not a
-    /// deployment. The left column carries them under its widgets; the right
-    /// rail takes them back when that column is folded for width.
-    @ViewBuilder
-    private var attentionRails: some View {
-        if !reminders.isEmpty {
-            RailSection(key: "reminders", title: "Reminders",
-                        count: reminders.count,
-                        tone: reminders.contains(where: { $0.isOverdue() })
-                            ? .red : .orange)
-            {
-                RemindersRail(todos: reminders)
-            }
-        }
-        let firing = firingGlance
-        if !firing.rows.isEmpty {
-            RailSection(key: "firing", title: prodBoardClaims ? "Firing · estate" : "Firing",
-                        count: firing.rows.count,
-                        tone: firing.critical > 0 ? .red : .orange)
-            {
-                FiringAlertsRail(glance: firing)
-            }
-        }
-        if showAlerts {
-            let unread = unreadAlertsSnapshot.union(store.unreadAlertIds)
-            RailSection(key: "alerts", title: "eve alerts",
-                        count: unread.count,
-                        tone: unread.isEmpty ? .secondary : .orange)
-            {
-                AlertsRail(alerts: store.visibleAlerts, unread: unread)
-            }
+    // MARK: - Modules
+
+    /// The strip's lift: the entered module, Home at rest, none on results
+    /// and palette pages.
+    var stripModule: PanelModule? {
+        router.module ?? (showsHome ? .home : nil)
+    }
+
+    /// The entered module as the field's scope chip; none on Home.
+    var searchScope: SearchScope? {
+        router.module.map { module in
+            SearchScope(title: module.title, symbol: module.symbol) { leaveModule() }
         }
     }
 
-    private var hasAttentionRails: Bool {
-        !reminders.isEmpty || !firingGlance.rows.isEmpty || showAlerts
+    /// ⌘1–9 or a strip click. Home is the global search at rest; picking the
+    /// module already entered keeps its filter and selection.
+    func selectModule(_ module: PanelModule) {
+        if eveAskedPrompt != nil { dismissEve() }
+        showTodos = false
+        activeProject = nil
+        guard module != router.module else { return }
+        router.enter(module)
     }
 
-    /// Hlídač serves prod Sentry now (`ProdClaims.sentryLive`): the Mac's own
-    /// Sentry sweep, the fallback, stays hidden.
-    private var prodSentryLive: Bool {
-        ProdClaims.sentryLive(digest: store.prodDigest, unreachableSince: store.prodUnreachableSince)
+    /// The scope chip's ×, ⌫ on an empty filter, a page's back chevron.
+    func leaveModule() {
+        router.leave()
     }
 
-    /// The board is answering and can claim deployment alerts, so FIRING
-    /// holds only the estate's own weather — and says so in its title.
-    private var prodBoardClaims: Bool {
-        showProdBoard && store.prodDigest != nil && store.prodUnreachableSince == nil
-            && store.prodDigest?.sources["alertmanager"]?.ok != false
-    }
-
-    /// AC S5: the deployment `.h <filter>` expands, by the same resolution
-    /// the page uses — reported to the panel driver as `prodExpanded`.
-    private var prodExpandedKey: String? {
-        guard let (mode, filter) = activeMode, mode == .health else { return nil }
-        return ProdMatrix.expandedKey(filter: filter,
-                                      rows: store.prodGlance.cards.map { (key: $0.key, title: $0.title) })
-    }
-
-    /// The prod board shows whenever Hlídač is configured and not hidden —
-    /// with cards, or (F10) one blind row while nothing has answered yet.
-    /// `/hide prod` or `hlidacURL: ""` turn it off, and the left column's
-    /// widgets go back to full size.
-    private var showProdBoard: Bool {
-        guard store.isSectionVisible("prod"), store.hlidacConfigured else { return false }
-        let glance = store.prodGlance
-        return !glance.cards.isEmpty || glance.waiting != nil
-    }
-
-    /// A deployment that is not green — or a board still waiting on Hlídač —
-    /// asks for attention like any rail row, and suppresses all-clear.
-    private var prodNeedsYou: Bool {
-        guard showProdBoard else { return false }
-        let glance = store.prodGlance
-        return glance.waiting != nil || glance.cards.contains { $0.tone != .green }
-    }
-
-    /// Production issues for the rail — resolved-and-hidden ones gone, never
-    /// narrowed by the palette query (the rail is not a search result).
-    private var railProdIssues: [ProdIssue] {
-        guard store.isSectionVisible("prod") else { return [] }
-        return store.prodIssues.filter { !hiddenResolved.contains("prod:\($0.id)") }
-    }
-
-    /// Firing alerts as the rail shows them — gated here too, so `/hide
-    /// firing` empties the section at once rather than at the next poll.
-    ///
-    /// Once Hlídač answers, an alert carrying a `deployment` label belongs to
-    /// that deployment's card; FIRING keeps only the estate's own weather.
-    /// With the board hidden (`/hide prod`) no card shows them, so FIRING does.
-    private var firingGlance: AlertGlance {
-        guard store.isSectionVisible("firing") else { return AlertGlance([]) }
-        let boardShown = showProdBoard
-        return AlertGlance(store.firingAlerts.filter { !(boardShown && store.prodClaims($0)) })
-    }
-
-    /// Anything in the rail that asks for attention, as opposed to the
-    /// reference line at its foot.
-    private var needsYou: Bool {
-        !reminders.isEmpty || (!prodSentryLive && !railProdIssues.isEmpty) || showAlerts
-            || !firingGlance.rows.isEmpty || prodNeedsYou
-    }
-
-    /// Prometheus answered this pass (its metrics or probes are in), so an
-    /// empty rail is a real "all clear" rather than an unreachable mesh.
-    private var sourcesAnswered: Bool {
-        !store.serverMetrics.isEmpty || !store.serviceStatuses.isEmpty
-    }
-
-    private var centerColumn: some View {
-        VStack(spacing: 0) {
-            // Asking eve turns the panel into a conversation: the field slides
-            // from the top of the panel to the foot of the reply, where a chat
-            // composer belongs. One field, two homes — matchedGeometryEffect
-            // animates between them so it reads as the same object moving.
-            if eveAskedPrompt == nil {
-                palette.measuringCentreChrome()
-                commandResults.measuringCentreChrome()
-            }
-            hairline.measuringCentreChrome()
-
-            if let (mode, filter) = activeMode {
-                modePage(mode, filter: filter)
-                    .frame(height: centreCap)
-            } else if showTodos {
-                TodosPageView(todoStore: todoStore, todos: filteredTodos,
-                              isSelected: { isSelected($0) },
-                              selectedID: selectedID) { showTodos = false }
-                    .frame(height: centreCap)
-            } else if let project = activeProject {
-                ProjectPageView(project: project, store: store) { activeProject = nil }
-                    .frame(height: centreCap)
-            } else {
-                if showsHome {
-                    home
-                        .frame(height: centreCap)
-                } else {
-                    // The fixed frame (D4) gives the list a definite height:
-                    // it fills what the palette and strips leave.
-                    ScrollViewReader { scroller in
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 2) {
-                                inbox
-                                searchSection
-                                sentrySection
-                                notesSection
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 8)
-                        }
-                        .frame(height: centreCap)
-                        // Arrowing past the viewport must pull the row into it;
-                        // the palette and prod strip live outside this scroller
-                        // and are always on screen, so their ids simply miss.
-                        .onChange(of: selectedID) { _, _ in
-                            guard let selectedID else { return }
-                            withAnimation(.easeOut(duration: 0.12)) {
-                                scroller.scrollTo(selectedID, anchor: .bottom)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Saved links anchor the BOTTOM of the center column only while
-            // searching — they are search results there; at rest they sit at
-            // the right rail's foot. Prod issues moved to the rail (2026-09-27).
-            if activeMode == nil, !showTodos, activeProject == nil, eveAskedPrompt == nil, searchActive {
-                linksStrip.measuringCentreChrome()
-            }
-
-            if eveAskedPrompt != nil {
-                hairline.measuringCentreChrome()
-                palette.measuringCentreChrome()
-            }
-        }
-        .overlay(alignment: .top) {
-            // Slash verbs and palette modes float OVER the list on glass —
-            // they are transient completions, not content.
-            if eveAskedPrompt == nil, !slashMatches.isEmpty || !modePickerMatches.isEmpty {
-                floatingResults
-                    .padding(.horizontal, 14)
-                    .padding(.top, 46)
-            } else if eveAskedPrompt == nil, let target = pathTarget {
-                PathCard(target: target, highlighted: pathVerbIndex) { runPathVerb($0) }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 46)
-            }
-        }
-        .overlay(alignment: .top) {
-            // Eve replies float OVER the dashboard instead of squeezing it.
-            if eveAskedPrompt != nil {
-                EveOverlay(
-                    prompt: eveAskedPrompt ?? "",
-                    reply: eveReply,
-                    done: eveDone,
-                    error: eveError,
-                    expanded: $eveExpanded,
-                    onDismiss: { dismissEve() }
-                )
-                // The composer moved to the foot of the panel, so the reply no
-                // longer has to clear a search bar above it.
-                .padding(.top, 8)
-            }
-        }
-        .onExitCommand { escapeOneLayer() }
-        // A click while the panel is already up: no new summon, so switch here.
-        .onReceive(NotificationCenter.default.publisher(for: .pultikOpenProd)) { _ in
-            if let key = AppDelegate.shared?.takePendingProdKey() { enterMode(.health, filter: key) }
-        }
-        #if DEBUG
-        .onReceive(NotificationCenter.default.publisher(for: PanelDriver.paletteNotification)) { note in
-            driveFromDebugger(note.userInfo ?? [:])
-        }
-        #endif
-    }
-
-    /// Esc peels the outermost layer: eve, a mode/verb/path card, the todos
-    /// tab, a project page — and only then the panel.
-    private func escapeOneLayer() {
-        if eveAskedPrompt != nil {
-            dismissEve()
-        } else if query.hasPrefix(".") || query.hasPrefix("/") || pathTarget != nil {
-            // Exit the mode / completion card, keep the panel.
-            query = ""
-        } else if showTodos {
-            showTodos = false
-        } else if activeProject != nil {
-            activeProject = nil
-        } else {
-            AppDelegate.shared?.closePanel()
-        }
-    }
-
-    #if DEBUG
-    /// PanelDriver relay: the same state changes and key routing a typed
-    /// query or keystroke would produce, minus the field editor.
-    private func driveFromDebugger(_ info: [AnyHashable: Any]) {
-        let cmd = info["cmd"] as? String
-        switch cmd {
-        case "query":
-            query = info["text"] as? String ?? ""
-        case "key":
-            guard let name = info["key"] as? String,
-                  let event = PanelDriver.keyEvent(named: name, mods: info["mods"] as? String) else { return }
-            // What the monitor leaves alone would reach the field editor:
-            // ↵ submits, Esc cancels. The rest are caret moves.
-            guard handleKey(event, synthetic: true) != nil else { return }
-            if name == "enter" { submitPalette() }
-            if name == "esc" { escapeOneLayer() }
-        case "home-toggle":
-            let text = info["text"] as? String ?? ""
-            let key = text == "fold" ? PRDigest<StatusStore.InboxPR>.foldKey : text
-            if homeExpanded.contains(key) { homeExpanded.remove(key) } else { homeExpanded.insert(key) }
-        case "paste":
-            // ⌘V's real route: the monitor first, then the field editor.
-            guard let event = PanelDriver.keyEvent(named: "v", mods: "cmd"),
-                  handleKey(event, synthetic: true) != nil else { return }
-            (NSApp.keyWindow?.fieldEditor(false, for: nil) as? NSTextView)?.paste(nil)
-        case "state":
-            guard let path = info["path"] as? String else { return }
-            var state: [String: Any] = [
-                "query": query,
-                "selectedID": selectedID ?? NSNull(),
-                "pathVerbIndex": pathVerbIndex,
-                "commandNotice": commandNotice?.text ?? NSNull(),
-                "activeMode": activeMode?.mode.rawValue ?? NSNull(),
-                "prodExpanded": prodExpandedKey ?? NSNull(),
-                "eveAskedPrompt": eveAskedPrompt ?? NSNull(),
-                // Panel Home: which region shows, its open folds and the rows
-                // the keyboard walks, the prod rail beside results, the frame.
-                "home": showsHome,
-                "homeExpanded": homeExpanded.sorted(),
-                "homeRows": showsHome ? homeDigest.visible(expanded: homeExpanded).map { "pr:\($0.id)" } : [],
-                "prodRail": showServiceRail && !showsHome,
-                "panelSize": [PanelMetrics.shared.panelSize.width, PanelMetrics.shared.panelSize.height],
-                "prSearchIDs": store.searchMatches.map(\.id),
-                "prSearchError": store.searchError ?? NSNull(),
-                "prSearchPartial": store.searchIsPartial,
-                "prSearchMilliseconds": store.localSearchMilliseconds,
-                "prIsSearching": store.isSearching,
-            ]
-            if let target = pathTarget {
-                state["pathTarget"] = [
-                    "path": target.url.path,
-                    "isDirectory": target.isDirectory,
-                    "missing": target.missing ?? NSNull(),
-                    "line": target.line ?? NSNull(),
-                    "column": target.column ?? NSNull(),
-                    "verbs": target.verbs.map(\.rawValue),
-                ] as [String: Any]
-            } else {
-                state["pathTarget"] = NSNull()
-            }
-            Task { @MainActor in
-                let counts = await store.githubRequestCounts()
-                state["githubNetworkRequests"] = counts.network
-                state["githubSharedRequests"] = counts.shared
-                state["githubPRLookups"] = counts.lookups
-                state["githubPRSearches"] = counts.searches
-                state["prAllSearchIDs"] = store.searchResults.map(\.id)
-                PanelDriver.write(state: state, to: path)
-            }
-        default:
-            break
-        }
-    }
-    #endif
-
-    private var hairline: some View {
-        Rectangle().fill(Theme.hairline).frame(height: 1)
-    }
-
-    private var hairlineV: some View {
-        Rectangle().fill(Theme.hairline).frame(width: 1)
-    }
-
-    // MARK: - Palette
-
-    private var palette: some View {
-        let chatting = eveAskedPrompt != nil
-        return HStack(spacing: 10) {
-            Image(systemName: chatting ? "sparkles" : "magnifyingglass")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(chatting ? Theme.eve : Color.secondary.opacity(0.6))
-            TextField(paletteHint, text: $query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                // One line, scrolling sideways: a pasted paragraph used to
-                // wrap inside the fixed-height bar with its first line clipped.
-                // Long text is read where it lands (the `.notes` draft row);
-                // ⌘V in `handleKey` keeps its newlines.
-                .lineLimit(1)
-                .focused($paletteFocused)
-                .onSubmit(submitPalette)
-                .onChange(of: query) { _, new in
-                    // New query, new result list — a stale index would point at
-                    // a different PR than the one that was highlighted.
-                    selectedID = nil
-                    // A successful slash verb clears the field itself and
-                    // the notice is its only feedback — only new typing
-                    // retires it.
-                    if !new.isEmpty { commandNotice = nil }
-                    pathTarget = Self.detectPath(new)
-                    pathVerbIndex = 0
-                    // "/" and "." are command surfaces, not search text — a
-                    // GitHub archive query for ".p" is pure noise. Nor is a
-                    // pasted path.
-                    let isPathShaped = PathTarget.looksLikePath(new)
-                    store.search(new.hasPrefix("/") || new.hasPrefix(".") || isPathShaped ? "" : new)
-                    // Issues are searched ONLY from inside their mode, so no
-                    // keystroke anywhere else spends an issue-search call.
-                    let issueFilter = Self.paletteMode(in: new)
-                        .flatMap { $0.mode == .issues ? $0.filter : nil }
-                    store.searchIssues(issueFilter ?? "")
-                }
-            if selectedID != nil {
-                // ↵ belongs to the highlighted row now, not to eve — say so.
-                Text("↵ open · ↑ back")
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-            } else if query.isEmpty {
-                if eveOnline == true {
-                    HStack(spacing: 4) {
-                        Circle().fill(.green).frame(width: 6, height: 6)
-                        Text("eve")
-                    }
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                }
-                KeyChip("⌥ ␣")
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .matchedGeometryEffect(id: "palette", in: paletteMorph)
-    }
-
-    /// Typing "todo…" surfaces the todos tab. Prefix-only on purpose: a PR
-    /// titled "fix todo list" must not hijack the search results.
-    private var todosMatch: Bool {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return false }
-        return "todos".hasPrefix(q) || q == "td"
-    }
-
-    private var paletteHint: String {
-        if eveAskedPrompt != nil { return "Ask eve again…" }
-        if let (mode, _) = activeMode { return mode.fieldHint }
-        if showTodos { return "Search todos…" }
-        return "Search PRs, repos…  (/ask for eve · \".\" for modes)"
-    }
-
-    private func submitPalette() {
-        let prompt = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return }
-        // Slash commands are explicit verbs — they run before any fuzzy match
-        // gets a chance to reinterpret them.
-        if let (command, argument) = SlashCommands.parse(prompt) {
-            switch command.action {
-            case .askEve:
-                let evePrompt = argument.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !evePrompt.isEmpty else {
-                    commandNotice = .failed("usage: \(command.usage)")
-                    return
-                }
-                guard eveOnline == true else {
-                    commandNotice = .failed("eve is offline")
-                    return
-                }
-                askEve(evePrompt)
-                query = ""
-            case .local:
-                let result = command.run(argument)
-                commandNotice = result
-                if !result.isFailure { query = "" }
-            }
-            return
-        }
-        // A path card: the key router normally takes ↵ first, but a submit
-        // that reaches here (no monitor, a synthetic submit) does the same.
-        if let target = pathTarget {
-            runPathVerb(target.verbs[min(pathVerbIndex, target.verbs.count - 1)])
-            return
-        }
-        // Once `/ask` deliberately opened the conversation, this field is a
-        // composer rather than a search box. Follow-ups stay conversational;
-        // dismissing the overlay returns to the search-only contract.
-        if eveAskedPrompt != nil {
-            guard eveOnline == true else {
-                commandNotice = .failed("eve is offline")
-                return
-            }
-            askEve(prompt)
-            query = ""
-            return
-        }
-        // A mode's field is a filter — ↵ opens the top match; a partial mode
-        // token completes.
-        if let (mode, filter) = activeMode {
-            switch mode {
-            case .todos: modeTodos(filter).first?.open()
-            case .schedule: modeSchedule(filter).first?.open()
-            case .prod:
-                if let issue = modeProd(filter).first { Self.open(issue.issue.permalink) }
-            case .vit: modeVit(filter).first?.open()
-            case .boards: modeBoards(filter).first?.open()
-            case .issues:
-                if let issue = modeIssues(filter).first { Self.open(issue.url) }
-            case .notes:
-                // Text that finds no note is a note to write, not a failed search.
-                if let note = modeNotes(filter).first { toggleNote(note) } else { createNote(filter) }
-            case .fans:
-                break // the deck is controls, not a result list — ↵ is a no-op
-            case .work, .devbox, .ci, .estate, .health, .mac:
-                break // overview pages are mouse-first (spec 2026-09-23) — ↵ is a no-op
-            case .organize:
-                // Bare ↵ runs "default" (names() sorts it first); unmatched
-                // text runs literally — the Lua engine may know layouts the
-                // settings file doesn't list yet.
-                runOrganize(modeOrganize(filter).first ?? (filter.isEmpty ? "default" : filter))
-            }
-            return
-        }
-        if let mode = modePickerMatches.first {
-            enterMode(mode)
-            return
-        }
-        // Inside the todos tab the field is a filter — ↵ opens the top match.
-        if showTodos {
-            filteredTodos.first?.open()
-            return
-        }
-        // Todos, then projects ("fix ↵" opens the ExampleApp on-call page), then
-        // commands ("v ↵" opens vitrinka). Unmatched text remains a search.
-        if todosMatch {
-            query = ""
-            showTodos = true
-            return
-        }
-        if let project = store.matchProject(prompt) {
-            query = ""
-            activeProject = project
-            return
-        }
-        if let command = QuickCommand.matching(prompt).first {
-            query = ""
-            command.run()
-            AppDelegate.shared?.closePanel()
-            return
-        }
-        return
-    }
-
-    // MARK: - Path card
-
-    /// Path detection for the palette. Never while the text is (or is
-    /// completing into) a slash verb — `/open` must not resolve to the
-    /// nearest ancestor `/`.
-    private static func detectPath(_ text: String) -> PathTarget? {
-        guard PathTarget.looksLikePath(text) else { return nil }
-        guard SlashCommands.parse(text) == nil, SlashCommands.matching(text).isEmpty else { return nil }
-        return PathTarget.detect(text)
-    }
-
-    /// Runs a card verb and closes the panel — the destination is another
-    /// app, exactly like a quick command.
-    private func runPathVerb(_ verb: PathVerb) {
-        guard let target = pathTarget else { return }
-        let result = verb.run(target)
-        guard !result.isFailure else {
-            commandNotice = result
-            return
-        }
-        query = ""
-        pathTarget = nil
-        pathVerbIndex = 0
-        AppDelegate.shared?.closePanel()
-    }
-
-    // MARK: - Keyboard navigation (↓ ↑ walk the results, ↵ opens)
-
-    /// One activatable result. The list is flattened in the exact visual order
-    /// the panel renders — project match, quick commands, prod, inbox, archive —
-    /// so ↓ never jumps somewhere the eye isn't.
-    private struct PaletteItem {
-        let id: String
-        let activate: @MainActor () -> Void
-        /// ↵ normally activates and drops the selection (the row opened a URL
-        /// or a page, so there is nothing left to be selected). A note toggles
-        /// its expansion in place — it has to stay selected, or the second ↵
-        /// would have nothing to close.
-        var keepsSelection = false
-
-        init(id: String, keepsSelection: Bool = false, activate: @escaping @MainActor () -> Void) {
-            self.id = id
-            self.activate = activate
-            self.keepsSelection = keepsSelection
-        }
-    }
-
-    private var paletteItems: [PaletteItem] {
-        // The project page and the eve overlay replace the result list; the
-        // todos page keeps the keyboard — its rows ARE the result list there.
-        guard activeProject == nil, eveAskedPrompt == nil else { return [] }
-        if showTodos {
-            return filteredTodos.map { todo in
-                PaletteItem(id: "todo:\(todo.id)") { todo.open() }
-            }
-        }
-        if let (mode, filter) = activeMode {
-            switch mode {
-            case .todos:
-                return modeTodos(filter).map { todo in
-                    PaletteItem(id: "todo:\(todo.id)") { todo.open() }
-                }
-            case .schedule:
-                return modeSchedule(filter).map { todo in
-                    PaletteItem(id: "todo:\(todo.id)") { todo.open() }
-                }
-            case .prod:
-                return modeProd(filter).map { issue in
-                    PaletteItem(id: "prod:\(issue.id)") { Self.open(issue.issue.permalink) }
-                }
-            case .vit:
-                return modeVit(filter).map { entry in
-                    PaletteItem(id: "vit:\(entry.id)") { entry.open() }
-                }
-            case .boards:
-                return modeBoards(filter).map { board in
-                    PaletteItem(id: "board:\(board.slug)") { board.open() }
-                }
-            case .issues:
-                return modeIssues(filter).map { issue in
-                    PaletteItem(id: "issue:\(issue.id)") { Self.open(issue.url) }
-                }
-            case .notes:
-                let create = filter.isEmpty ? [] : [PaletteItem(id: Self.noteDraftID) { createNote(filter) }]
-                return create + modeNotes(filter).map { note in
-                    PaletteItem(id: "note:\(note.id)", keepsSelection: true) {
-                        toggleNote(note)
-                    }
-                }
-            case .fans, .work, .devbox, .ci, .estate, .health, .mac:
-                return []
-            case .organize:
-                return modeOrganize(filter).map { name in
-                    PaletteItem(id: "organize:\(name)") { runOrganize(name) }
-                }
-            }
-        }
-        var items: [PaletteItem] = []
-        for command in slashMatches {
-            items.append(PaletteItem(id: "slash:\(command.name)") { completeSlash(command) })
-        }
-        for mode in modePickerMatches {
-            items.append(PaletteItem(id: "mode:\(mode.rawValue)") { enterMode(mode) })
-        }
-        if !items.isEmpty { return items } // a completion card owns the keyboard
-        if todosMatch {
-            items.append(PaletteItem(id: "todos") {
-                query = ""
-                showTodos = true
-            })
-        }
-        if let project = store.matchProject(query) {
-            items.append(PaletteItem(id: "project:\(project.id)") {
-                query = ""
-                activeProject = project
-            })
-        }
-        for command in QuickCommand.matching(query) {
-            items.append(PaletteItem(id: "cmd:\(command.id)") {
-                query = ""
-                command.run()
-                AppDelegate.shared?.closePanel()
-            })
-        }
-        guard !(store.pinned.isEmpty && query.isEmpty) else { return items }
-        // Matching the visual order exactly: PRs in fixed repo order, todos,
-        // archive, then the pinned strips at the foot — prod, links.
-        // Home (D3) walks only the PR rows it draws: folded lines stay folded.
-        if showsHome {
-            return items + homeDigest.visible(expanded: homeExpanded).map { entry in
-                PaletteItem(id: "pr:\(entry.id)") { Self.open(entry.info.pr.htmlUrl) }
-            }
-        }
-        for entry in filteredInbox {
-            items.append(PaletteItem(id: "pr:\(entry.id)") {
-                Self.open(entry.info.pr.htmlUrl)
-            })
-        }
-        for todo in filteredTodos {
-            items.append(PaletteItem(id: "todo:\(todo.id)") { todo.open() })
-        }
-        if searchActive {
-            for pr in store.searchMatches {
-                items.append(PaletteItem(id: "archive:\(pr.id)") {
-                    Self.open(pr.url)
-                })
-            }
-            for issue in store.sentryMatches {
-                items.append(PaletteItem(id: "sentry:\(issue.id)") {
-                    Self.open(issue.issue.permalink)
-                })
-            }
-        }
-        for note in filteredNotes {
-            items.append(PaletteItem(id: "note:\(note.id)", keepsSelection: true) {
-                toggleNote(note)
-            })
-        }
-        // The links strip draws only while searching; its rows are selectable
-        // exactly then.
-        if searchActive {
-            for link in filteredLinks.prefix(4) {
-                items.append(PaletteItem(id: "link:\(link.id)") { openLink(link) })
-            }
-        }
-        return items
-    }
-
-    // MARK: - Floating completions (slash verbs + palette modes, on glass)
-
-    private var slashMatches: [SlashCommand] {
-        SlashCommands.matching(query)
-    }
-
-    /// The completion card floating OVER the list: slash verbs when typing
-    /// "/", palette modes when typing ".". Arrow keys walk it (the rows are
-    /// paletteItems), ↵/click completes into the field.
-    private var floatingResults: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(slashMatches, id: \.name) { command in
-                FloatingCompletionRow(
-                    systemImage: "chevron.right.square",
-                    primary: command.usage, primaryMono: true,
-                    blurb: command.blurb,
-                    selected: isSelected("slash:\(command.name)")
-                ) { completeSlash(command) }
-            }
-            ForEach(modePickerMatches, id: \.rawValue) { mode in
-                FloatingCompletionRow(
-                    systemImage: mode.systemImage,
-                    primary: ".\(mode.rawValue) — \(mode.title)", primaryMono: false,
-                    blurb: mode.blurb,
-                    selected: isSelected("mode:\(mode.rawValue)")
-                ) { enterMode(mode) }
-            }
-        }
-        .padding(5)
-        .modifier(GlassCard())
-        .shadow(color: .black.opacity(0.35), radius: 14, y: 5)
-    }
-
-    private func completeSlash(_ command: SlashCommand) {
-        query = "/" + command.name + " "
-        selectedID = nil
-        DispatchQueue.main.async { moveCaretToEnd() }
-    }
-
-    // MARK: - Mode pages
-
-    @ViewBuilder
-    private func modePage(_ mode: PaletteMode, filter: String) -> some View {
-        switch mode {
-        case .todos:
-            TodosPageView(todoStore: todoStore, todos: modeTodos(filter),
-                          isSelected: { isSelected($0) },
-                          selectedID: selectedID) { query = "" }
-        case .schedule:
-            SchedulePageView(todos: modeSchedule(filter),
-                             isSelected: { isSelected($0) },
-                             selectedID: selectedID) { query = "" }
-        case .prod:
-            ProdArchiveView(archive: prodArchive, issues: modeProd(filter),
-                            selectedID: selectedID,
-                            isSelected: { isSelected($0) }) { query = "" }
-        case .vit:
-            VitrinkaAllView(entries: modeVit(filter),
-                            isSelected: { isSelected($0) }) { query = "" }
-        case .boards:
-            BoardsAllView(boards: modeBoards(filter),
-                          isSelected: { isSelected($0) }) { query = "" }
-        case .issues:
-            IssueSearchView(store: store, issues: modeIssues(filter),
-                            selectedID: selectedID,
-                            isSelected: { isSelected($0) }) { query = "" }
-        case .fans:
-            FanDeckView(fanStore: FanStore.shared, filter: filter) { query = "" }
-        case .notes:
-            NotesPageView(store: notes, notes: modeNotes(filter),
-                          newNote: filter.isEmpty ? nil : filter,
-                          newNoteID: Self.noteDraftID,
-                          onCreate: { createNote(filter) },
-                          selectedID: selectedID,
-                          isSelected: { isSelected($0) },
-                          expandedID: expandedNoteID,
-                          editingID: $editingNoteID,
-                          onToggle: { toggleNote($0) }) { query = "" }
-        case .organize:
-            OrganizePageView(layouts: modeOrganize(filter),
-                             isSelected: { isSelected($0) },
-                             onRun: { runOrganize($0) }) { query = "" }
-        case .work:
-            WorkPage(store: store, filter: filter) { query = "" }
-        case .devbox:
-            DevboxPage(store: store, filter: filter) { query = "" }
-        case .ci:
-            CIPage(store: store, filter: filter) { query = "" }
-        case .estate:
-            EstatePage(store: store, filter: filter) { query = "" }
-        case .health:
-            ProdMatrixPage(store: store, filter: filter) { query = "" }
-        case .mac:
-            MacHealthPage(health: MacHealthStore.shared, filter: filter) { query = "" }
-        }
-    }
-
-    /// Layout names narrowed by the palette, read fresh from settings.json —
-    /// see `WorkspaceLayouts.names()` for why nothing is cached.
-    private func modeOrganize(_ filter: String) -> [String] {
-        let q = filter.lowercased()
-        let all = WorkspaceLayouts.names()
-        guard !q.isEmpty else { return all }
-        return all.filter { $0.lowercased().contains(q) }
-    }
-
-    /// Fire-and-report: the move/tile/spawn happens inside Hammerspoon (which
-    /// shows its own on-screen summary); the palette only carries the verdict
-    /// as an inline notice — a broken hs must never modal.
-    private func runOrganize(_ name: String) {
-        commandNotice = .ok("organizing — \(name)…")
-        Task {
-            commandNotice = await OrganizeRunner.run(layout: name)
-        }
-    }
-
-    private func modeNotes(_ filter: String) -> [SavedNote] {
-        notes.ordered.filter { $0.matches(filter) }
-    }
-
-    /// The `.notes` draft row's palette id — the typed or pasted filter,
-    /// offered as a new note above whatever it matched.
-    private static let noteDraftID = "note-draft"
-
-    /// Saves the draft, clears the filter and leaves the new note selected
-    /// on top of the list, so the next ↵ reads it back.
-    private func createNote(_ text: String) {
-        guard let note = notes.add(text) else { return }
-        enterMode(.notes)
-        expandedNoteID = note.id
-        // The query change clears the selection on its way through onChange.
-        DispatchQueue.main.async { selectedID = "note:\(note.id)" }
-    }
-
-    /// Expand-in-place, everywhere: the note opens where you found it. Second
-    /// ↵ (or Esc) folds it back — see `handleKey`.
-    private func toggleNote(_ note: SavedNote) {
-        withAnimation(.easeOut(duration: 0.16)) {
-            expandedNoteID = expandedNoteID == note.id ? nil : note.id
-        }
-    }
-
-    /// The agenda, narrowed by the palette. Unlike `modeTodos` this keeps
-    /// resolved-hiding out of it — a scheduled item is dismissed by doing it,
-    /// not by triaging it away.
-    private func modeSchedule(_ filter: String) -> [TodoItem] {
-        todoStore.scheduledTodos.filter { $0.matches(filter) }
-    }
-
-    private func modeTodos(_ filter: String) -> [TodoItem] {
-        todoStore.openTodos.filter {
-            $0.matches(filter) && !hiddenResolved.contains("todo:\($0.id)")
-        }
-    }
-
-    private func modeProd(_ filter: String) -> [ProdIssue] {
-        let visible = prodArchive.issues.filter { !hiddenResolved.contains("prod:\($0.id)") }
-        let q = filter.lowercased()
-        guard !q.isEmpty else { return visible }
-        return visible.filter {
-            $0.issue.title.lowercased().contains(q)
-                || $0.project.lowercased().contains(q)
-                || $0.issue.shortId.lowercased().contains(q)
-        }
-    }
-
-    /// Issue hits come back already answered to `filter` — GitHub matched the
-    /// body text too, so re-filtering locally would hide real hits. Only the
-    /// resting list needs narrowing, while a one-character query is still too
-    /// short to be worth a request.
-    private func modeIssues(_ filter: String) -> [ArchivedIssue] {
-        let visible = store.issueMatches.filter { !hiddenResolved.contains("issue:\($0.id)") }
-        guard store.showingRecentIssues, !filter.isEmpty else { return visible }
-        let q = filter.lowercased()
-        return visible.filter {
-            $0.title.lowercased().contains(q)
-                || $0.repoSlug.lowercased().contains(q)
-                || "#\($0.number)".contains(q)
-                || $0.labels.contains { $0.lowercased().contains(q) }
-        }
-    }
-
-    private func modeVit(_ filter: String) -> [VitrinkaListening] {
-        store.vitrinkaListening.filter {
-            $0.matches(filter) && !hiddenResolved.contains("vit:\($0.id)")
-        }
-    }
-
-    private func modeBoards(_ filter: String) -> [VitrinkaBoard] {
-        store.vitrinkaBoards.filter { $0.matches(filter) }
-    }
-
-    /// Opening a URL activates the browser, which resigns the panel's key
-    /// status — it closes itself, exactly as a mouse click does today.
-    private static func open(_ url: String) {
-        if let parsed = URL(string: url) {
-            NSWorkspace.shared.open(parsed)
-        }
-    }
-
-    private func isSelected(_ id: String) -> Bool {
-        selectedID == id
-    }
-
-    /// The panel's field editor is shared window machinery — grab it and park
-    /// the insertion point after the last character.
-    private func moveCaretToEnd() {
-        guard let editor = NSApp.keyWindow?.fieldEditor(false, for: nil) as? NSTextView else { return }
-        editor.selectedRange = NSRange(location: (editor.string as NSString).length, length: 0)
-    }
-
-    private func currentIndex(in items: [PaletteItem]) -> Int? {
-        guard let selectedID else { return nil }
-        return items.firstIndex { $0.id == selectedID }
-    }
-
-    private func handleKey(_ event: NSEvent, synthetic: Bool = false) -> NSEvent? {
-        // The monitor is app-wide; Settings and other windows keep their keys.
-        // A PanelDriver event is addressed to this panel by construction.
-        guard synthetic || NSApp.keyWindow is StatusPanel else { return event }
-        // The workspace search (and note editors) own their editing keys — but
-        // never Esc. It peels one panel layer (case 53), and a note edit has to
-        // stay cancellable with the key that opened it; case 53 returns the
-        // event when there is no layer to peel, so a field keeps its own Esc.
-        guard synthetic || paletteFocused || event.keyCode == 53
-            || !(NSApp.keyWindow?.firstResponder is NSTextView) else { return event }
-        let items = paletteItems
-        switch event.keyCode {
-        case 125: // ↓
-            guard !items.isEmpty else { return event }
-            let next = currentIndex(in: items).map { min($0 + 1, items.count - 1) } ?? 0
-            selectedID = items[next].id
+    /// Each module's list — the one place a module plugs into the shell.
+    /// Each page draws its selected row, lists its objects in drawn order,
+    /// and opens a clicked row's detail; the scope chip is the way back.
+    func modulePage(_ module: PanelModule) -> (any ModulePage)? {
+        let filter = router.text
+        let selected = router.selection
+        let open: (String) -> Void = { router.openDetail($0) }
+        switch module {
+        case .home:
             return nil
-        case 126: // ↑
-            guard let current = currentIndex(in: items) else { return event }
-            // Past the top the palette takes over again — the caret comes back.
-            selectedID = current == 0 ? nil : items[current - 1].id
+        case .prs:
+            return PRListPage(store: store, filter: filter, hidden: hiddenResolved, selectedID: selected)
+        case .ci:
+            return CIPage(store: store, filter: filter, selectedID: selected)
+        case .prod:
+            return ProdMatrixPage(store: store, filter: filter, selectedID: selected, onOpen: open)
+        case .devbox:
+            return DevboxPage(store: store, filter: filter, selectedID: selected, onOpen: open)
+        case .work:
+            return WorkPage(store: store, filter: filter, selectedID: selected, onOpen: open)
+        case .sessions:
+            return SessionsPage(fleet: FleetStore.shared, store: store, listeners: modeVit(filter), filter: filter,
+                                selectedID: selected, onOpen: open)
+        case .estate:
+            return EstatePage(store: store, filter: filter, selectedID: selected,
+                              firing: estateFiring,
+                              renewals: ExpiryRadarStore.shared.watched, onOpen: open)
+        case .mac:
+            return MacHealthPage(health: MacHealthStore.shared, fansShown: store.isSectionVisible("fans"),
+                                 filter: filter, selectedID: selected, onOpen: open)
+        }
+    }
+
+    func hosted(_ page: some ModulePage) -> AnyView {
+        AnyView(ModuleHost(page: page, router: router))
+    }
+
+    /// The entered module's objects in drawn order; empty when global.
+    var moduleObjects: [ModuleObject] {
+        router.module.flatMap(modulePage)?.objects ?? []
+    }
+
+    /// Is the selected object's detail on screen (not just requested)?
+    var detailShown: Bool {
+        router.detailOpen && moduleObjects.contains { $0.id == router.selection }
+    }
+
+    /// A PR row on Home or in the global results: ↵ opens its detail in PRs
+    /// (D6 "every need is one step from its action"). The search text comes
+    /// along as the filter, so an archive hit stays in the list.
+    func openPRDetail(_ id: String) {
+        router.enter(.prs, filter: showsHome ? "" : query, select: id, openDetail: true)
+    }
+
+    /// A `pultik://` link: an inbox PR opens its detail; one the inbox does
+    /// not hold (another author's, a repo not pinned) opens on GitHub.
+    func openLink(_ link: PultikLink) {
+        switch link {
+        case let .pr(repo, number):
+            let entry = store.inbox.first {
+                $0.repoSlug.caseInsensitiveCompare(repo) == .orderedSame && $0.info.pr.number == number
+            }
+            if let entry {
+                router.enter(.prs, filter: "", select: "pr:\(entry.id)", openDetail: true)
+            } else if let url = link.webURL {
+                OverviewURL.open(url)
+            }
+        }
+    }
+
+    // MARK: - Keyboard (`KeyboardCoordinator` routes, the panel performs)
+
+    /// The ids ↑/↓ walk: the entered module's objects, else the palette's
+    /// rows (Home's PR rows at rest).
+    var keyItems: [String] {
+        router.module == nil ? paletteItems.map(\.id) : moduleObjects.map(\.id)
+    }
+
+    /// The panel as the coordinator reads it, per keystroke. A PanelDriver
+    /// event is addressed to the field by construction (`synthetic`).
+    func keyContext(synthetic: Bool = false) -> KeyContext {
+        let global = router.module == nil
+        return KeyContext(
+            fieldFocused: synthetic || paletteFocused,
+            textViewFocused: !synthetic && !paletteFocused && NSApp.keyWindow?.firstResponder is NSTextView,
+            module: router.module,
+            text: query,
+            pendingToken: router.pendingToken,
+            items: keyItems,
+            selection: selectedID,
+            detailOpen: detailShown,
+            pathCard: global && pathTarget != nil,
+            completion: global && (!slashMatches.isEmpty || !modePickerMatches.isEmpty),
+            notesDraft: activeMode.map { $0.mode == .notes && !$0.filter.isEmpty } ?? false,
+            page: global && (showTodos || activeProject != nil),
+            eve: eveAskedPrompt != nil,
+            noteEditing: global && editingNoteID != nil,
+            noteExpanded: global && expandedNoteID != nil
+        )
+    }
+
+    /// Performs what the coordinator decided; false lets the key through to
+    /// the field.
+    func perform(_ intent: KeyIntent, _ event: NSEvent? = nil) -> Bool {
+        switch intent {
+        case let .module(module):
+            selectModule(module)
+        case let .select(id):
+            selectedID = nowArrowTarget(id)
             // The field held focus the whole time, but the trip through the
             // list leaves its insertion point at 0 — put it back at the end,
             // where typing would naturally continue.
-            if selectedID == nil { moveCaretToEnd() }
-            return nil
-        case 48: // ⇥
-            // A path card owns ⇥: it walks the verb row.
-            if let target = pathTarget, selectedID == nil {
-                let count = target.verbs.count
-                let step = event.modifierFlags.contains(.shift) ? -1 : 1
-                pathVerbIndex = (pathVerbIndex + step + count) % count
-                return nil
-            }
-            // On a highlighted row, ⇥ is TRIAGE: resolved ↔ unresolved. The
-            // row dims now and disappears on the next panel open.
-            // The `.notes` draft row is unsaved text, not an item — there is
-            // nothing to triage, and persisting its id would outlive the draft.
-            if let selectedID {
-                if selectedID != Self.noteDraftID { ResolvedStore.shared.toggle(selectedID) }
-                return nil
-            }
-            // Otherwise it completes: the first listed slash verb or mode —
-            // exactly what the on-screen completion card promises.
+            if id == nil { moveCaretToEnd() }
+        case let .openDetail(id):
+            router.openDetail(id)
+        case let .activate(id):
+            guard let item = paletteItems.first(where: { $0.id == id }) else { return false }
+            item.activate()
+            if !item.keepsSelection { selectedID = nil }
+        case let .openInBrowser(id):
+            // Browser-only: a row without a page swallows ⌘↵ and does nothing —
+            // it never falls back to the row's own ↵ (a quick command, a note,
+            // a layout would run).
+            let url = router.module == nil
+                ? paletteItems.first { $0.id == id }?.url.flatMap { URL(string: $0) }
+                : moduleObjects.first { $0.id == id }?.url
+            if let url { OverviewURL.open(url) }
+        case .toggleInspector:
+            router.toggleInspector()
+        case let .rerunFailed(id):
+            // The detail's own verb: it fires only once the run it would
+            // re-run has been read.
+            guard let verb = moduleObjects.first(where: { $0.id == id })?.verbs.first(where: { $0.role == .primary })
+            else { return false }
+            verb.action()
+        case .widenScope:
+            leaveModule()
+        case let .escape(step):
+            peel(step)
+        case .runPathVerb:
+            // A chord picks a verb outright; handled here so ⌘↵ never
+            // reaches the field editor.
+            guard let target = pathTarget else { return false }
+            runPathVerb(event.flatMap { PathVerb.forModifiers($0.modifierFlags) }
+                ?? target.verbs[min(pathVerbIndex, target.verbs.count - 1)])
+        case let .cyclePathVerb(step):
+            guard let count = pathTarget?.verbs.count, count > 0 else { return false }
+            pathVerbIndex = (pathVerbIndex + step + count) % count
+        case let .triage(id):
+            // The row dims now and disappears on the next panel open. The
+            // `.notes` draft row is unsaved text, not an item — persisting its
+            // id would outlive the draft. A Now row is open at its source —
+            // dismissing it locally is not a resolution (contract "Handled").
+            if id != Self.noteDraftID, !NowHomeRow.owns(id) { ResolvedStore.shared.toggle(id) }
+        case .complete:
+            // Exactly what the on-screen completion card promises.
             if let command = slashMatches.first {
                 let completed = "/" + command.name + " "
                 if query != completed {
@@ -1743,829 +571,54 @@ struct StatusPanelView: View {
                     // The text change rebuilds the field — park the caret after it.
                     DispatchQueue.main.async { moveCaretToEnd() }
                 }
-                return nil
-            }
-            if let mode = modePickerMatches.first {
+            } else if let mode = modePickerMatches.first {
                 enterMode(mode)
-                return nil
-            }
-            return event
-        case 36, 76: // ↵ / numpad ↵
-            // While a note edit is up, ↵ belongs to the TextEditor (and ⌘↵
-            // to its Save shortcut) — activating the selected row under a
-            // half-typed draft would be Esc's bug in reverse.
-            guard editingNoteID == nil else { return event }
-            // ⌘↵ in `.notes` saves the filter as a note even when it also
-            // matches some — bare ↵ reads the top match then.
-            if event.modifierFlags.contains(.command), let (mode, filter) = activeMode,
-               mode == .notes, !filter.isEmpty {
-                createNote(filter)
-                return nil
-            }
-            // A path card: ↵ runs the highlighted verb, a chord picks one
-            // outright. Handled here so ⌘↵ never reaches the field editor.
-            if let target = pathTarget, selectedID == nil {
-                let verb = PathVerb.forModifiers(event.modifierFlags)
-                    ?? target.verbs[min(pathVerbIndex, target.verbs.count - 1)]
-                runPathVerb(verb)
-                return nil
-            }
-            guard let index = currentIndex(in: items) else { return event }
-            items[index].activate()
-            if !items[index].keepsSelection { selectedID = nil }
-            return nil
-        case 53: // Esc
-            // Esc peels one layer at a time. Without this the window's
-            // `cancelOperation` closes the whole panel — an expanded note
-            // could never be folded with the key that opened it, and an
-            // in-flight edit would be thrown away with the window.
-            if editingNoteID != nil {
-                editingNoteID = nil
-                return nil
-            }
-            guard expandedNoteID != nil else { return event }
-            withAnimation(.easeOut(duration: 0.16)) {
-                expandedNoteID = nil
-            }
-            return nil
-        case 9 where event.modifierFlags.contains(.command): // ⌘V
-            // The single-line field folds a paste's newlines into spaces, and
-            // a note pasted after `.note` would lose its paragraphs. Multi-line
-            // text is spliced in here; anything else takes the field's paste.
-            guard synthetic || paletteFocused,
-                  let text = NSPasteboard.general.string(forType: .string),
-                  text.contains(where: \.isNewline)
-            else { return event }
-            let editor = NSApp.keyWindow?.fieldEditor(false, for: nil) as? NSTextView
-            let current = query as NSString
-            var range = editor?.selectedRange ?? NSRange(location: current.length, length: 0)
-            if NSMaxRange(range) > current.length { range = NSRange(location: current.length, length: 0) }
-            query = current.replacingCharacters(in: range, with: text)
-            let caret = range.location + (text as NSString).length
-            DispatchQueue.main.async {
-                guard let editor, caret <= (editor.string as NSString).length else { return }
-                editor.selectedRange = NSRange(location: caret, length: 0)
-            }
-            return nil
-        case 8 where event.modifierFlags.contains(.command): // ⌘C
-            // A note you can read but not retrieve is half a feature — the
-            // whole point of a pasted spec is pasting it back somewhere.
-            //
-            // Scoped to the KEYBOARD-selected row on purpose: an expanded note
-            // is text-selectable, and hijacking ⌘C there would copy the whole
-            // note instead of the words the user just dragged over. Mouse
-            // users get the ⧉ button.
-            guard editingNoteID == nil,
-                  let id = selectedNoteID,
-                  let note = notes.notes.first(where: { $0.id == id })
-            else { return event }
-            copyNote(note)
-            return nil
-        default:
-            return event
-        }
-    }
-
-    /// The selected row's note, when the selection is on one.
-    private var selectedNoteID: String? {
-        guard let selectedID, selectedID.hasPrefix("note:") else { return nil }
-        return String(selectedID.dropFirst("note:".count))
-    }
-
-    @ViewBuilder
-    private var commandResults: some View {
-        if let notice = commandNotice {
-            HStack(spacing: 6) {
-                Image(systemName: notice.isFailure ? "exclamationmark.triangle" : "checkmark.circle")
-                    .font(.system(size: 10))
-                Text(notice.text)
-                    .font(.system(size: 11))
-                Spacer()
-            }
-            .foregroundStyle(notice.isFailure ? Color.orange : .secondary)
-            .padding(.horizontal, 18)
-            .padding(.bottom, 6)
-        }
-        if todosMatch, !showTodos {
-            Button {
-                query = ""
-                showTodos = true
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "checklist")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 18)
-                    Text("Todos")
-                        .font(.system(size: 12.5, weight: .medium))
-                    Text("vitrinka — \(todoStore.openTodos.count) open")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    if selectedID == nil || isSelected("todos") { KeyChip("↵") }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(
-                selectedID == nil || isSelected("todos")
-                    ? Theme.accentSoft.opacity(0.6) : .clear,
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .padding(.horizontal, 10)
-            .padding(.bottom, 4)
-        }
-        if let project = store.matchProject(query), activeProject == nil {
-            Button {
-                query = ""
-                activeProject = project
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 18)
-                    Text(project.title)
-                        .font(.system(size: 12.5, weight: .medium))
-                    Text("project page — PRs, prod, services, links")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    if selectedID == nil || isSelected("project:\(project.id)") { KeyChip("↵") }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(
-                // With nothing arrowed-to, ↵ still lands here — keep the cue.
-                selectedID == nil || isSelected("project:\(project.id)")
-                    ? Theme.accentSoft.opacity(0.6) : .clear,
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .padding(.horizontal, 10)
-            .padding(.bottom, 4)
-        }
-        let commands = QuickCommand.matching(query)
-        if !commands.isEmpty {
-            VStack(alignment: .leading, spacing: 1) {
-                ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
-                    Button {
-                        query = ""
-                        command.run()
-                        AppDelegate.shared?.closePanel()
-                    } label: {
-                        HStack(spacing: 9) {
-                            Image(systemName: command.systemImage)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Theme.accent)
-                                .frame(width: 18)
-                            Text(command.title)
-                                .font(.system(size: 12.5, weight: .medium))
-                            Text(command.subtitle)
-                                .font(.system(size: 10.5))
-                                .foregroundStyle(.tertiary)
-                            Spacer()
-                            if commandIsEnterTarget(command, index: index) { KeyChip("↵") }
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .background(
-                        commandIsHighlighted(command, index: index)
-                            ? Theme.accentSoft.opacity(0.6) : .clear,
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 8)
-        }
-    }
-
-    /// Where an un-arrowed ↵ goes: `submitPalette` prefers a project match, so
-    /// the first command only owns ↵ when there is no project to beat it.
-    private func commandIsEnterTarget(_ command: QuickCommand, index: Int) -> Bool {
-        if selectedID != nil { return isSelected("cmd:\(command.id)") }
-        return index == 0 && store.matchProject(query) == nil
-    }
-
-    private func commandIsHighlighted(_ command: QuickCommand, index: Int) -> Bool {
-        if selectedID != nil { return isSelected("cmd:\(command.id)") }
-        return index == 0
-    }
-
-    // MARK: - Eve
-
-    private func askEve(_ prompt: String) {
-        askTask?.cancel()
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.85)) {
-            eveAskedPrompt = prompt
-        }
-        // The field is rebuilt in its new home, which drops first-responder —
-        // hand focus back so the conversation can continue by typing.
-        DispatchQueue.main.async { paletteFocused = true }
-        eveReply = ""
-        eveDone = false
-        eveError = nil
-        eveExpanded = false
-        askTask = Task {
-            do {
-                for try await event in await EveClient.shared.ask(prompt, settingsToken: store.eveToken) {
-                    if Task.isCancelled { return }
-                    eveReply = event.text
-                    if event.done { eveDone = true }
-                }
-                eveDone = true
-            } catch {
-                if !Task.isCancelled {
-                    eveError = error.localizedDescription
-                    eveDone = true
-                }
-            }
-        }
-    }
-
-    private func dismissEve() {
-        askTask?.cancel()
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.85)) {
-            eveAskedPrompt = nil
-        }
-        eveReply = ""
-        eveError = nil
-        DispatchQueue.main.async { paletteFocused = true }
-    }
-
-    // MARK: - Links strip (search results)
-
-    /// Saved links matching the palette query, pinned at the foot of the
-    /// centre column while searching: capped at four rows. At rest the links
-    /// live at the right rail's foot.
-    @ViewBuilder
-    private var linksStrip: some View {
-        let items = filteredLinks
-        if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Kicker(text: "Links", count: items.count)
-                    Spacer()
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-                .padding(.bottom, 2)
-                ForEach(items.prefix(4)) { link in
-                    LinkStripRow(link: link, selected: isSelected("link:\(link.id)")) {
-                        openLink(link)
-                    }
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
-            hairline
-        }
-    }
-
-    private var filteredLinks: [SavedLink] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let ordered = links.ordered
-        guard !q.isEmpty, !q.hasPrefix("/") else { return ordered }
-        return ordered.filter {
-            $0.title.lowercased().contains(q) || $0.url.lowercased().contains(q)
-        }
-    }
-
-    private func openLink(_ link: SavedLink) {
-        links.recordOpen(id: link.id)
-        Self.open(link.url)
-    }
-
-    // MARK: - PR inbox (fixed repo order)
-
-    @ViewBuilder
-    private var inbox: some View {
-        let entries = filteredInbox
-        if entries.isEmpty {
-            // Silent while the archive has (or is fetching) something to say —
-            // "no matches" above a list of matches would be a lie.
-            if searchActive && (store.isSearching || store.isSearchingSentry
-                || !store.searchMatches.isEmpty || !store.sentryMatches.isEmpty)
-            {
-                EmptyView()
-            } else if filteredTodos.isEmpty && filteredNotes.isEmpty {
-                Text(query.isEmpty
-                    ? "no open PRs"
-                    : "no matches")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 20)
-            }
-            // No PRs doesn't mean nothing to show — todos keep their
-            // section. Live sessions are the overview column's (D9).
-            todosSection
-        } else {
-            // Fixed order (2026-07-29): one section per repo, always in the
-            // same sequence (preferences.repoOrder, rest by recency) — the
-            // eye knows where each project lives. Attention still shows as
-            // an orange kicker when a repo has a needs-you PR, but it never
-            // moves anything.
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(repoGroups(entries), id: \.slug) { group in
-                    repoSection(group)
-                }
-                todosSection
-            }
-        }
-    }
-
-    /// Consecutive inbox entries bucketed by repo — `store.inbox` already
-    /// carries the fixed repo order, so grouping just preserves it.
-    private func repoGroups(_ entries: [StatusStore.InboxPR])
-        -> [(slug: String, name: String, entries: [StatusStore.InboxPR])]
-    {
-        var groups: [(slug: String, name: String, entries: [StatusStore.InboxPR])] = []
-        for entry in entries {
-            if groups.last?.slug == entry.repoSlug {
-                groups[groups.count - 1].entries.append(entry)
             } else {
-                groups.append((entry.repoSlug, entry.repoName, [entry]))
+                return false
             }
+        case .createNote:
+            guard let (mode, filter) = activeMode, mode == .notes, !filter.isEmpty else { return false }
+            createNote(filter)
+        case .paste:
+            return pasteMultiline()
+        case let .copyNote(id):
+            // A note you can read but not retrieve is half a feature. Scoped
+            // to the KEYBOARD-selected row: an expanded note is
+            // text-selectable, and ⌘C there copies the words dragged over.
+            guard let note = notes.notes.first(where: { "note:\($0.id)" == id }) else { return false }
+            copyNote(note)
+        case let .swallowToken(key):
+            return router.swallowTokenKey(key)
+        case .ignore:
+            break
         }
-        return groups
+        return true
     }
 
-    @ViewBuilder
-    private func repoSection(_ group: (slug: String, name: String, entries: [StatusStore.InboxPR])) -> some View {
-        Kicker(
-            text: group.name,
-            count: group.entries.count,
-            tone: group.entries.contains { $0.info.attentionRank == 0 } ? .orange : .secondary,
-            action: { OverviewURL.open(OverviewURL.repoPulls(group.slug)) },
-            actionRole: .link,
-            actionHelp: "Open \(group.slug) pull requests on GitHub"
-        )
-            .padding(.horizontal, 8)
-            .padding(.top, 7)
-            .padding(.bottom, 2)
-        ForEach(group.entries) { entry in
-            InboxPRRow(entry: entry, selected: isSelected("pr:\(entry.id)"))
-                .opacity(resolvedStore.isResolved("pr:\(entry.id)") ? 0.35 : 1)
-                .id("pr:\(entry.id)")
-        }
-    }
-
-    private var filteredInbox: [StatusStore.InboxPR] {
-        let visible = store.inbox.filter { !hiddenResolved.contains("pr:\($0.id)") }
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty, !q.hasPrefix("."), !q.hasPrefix("/") else { return visible }
-        return visible.filter { entry in
-            entry.repoSlug.lowercased().contains(q)
-                || entry.info.pr.title.lowercased().contains(q)
-                || "#\(entry.info.pr.number)".contains(q)
-                || entry.info.pr.head.ref.lowercased().contains(q)
-        }
-    }
-
-    // MARK: - Todos (main list section)
-
-    /// Open todos in the main list, below the PR inbox — the tab is the full
-    /// view (with broken-file diagnostics); this is the glance.
-    @ViewBuilder
-    private var todosSection: some View {
-        let todos = filteredTodos
-        if !todos.isEmpty {
-            Kicker(text: "Todos", count: todos.count,
-                   action: { enterMode(.todos) },
-                   actionHelp: "Open all todos")
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-                .padding(.bottom, 2)
-            ForEach(todos) { todo in
-                TodoRow(todo: todo, selected: isSelected("todo:\(todo.id)"))
-                    .opacity(resolvedStore.isResolved("todo:\(todo.id)") ? 0.35 : 1)
-                    .id("todo:\(todo.id)")
-            }
-        }
-    }
-
-    // MARK: - Search results (all PRs, incl. merged & closed)
-
-    private var searchActive: Bool {
-        query.trimmingCharacters(in: .whitespaces).count >= 2
-    }
-
-    /// The archive: everything GitHub knows about, fetched only while you are
-    /// searching. Empty palette → this section does not exist.
-    @ViewBuilder
-    private var searchSection: some View {
-        let matches = store.searchMatches
-        if searchActive, store.isSearching || !matches.isEmpty || store.searchError != nil {
-            HStack(spacing: 6) {
-                Kicker(text: store.searchIsPartial ? "Saved PRs · partial coverage" : "PR search", count: matches.count,
-                       action: { OverviewURL.open(OverviewURL.githubPulls) },
-                       actionRole: .link,
-                       actionHelp: "Open the GitHub pull-request overview")
-                if store.isSearching {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.7)
-                        .frame(height: 10)
-                }
-                Spacer()
-                if let fetchedAt = store.searchFetchedAt {
-                    Text(fetchedAt, style: .relative)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .help("Cached PR metadata; last fetched \(fetchedAt.formatted())")
-                }
-                if let error = store.searchError {
-                    Text(error)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.red)
-                        .lineLimit(1)
-                        .help(error)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, 7)
-            .padding(.bottom, 2)
-
-            ForEach(matches) { pr in
-                ArchivedPRRow(pr: pr, selected: isSelected("archive:\(pr.id)"))
-                    .id("archive:\(pr.id)")
-            }
-        }
-    }
-
-    // MARK: - Sentry search results (org-wide, incl. resolved & non-prod)
-
-    /// Sentry's answer to the typed query — short ids ("EXAMPLEAPP-API-86") resolve
-    /// exactly, anything else is full text. Same contract as the PR archive:
-    /// exists only while searching, hides what the prod strip already shows.
-    @ViewBuilder
-    private var sentrySection: some View {
-        let matches = store.sentryMatches
-        if searchActive, store.isSearchingSentry || !matches.isEmpty {
-            HStack(spacing: 6) {
-                Kicker(text: "Sentry", count: matches.count,
-                       action: { OverviewURL.open(OverviewURL.sentryIssues) },
-                       actionRole: .link,
-                       actionHelp: "Open the Sentry issue overview")
-                if store.isSearchingSentry {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.7)
-                        .frame(height: 10)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.top, 7)
-            .padding(.bottom, 2)
-
-            ForEach(matches) { prodIssue in
-                ProdIssueRow(prodIssue: prodIssue,
-                             selected: isSelected("sentry:\(prodIssue.id)"))
-                    .id("sentry:\(prodIssue.id)")
-            }
-        }
-    }
-
-    // MARK: - Notes (search hits only)
-
-    /// Notes matching the query, at the TAIL of the results — a note you wrote
-    /// five minutes ago must never outrank the PR you were hunting for. ↵
-    /// expands the hit in place; the 680px column is where a long note reads.
-    @ViewBuilder
-    private var notesSection: some View {
-        let matches = filteredNotes
-        if !matches.isEmpty {
-            Kicker(text: "Notes", count: matches.count,
-                   action: { enterMode(.notes) },
-                   actionHelp: "Open all notes")
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-                .padding(.bottom, 2)
-            ForEach(matches) { note in
-                NoteRow(
-                    note: note,
-                    style: .wide,
-                    selected: isSelected("note:\(note.id)"),
-                    expanded: expandedNoteID == note.id,
-                    onToggle: { toggleNote(note) },
-                    onRemove: { notes.remove(id: note.id) },
-                    onCopy: { copyNote(note) }
-                )
-                .id("note:\(note.id)")
-            }
-        }
-    }
-
-    private func copyNote(_ note: SavedNote) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(note.text, forType: .string)
-        commandNotice = .ok("copied the note")
-    }
-
-    // MARK: - Home
-
-    /// Home's bento (D2): fixed slots, a tile hidden when its backend is off
-    /// the mesh — Production excepted while Hlídač is configured, it reads
-    /// blind rather than vanishing.
-    private var home: some View {
-        HomeView(
-            showProd: showProdBoard || !store.prodConfigIssues.isEmpty
-                || (!prodSentryLive && !railProdIssues.isEmpty),
-            showCI: CITile.isShown(store: store),
-            showDevbox: DevboxTile.isShown(store: store),
-            prod: {
-                ProdTile(glance: showProdBoard ? store.prodGlance : ProdGlance(cards: [], waiting: nil),
-                         configIssues: store.prodConfigIssues,
-                         sentryIssues: prodSentryLive ? [] : railProdIssues,
-                         isResolved: { resolvedStore.isResolved("prod:\($0.id)") },
-                         now: Date(), onOpen: { enterMode(.health, filter: $0) })
-            },
-            prs: {
-                if store.pinned.isEmpty {
-                    emptyState.tileSurface()
-                } else {
-                    PRDigestTile(digest: homeDigest, expanded: $homeExpanded, selectedID: selectedID,
-                                 isResolved: { resolvedStore.isResolved($0) })
-                }
-            },
-            ci: { CITile(store: store, onOpen: { enterMode(.ci, filter: $0) }) },
-            devbox: { DevboxTile(store: store, onOpen: { enterMode(.devbox, filter: $0) }) }
-        )
-    }
-
-    // MARK: - Empty state
-
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "pin.slash")
-                .font(.title2)
-                .foregroundStyle(.tertiary)
-            Text("No repositories pinned")
-                .foregroundStyle(.secondary)
-            Button("Open Settings…") {
-                AppDelegate.shared?.openSettings()
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 28)
-    }
-}
-
-/// One sticky-strip link row: same dense idiom as the rail's rows, plus the
-/// keyboard-selection chrome the strip's siblings (prod, PRs, todos) carry.
-private struct LinkStripRow: View {
-    let link: SavedLink
-    var selected = false
-    let onOpen: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "link")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .frame(width: 14)
-            Text(link.title)
-                .font(.system(size: 12))
-                .lineLimit(1)
-            Text(link.url)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-        }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(selected ? Theme.accent.opacity(0.16)
-            : hovering ? Color.primary.opacity(0.06) : .clear,
-            in: RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(selected ? Theme.accent.opacity(0.35) : .clear, lineWidth: 1)
-        )
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: onOpen)
-        .help("\(link.url) — /rm-link \(link.title) to remove")
-    }
-}
-
-private struct KeyChip: View {
-    let label: String
-    init(_ label: String) {
-        self.label = label
-    }
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(Theme.hairline, lineWidth: 1)
-            )
-    }
-}
-
-// MARK: - Eve reply overlay
-
-/// Floats over the dashboard (dim scrim behind), grows with the reply, and
-/// expands to near-full panel height on demand — the inbox never squeezes.
-private struct EveOverlay: View {
-    let prompt: String
-    let reply: String
-    let done: Bool
-    let error: String?
-    @Binding var expanded: Bool
-    let onDismiss: () -> Void
-
-    var body: some View {
-        ZStack(alignment: .top) {
-            // Scrim: click to collapse/dismiss, dims the dashboard below.
-            Color.black.opacity(0.35)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onDismiss)
-
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 6) {
-                    Text("✦").foregroundStyle(Theme.eve)
-                    Text("eve")
-                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .kerning(1.3)
-                        .foregroundStyle(.secondary)
-                    Text("· \(prompt)")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                    Spacer()
-                    if !done {
-                        ProgressView().controlSize(.mini)
-                    }
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
-                    } label: {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.up")
-                            .font(.system(size: 9, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.tertiary)
-                    .help(expanded ? "Collapse" : "Expand")
-                    Button(action: onDismiss) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.tertiary)
-                    .help("Dismiss (Esc)")
-                }
-
-                if let error {
-                    Text(error)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.red)
-                } else if reply.isEmpty {
-                    Text(done ? "no answer" : "thinking…")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ScrollView {
-                        Text(LocalizedStringKey(reply))
-                            .font(.system(size: 12))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: expanded ? 520 : 240)
-                }
-            }
-            .padding(12)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .background(Theme.eveSoft, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Theme.eve.opacity(0.3), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.4), radius: 18, y: 6)
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
-        }
-    }
-}
-
-// MARK: - Project page (the on-call view)
-
-/// One product at a glance: its prod issues, PRs, service tiles, quick links.
-struct ProjectPageView: View {
-    let project: ProjectSpec
-    let store: StatusStore
-    let onBack: () -> Void
-
-    private var projectPRs: [StatusStore.InboxPR] {
-        let repos = Set(project.repos.map { $0.lowercased() })
-        return store.inbox.filter { repos.contains($0.repoSlug.lowercased()) }
-    }
-
-    private var projectIssues: [ProdIssue] {
-        store.prodIssues.filter { project.sentryProjects.contains($0.project) }
-    }
-
-    private var projectServices: [ServiceStatus] {
-        store.serviceStatuses.filter { project.services.contains($0.name) }
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
-                    Button(action: onBack) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Back (Esc)")
-                    Text(project.title)
-                        .font(.system(size: 14, weight: .semibold))
-                    Spacer()
-                    ForEach(project.links) { link in
-                        Button {
-                            if let url = URL(string: link.url) {
-                                NSWorkspace.shared.open(url)
-                            }
-                        } label: {
-                            Text(link.title)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        }
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-
-                if !projectServices.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(projectServices) { service in
-                            ServiceTile(service: service)
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 4)
-                }
-
-                if !projectIssues.isEmpty {
-                    Kicker(
-                        text: "▲ Prod",
-                        count: projectIssues.count,
-                        tone: .red,
-                        action: { OverviewURL.open(OverviewURL.sentryIssues) },
-                        actionRole: .link,
-                        actionHelp: "Open the Sentry issue overview"
-                    )
-                        .padding(.horizontal, 8)
-                        .padding(.top, 6)
-                        .padding(.bottom, 2)
-                    ForEach(projectIssues.prefix(6)) { prodIssue in
-                        ProdIssueRow(prodIssue: prodIssue)
-                    }
-                }
-
-                if projectPRs.isEmpty {
-                    Text("no open PRs")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 14)
-                } else {
-                    Kicker(
-                        text: "Pull Requests",
-                        count: projectPRs.count,
-                        action: { OverviewURL.open(OverviewURL.projectPulls(project.repos)) },
-                        actionRole: .link,
-                        actionHelp: "Open the GitHub pull-request overview"
-                    )
-                        .padding(.horizontal, 8)
-                        .padding(.top, 6)
-                        .padding(.bottom, 2)
-                    ForEach(projectPRs) { entry in
-                        InboxPRRow(entry: entry)
-                    }
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+    /// One Esc (`KeyboardCoordinator.escape`): it never closes the panel
+    /// while a layer remains.
+    func peel(_ step: EscStep) {
+        switch step {
+        case .cancelNoteEdit:
+            editingNoteID = nil
+        case .foldNote:
+            withAnimation(.easeOut(duration: 0.16)) { expandedNoteID = nil }
+        case .dismissEve:
+            dismissEve()
+        case .clearText:
+            // A mode, completion or path card exits; a filter empties.
+            query = ""
+        case .closeDetail:
+            router.closeDetail()
+        case .clearSelection:
+            selectedID = nil
+            moveCaretToEnd()
+        case .closePage:
+            if showTodos { showTodos = false } else { activeProject = nil }
+        case .leaveModule:
+            leaveModule()
+        case .close:
+            AppDelegate.shared?.closePanel()
         }
     }
 }

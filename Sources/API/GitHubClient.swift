@@ -40,6 +40,14 @@ actor GitHubClient {
     private(set) var sharedRequests = 0
     private(set) var prLookupRequests = 0
     private(set) var prSearchRequests = 0
+    /// PR detail reads (WP5): the GraphQL conversation and the files compare.
+    private(set) var prDetailRequests = 0
+    private(set) var prFilesRequests = 0
+    /// CI run detail reads (WP6): the run + jobs, and the job log.
+    private(set) var ciDetailRequests = 0
+    private(set) var ciLogRequests = 0
+    /// Release line reads (WP7): deployments, then the branch comparison.
+    private(set) var releaseRequests = 0
 
     init(session: URLSession = PollingSession.make(),
          queue: GitHubRequestQueue = GitHubRequestQueue(),
@@ -222,6 +230,22 @@ actor GitHubClient {
         guard let http = response as? HTTPURLResponse else {
             throw GitHubError.http(-1, path)
         }
+        try observeQuota(http, data: data, resource: resource)
+        if http.statusCode == 304, let cached {
+            return cached.data
+        }
+        if http.statusCode == 401 { invalidateToken() }
+        guard (200..<300).contains(http.statusCode) else {
+            throw GitHubError.http(http.statusCode, path)
+        }
+        if method == "GET", cache, let etag = http.value(forHTTPHeaderField: "ETag") {
+            etagCache.insert(.init(etag: etag, data: data), for: cacheKey)
+        }
+        return data
+    }
+
+    /// Records the response's quota headers; a rate limit throws the deferral.
+    private func observeQuota(_ http: HTTPURLResponse, data: Data, resource: String) throws {
         let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining").flatMap(Int.init)
         let reset = http.value(forHTTPHeaderField: "X-RateLimit-Reset")
             .flatMap(TimeInterval.init).map { Date(timeIntervalSince1970: $0) }
@@ -235,17 +259,6 @@ actor GitHubClient {
         if http.statusCode == 429 || limited {
             throw GitHubError.deferred(budget.blockedUntil(resource: resource, now: Date()) ?? Date().addingTimeInterval(60))
         }
-        if http.statusCode == 304, let cached {
-            return cached.data
-        }
-        if http.statusCode == 401 { invalidateToken() }
-        guard (200..<300).contains(http.statusCode) else {
-            throw GitHubError.http(http.statusCode, path)
-        }
-        if method == "GET", cache, let etag = http.value(forHTTPHeaderField: "ETag") {
-            etagCache.insert(.init(etag: etag, data: data), for: cacheKey)
-        }
-        return data
     }
 
     private func fetch<T: Decodable>(_ type: T.Type, _ path: String, cache: Bool = true,
@@ -310,6 +323,176 @@ actor GitHubClient {
         }
         if let failure, result.values.allSatisfy({ $0.error != nil }) { throw failure }
         return result
+    }
+
+    // MARK: - PR detail (copilot shell WP5)
+
+    /// The token whose digest is `identity` — the one the caller keys its
+    /// cache with. An account switch since then throws rather than file
+    /// another account's answer under that key.
+    private func token(for identity: String) throws -> String {
+        let authorization = try tokenValue()
+        guard Self.identity(for: authorization) == identity else { throw CancellationError() }
+        return authorization
+    }
+
+    /// One PR's description, reviews, threads and checks: a foreground read
+    /// on explicit selection. Quota exhaustion inside the 200 defers like
+    /// the estate's.
+    func prConversation(repo: String, number: Int, identity: String) async throws -> GitHubPRDetail.Conversation {
+        let authorization = try token(for: identity)
+        prDetailRequests += 1
+        let data = try await performRequest("/graphql", method: "POST",
+                                            body: GitHubPRDetail.body(repo: repo, number: number),
+                                            cache: false, priority: .interactive, polling: false,
+                                            authorization: authorization)
+        do {
+            return try GitHubPRDetail.decodeConversation(data, decoder: decoder)
+        } catch GitHubPRDetail.Failure.rateLimited {
+            if budget.blockedUntil(resource: "graphql", now: Date()) == nil {
+                budget.observe(status: 429, resource: "graphql", remaining: nil, reset: nil,
+                               retryAfter: nil, rateLimited: true, now: Date())
+            }
+            throw GitHubError.deferred(budget.blockedUntil(resource: "graphql", now: Date())
+                ?? Date().addingTimeInterval(60))
+        }
+    }
+
+    /// The changed files and patches at exactly `base...head`. Kept out of
+    /// the ETag cache: the query repository persists it under the SHAs.
+    func prFiles(repo: String, base: String, head: String, changedFiles: Int,
+                 identity: String) async throws -> GitHubPRDetail.Files {
+        let authorization = try token(for: identity)
+        prFilesRequests += 1
+        let data = try await performRequest(GitHubPRDetail.comparePath(repo: repo, base: base, head: head),
+                                            method: "GET", cache: false, priority: .interactive, polling: false,
+                                            authorization: authorization)
+        return try GitHubPRDetail.decodeFiles(data, expected: changedFiles, decoder: decoder)
+    }
+
+    // MARK: - Release line (copilot shell WP7)
+
+    /// A deployment's release line: its environment's deployments, then the
+    /// branch against the live commit. Foreground reads on explicit selection.
+    func releaseLine(_ source: GitHubRelease.Source, identity: String) async throws -> GitHubRelease.Line {
+        let authorization = try token(for: identity)
+        do {
+            releaseRequests += 1
+            let deployments = try GitHubRelease.decodeDeployments(
+                try await performRequest("/graphql", method: "POST", body: GitHubRelease.deploymentsBody(source),
+                                         cache: false, priority: .interactive, polling: false,
+                                         authorization: authorization),
+                source: source, decoder: decoder)
+            releaseRequests += 1
+            return try GitHubRelease.decodeLine(
+                try await performRequest("/graphql", method: "POST",
+                                         body: GitHubRelease.branchBody(source, branch: deployments.branch,
+                                                                        live: deployments.live?.sha),
+                                         cache: false, priority: .interactive, polling: false,
+                                         authorization: authorization),
+                source: source, deployments: deployments, decoder: decoder)
+        } catch GitHubRelease.Failure.rateLimited {
+            if budget.blockedUntil(resource: "graphql", now: Date()) == nil {
+                budget.observe(status: 429, resource: "graphql", remaining: nil, reset: nil,
+                               retryAfter: nil, rateLimited: true, now: Date())
+            }
+            throw GitHubError.deferred(budget.blockedUntil(resource: "graphql", now: Date())
+                ?? Date().addingTimeInterval(60))
+        }
+    }
+
+    // MARK: - CI run detail (copilot shell WP6)
+
+    /// A run and the jobs of exactly the attempt that read returned — a
+    /// newer attempt starting between the two reads cannot mix in.
+    /// Foreground reads on explicit selection.
+    func ciRunDetail(repo: String, runID: Int, identity: String) async throws -> GitHubCIRun.Detail {
+        let authorization = try token(for: identity)
+        ciDetailRequests += 1
+        let run = try GitHubCIRun.decodeRun(
+            try await performRequest("/repos/\(repo)/actions/runs/\(runID)", method: "GET", cache: false,
+                                     priority: .interactive, polling: false, authorization: authorization),
+            decoder: decoder)
+        let page = try GitHubCIRun.decodeJobs(
+            try await performRequest(
+                "/repos/\(repo)/actions/runs/\(runID)/attempts/\(run.runAttempt)/jobs?per_page=\(GitHubCIRun.jobLimit)",
+                method: "GET", cache: false, priority: .interactive, polling: false, authorization: authorization),
+            decoder: decoder)
+        return GitHubCIRun.Detail(run: run, jobs: page.jobs, jobsTruncated: page.total > page.jobs.count)
+    }
+
+    /// The failing job's log, kept as its tail only. GitHub answers with a
+    /// redirect to a signed storage URL: the redirect is read, never
+    /// followed, so the GitHub token never reaches the storage host.
+    func ciJobLogTail(repo: String, jobID: Int, identity: String) async throws -> GitHubCIRun.LogTail {
+        let authorization = try token(for: identity)
+        let path = "/repos/\(repo)/actions/jobs/\(jobID)/logs"
+        let slot = UUID()
+        try await queue.acquire(id: slot, resource: "core", priority: .interactive)
+        let location: URL
+        do {
+            if let until = budget.admit(resource: "core", polling: false, mutation: false, now: Date()) {
+                throw GitHubError.deferred(until)
+            }
+            var req = URLRequest(url: URL(string: "https://api.github.com" + path)!)
+            req.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+            req.cachePolicy = .reloadIgnoringLocalCacheData
+            networkRequests += 1
+            ciLogRequests += 1
+            let (data, response) = try await session.data(for: req, delegate: RedirectRefusal.shared)
+            guard let http = response as? HTTPURLResponse else { throw GitHubError.http(-1, path) }
+            try observeQuota(http, data: data, resource: "core")
+            if http.statusCode == 401 { invalidateToken() }
+            guard http.statusCode == 302, let target = http.value(forHTTPHeaderField: "Location").flatMap(URL.init(string:))
+            else { throw GitHubError.http(http.statusCode, path) }
+            location = target
+            await queue.release(id: slot)
+        } catch {
+            await queue.release(id: slot)
+            throw error
+        }
+        var storage = URLRequest(url: location)
+        storage.cachePolicy = .reloadIgnoringLocalCacheData
+        // Streamed into a bounded window of recent lines: a job log can run
+        // to hundreds of megabytes, and only its tail is kept.
+        let (bytes, response) = try await session.bytes(for: storage)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw GitHubError.http((response as? HTTPURLResponse)?.statusCode ?? -1, "job \(jobID) log")
+        }
+        var window = GitHubCIRun.LogWindow()
+        var line: [UInt8] = []
+        for try await byte in bytes {
+            if byte == UInt8(ascii: "\n") {
+                window.append(String(decoding: line, as: UTF8.self))
+                line.removeAll(keepingCapacity: true)
+            } else if line.count < GitHubCIRun.lineByteLimit {
+                line.append(byte)
+            }
+        }
+        if !line.isEmpty { window.append(String(decoding: line, as: UTF8.self)) }
+        return window.tail()
+    }
+
+    /// ⌘R: reads the run fresh and re-runs its failed jobs only while it is
+    /// still the failed attempt the operator is looking at. Strictly failed
+    /// jobs, with the credential that read the run: a rejected request is an
+    /// error, never a wider re-run.
+    func rerunFailedIfStill(repo: String, shown: GitHubCIRun.Run, identity: String) async throws
+        -> GitHubCIRun.Revalidation {
+        let authorization = try token(for: identity)
+        let fresh = try GitHubCIRun.decodeRun(
+            try await performRequest("/repos/\(repo)/actions/runs/\(shown.id)", method: "GET", cache: false,
+                                     priority: .interactive, polling: false, authorization: authorization),
+            decoder: decoder)
+        let verdict = GitHubCIRun.Revalidation.judge(shown: shown, fresh: fresh)
+        if verdict == .rerun {
+            _ = try await performRequest("/repos/\(repo)/actions/runs/\(shown.id)/rerun-failed-jobs", method: "POST",
+                                         cache: false, priority: .interactive, polling: false,
+                                         authorization: authorization)
+        }
+        return verdict
     }
 
     func discoverRepos() async throws -> [String] {
@@ -548,5 +731,16 @@ actor GitHubClient {
 
     func cancel(repo: String, runId: Int) async throws {
         _ = try await request("/repos/\(repo)/actions/runs/\(runId)/cancel", method: "POST")
+    }
+}
+
+/// Hands a redirect back to the caller instead of following it, so an
+/// authenticated request's headers never travel to the redirect's host.
+private final class RedirectRefusal: NSObject, URLSessionTaskDelegate, Sendable {
+    static let shared = RedirectRefusal()
+
+    func urlSession(_: URLSession, task _: URLSessionTask, willPerformHTTPRedirection _: HTTPURLResponse,
+                    newRequest _: URLRequest) async -> URLRequest? {
+        nil
     }
 }

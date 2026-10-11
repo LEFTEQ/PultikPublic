@@ -19,6 +19,9 @@ enum GitHubEstate {
     }
 
     static let recentLimit = 20
+    /// Open PRs per repo, most recently updated first: a repo that fills it
+    /// may hold more, so nothing may read its list as complete.
+    static let openLimit = 5
     static let chunkSize = 12
 
     /// Owners and names travel as variables, never spliced into the query text.
@@ -38,7 +41,7 @@ enum GitHubEstate {
               \(selections.joined(separator: "\n  "))
             }
             fragment estate on Repository {
-              open: pullRequests(states: OPEN, first: 5, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              open: pullRequests(states: OPEN, first: \(openLimit), orderBy: {field: UPDATED_AT, direction: DESC}) {
                 nodes {
                   databaseId number title url isDraft updatedAt headRefName headRefOid
                   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }

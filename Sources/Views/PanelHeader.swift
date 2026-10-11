@@ -21,6 +21,8 @@ struct PanelFooter: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            refreshState
+            EveSummary(sessions: store.eveSessions, online: eveOnline)
             if store.isSectionVisible("alerts"), let latest = store.visibleAlerts.first {
                 AlertPulse(latest: latest, unread: store.unreadAlertCount)
             }
@@ -43,44 +45,51 @@ struct PanelFooter: View {
             if let chip = macHealth.status.chip {
                 MacHealthFooterChip(chip: chip, onOpen: onMacHealth)
             }
-            EveSummary(sessions: store.eveSessions, online: eveOnline)
-            refreshState
+            Text("Pultík \(Self.version)")
+                .font(Theme.Typo.meta)
+                .foregroundStyle(Theme.ink3)
             actions
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 18)
+        .padding(.top, 6)
+        .padding(.bottom, 9)
         .lineLimit(1)
     }
 
+    private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+
+    /// Sync state leads the footer (DESIGN.md §8 StatusFooter): `Synced 15:12`.
     @ViewBuilder
     private var refreshState: some View {
-        if store.isRefreshing {
-            if panelIsPresented {
-                ProgressView().controlSize(.small).scaleEffect(0.8)
+        HStack(spacing: 5) {
+            if store.isRefreshing, panelIsPresented {
+                ProgressView().controlSize(.mini)
+                Text("Syncing")
             } else {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 9.5))
+                if let last = store.lastRefresh {
+                    Text("Synced \(PultikFormat.clock(last))").monospacedDigit()
+                } else {
+                    Text("Not synced yet")
+                }
             }
-        } else if let last = store.lastRefresh {
-            Text(last.shortAge == "now" ? "just now" : last.shortAge)
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(.tertiary)
         }
+        .font(Theme.Typo.meta)
+        .foregroundStyle(Theme.ink2)
         // Icon only — error PROSE never renders in the strip (lean and fixed-
         // shape); the text lives in the hover popover.
         if let error = store.globalError {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 9))
-                .foregroundStyle(.red)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Theme.danger)
                 .help(error)
         }
         // A paused breaker is why a rail is missing. Without this the sections
         // just vanish and the app looks broken instead of deliberately quiet.
         if ProbeGate.shared.isPaused {
             Image(systemName: "pause.circle")
-                .font(.system(size: 9))
-                .foregroundStyle(.orange)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Theme.warn)
                 .help("Probes paused — refresh to retry now\n\n" + ProbeGate.shared.summary)
         }
     }

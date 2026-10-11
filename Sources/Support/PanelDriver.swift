@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import Foundation
+import ScreenCaptureKit
 
 /// Debug-only remote control for verifying the panel without touching the
 /// user's mouse, keyboard or focus.
@@ -10,10 +11,11 @@ import Foundation
 /// paste would produce, and can write the panel's own window to a PNG. It
 /// compiles into Debug builds only, so the shipped app has no such listener.
 ///
-/// Commands (userInfo `cmd`): `open`, `close`, `query` (`text`), `paste`
+/// Commands (userInfo `cmd`): `open`, `close`, `size` (`text` = WxH, empty
+/// resets), `query` (`text`), `paste`
 /// (the clipboard through the field editor), `key`
-/// (`key` = enter|tab|up|down|left|right|esc, `mods` = comma list of
-/// cmd|opt|shift|ctrl), `capture` (`path` → PNG), `state` (`path` → JSON of
+/// (`key` = enter|tab|up|down|left|right|esc|backspace|1–9|i|v, `mods` = comma
+/// list of cmd|opt|shift|ctrl), `capture` (`path` → PNG), `state` (`path` → JSON of
 /// the palette state the view reports), `firing` (`text` = comma list of
 /// made-up alert names, `warning:Name` for a warning, empty clears).
 @MainActor
@@ -44,6 +46,12 @@ enum PanelDriver {
             app.debugShowPanel()
         case "close":
             app.closePanel()
+        case "size":
+            // `WxH` pins the frame (an empty text returns to the screen's
+            // own); the summon re-applies it and re-centres the panel.
+            let parts = (info["text"] ?? "").split(separator: "x").compactMap { Double($0) }
+            PanelMetrics.shared.debugSize = parts.count == 2 ? NSSize(width: parts[0], height: parts[1]) : nil
+            app.debugShowPanel()
         case "capture":
             guard let path = info["path"] else { return }
             app.debugCapturePanel(to: path)
@@ -56,6 +64,10 @@ enum PanelDriver {
             ProbeGate.shared.failed(.github, .unreachable("Debug verification pause"))
         case "github-resume":
             ProbeGate.shared.succeeded(.github)
+        case "home-style":
+            // The Settings pane's own setter, so AC6 checks what Settings does.
+            guard let style = info["text"].flatMap(HomeStyle.init(rawValue:)) else { return }
+            StatusStore.shared.setHomeStyle(style)
         case "query", "key", "paste", "state", "clear-preview", "clear-action", "mac-stop", "home-toggle":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:
@@ -75,6 +87,19 @@ enum PanelDriver {
         case "right": (code, chars) = (124, "")
         case "esc": (code, chars) = (53, "\u{1b}")
         case "v": (code, chars) = (9, "v")
+        case "i": (code, chars) = (34, "i") // ⌘I: the detail's inspector
+        case "r": (code, chars) = (15, "r") // ⌘R: CI's Re-run failed
+        case "backspace": (code, chars) = (51, "\u{7f}")
+        // ANSI key codes of the top-row digits — ⌘1–9 switch modules.
+        case "1": (code, chars) = (18, "1")
+        case "2": (code, chars) = (19, "2")
+        case "3": (code, chars) = (20, "3")
+        case "4": (code, chars) = (21, "4")
+        case "5": (code, chars) = (23, "5")
+        case "6": (code, chars) = (22, "6")
+        case "7": (code, chars) = (26, "7")
+        case "8": (code, chars) = (28, "8")
+        case "9": (code, chars) = (25, "9")
         default: return nil
         }
         var flags: NSEvent.ModifierFlags = []
@@ -94,26 +119,44 @@ enum PanelDriver {
         )
     }
 
-    /// Writes `window` as a PNG. Own-window capture needs no screen-recording
-    /// grant, which is the whole reason this is in-process.
-    /// `also` windows (front to back) are composited above it, over their union.
+    /// Writes `window` as a PNG. The current process's own shareable content
+    /// needs no screen-recording grant, which is the whole reason this is
+    /// in-process (`CGWindowListCreateImage` is gone from the macOS 26 SDK).
+    /// `also` windows are composited with it, over their union.
     static func capture(window: NSWindow, also: [NSWindow] = [], to path: String) {
         let id = CGWindowID(window.windowNumber)
-        // CGWindowIDs travel as raw pointer-sized values: no retain callbacks.
-        var raw = (also + [window]).map { UnsafeRawPointer(bitPattern: UInt($0.windowNumber)) }
-        let ids = CFArrayCreate(kCFAllocatorDefault, &raw, raw.count, nil)
-        let options: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
-        let composite = ids.flatMap { CGImage(windowListFromArrayScreenBounds: .null, windowArray: $0, imageOption: options) }
-        guard let image = also.isEmpty ? CGWindowListCreateImage(.null, .optionIncludingWindow, id, options) : composite else {
-            NSLog("pultik: debug capture failed for window %d", id)
-            return
-        }
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return }
-        do {
-            try png.write(to: URL(filePath: path))
-        } catch {
-            NSLog("pultik: debug capture could not write %@: %@", path, error.localizedDescription)
+        let ids = Set(([window] + also).map { CGWindowID($0.windowNumber) })
+        Task { @MainActor in
+            do {
+                let content = try await SCShareableContent.currentProcess
+                let windows = content.windows.filter { ids.contains($0.windowID) }
+                guard let main = windows.first(where: { $0.windowID == id }) else {
+                    NSLog("pultik: debug capture found no shareable window %d", id)
+                    return
+                }
+                let config = SCStreamConfiguration()
+                config.showsCursor = false
+                config.ignoreShadowsSingleWindow = true
+                let filter: SCContentFilter
+                if windows.count == 1 {
+                    filter = SCContentFilter(desktopIndependentWindow: main)
+                } else {
+                    let union = windows.map(\.frame).reduce(main.frame) { $0.union($1) }
+                    guard let display = content.displays.first(where: { $0.frame.intersects(main.frame) })
+                        ?? content.displays.first else { return }
+                    filter = SCContentFilter(display: display, including: windows)
+                    config.sourceRect = union.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+                }
+                let rect = windows.count == 1 ? filter.contentRect : config.sourceRect
+                let scale = CGFloat(filter.pointPixelScale)
+                config.width = Int(rect.width * scale)
+                config.height = Int(rect.height * scale)
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+                try png.write(to: URL(filePath: path))
+            } catch {
+                NSLog("pultik: debug capture of window %d failed: %@", id, error.localizedDescription)
+            }
         }
     }
 

@@ -32,7 +32,7 @@ struct FiringWatch {
     private var held: Set<String> = []
 
     static func criticals(_ alerts: [FiringAlert]) -> [FiringAlert] {
-        alerts.filter { $0.state == "firing" && $0.severity == "critical" && $0.name != "Watchdog" }
+        alerts.filter { $0.state == "firing" && $0.severity == "critical" && !$0.isHeartbeat }
     }
 
     /// One firing episode of an instance — what the panel marks seen, so a

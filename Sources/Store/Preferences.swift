@@ -1,5 +1,13 @@
 import Foundation
 
+/// Home's two drawings of the one Now queue (copilot shell D6).
+enum HomeStyle: String, Codable, CaseIterable, Sendable {
+    /// Every need a bar running into now, in four lanes, beside the ranked list.
+    case nowLine
+    /// The ranked Now table first, module tiles below it.
+    case nowFirst
+}
+
 /// Pultík's durable settings.
 ///
 /// Stored as JSON in Application Support rather than `UserDefaults`: the
@@ -63,6 +71,10 @@ struct Preferences: Codable {
     /// notification (warnings never do). Off mutes only the notification —
     /// the rail and the icon's badge still show it.
     var notifyFiring: Bool = true
+
+    /// What ⌥Space opens on while nothing is typed (copilot shell D6):
+    /// Settings ▸ Panel. Nil = the Now Line.
+    var homeStyle: HomeStyle?
 
     /// Every lane eve routes to a Telegram forum topic today — the Settings
     /// toggle list. An unknown lane in the feed still shows once toggled in
@@ -439,6 +451,8 @@ struct Preferences: Codable {
         visibleAlertLanes = try container.decodeIfPresent([String].self, forKey: .visibleAlertLanes)
             ?? Preferences.defaultAlertLanes
         notifyFiring = try container.decodeIfPresent(Bool.self, forKey: .notifyFiring) ?? true
+        // An unknown style is a newer build's: read it as the default.
+        homeStyle = try container.decodeIfPresent(String.self, forKey: .homeStyle).flatMap(HomeStyle.init(rawValue:))
         activeFanCurve = try container.decodeIfPresent(String.self, forKey: .activeFanCurve)
         fanCurves = try container.decodeIfPresent([String: [CurvePoint]].self, forKey: .fanCurves)
             ?? [:]

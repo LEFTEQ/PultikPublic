@@ -18,7 +18,8 @@ extension EnvironmentValues {
 private struct RowChrome: ViewModifier {
     let url: String?
     /// Keyboard selection — the row ↵ would open. Outranks hover so arrowing
-    /// through the list stays legible while the mouse sits somewhere else.
+    /// through the list stays legible while the mouse sits somewhere else;
+    /// drawn as the Kit's neutral lift, never a red fill.
     var selected = false
     @State private var hovering = false
 
@@ -26,11 +27,7 @@ private struct RowChrome: ViewModifier {
         content
             .padding(.vertical, 4)
             .padding(.horizontal, 8)
-            .background(background, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(selected ? Theme.accent.opacity(0.35) : .clear, lineWidth: 1)
-            )
+            .background { RowBackground(selected: selected, hovering: hovering) }
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture {
@@ -38,11 +35,6 @@ private struct RowChrome: ViewModifier {
                     NSWorkspace.shared.open(parsed)
                 }
             }
-    }
-
-    private var background: Color {
-        if selected { return Theme.accent.opacity(0.16) }
-        return hovering ? Color.primary.opacity(0.06) : .clear
     }
 }
 
@@ -113,15 +105,15 @@ struct InboxPRRow: View {
     private var stateGlyph: some View {
         switch (info.state, info.review) {
         case (.failure, _):
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.red).font(.system(size: 11))
+            Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.danger).font(.system(size: 11))
         case (_, .changesRequested):
-            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).font(.system(size: 11))
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.warn).font(.system(size: 11))
         case (.running, _):
-            Image(systemName: "circle.dotted.circle").foregroundStyle(.blue)
+            Image(systemName: "circle.dotted.circle").foregroundStyle(Theme.ok)
                 .font(.system(size: 11))
                 .symbolEffect(.pulse, isActive: panelIsPresented)
         case (.success, .approved):
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 11))
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.ok).font(.system(size: 11))
         default:
             Image(systemName: "circle").foregroundStyle(.tertiary).font(.system(size: 10))
         }
@@ -135,7 +127,7 @@ struct InboxPRRow: View {
         } else if info.review == .changesRequested {
             StateChip(label: "changes req.", tone: .orange)
         } else if info.state == .running {
-            StateChip(label: "checks …", tone: .blue)
+            StateChip(label: "checks …", tone: Theme.ok)
         } else if info.review == .approved {
             StateChip(label: info.state == .success ? "ready" : "approved", tone: .green)
         } else if !info.isDraft {
@@ -178,7 +170,7 @@ struct EveSessionChip: View {
 
 // MARK: - Search result row
 
-private extension PROutcome {
+extension PROutcome {
     var symbol: String {
         switch self {
         case .merged: "arrow.triangle.merge"

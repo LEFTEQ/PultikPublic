@@ -9,13 +9,13 @@ struct VitrinkaDailyPoll {
     }
 }
 
-struct VitrinkaWorkspace: Decodable, Identifiable, Hashable {
+struct VitrinkaWorkspace: Codable, Identifiable, Hashable {
     let slug: String
     let name: String
     var id: String { slug }
 }
 
-struct VitrinkaWorkTask: Decodable, Identifiable {
+struct VitrinkaWorkTask: Codable, Identifiable {
     let id: Int64
     let project: String
     let title: String
@@ -24,8 +24,8 @@ struct VitrinkaWorkTask: Decodable, Identifiable {
     var isOpen: Bool { !["done", "cancelled", "canceled", "completed"].contains(status) }
 }
 
-struct VitrinkaMyWork: Decodable {
-    struct Gate: Decodable { let task: VitrinkaWorkTask; let why: [String]? }
+struct VitrinkaMyWork: Codable {
+    struct Gate: Codable { let task: VitrinkaWorkTask; let why: [String]? }
     var assigned: [VitrinkaWorkTask]?
     var created: [VitrinkaWorkTask]?
     var mentioned: [VitrinkaWorkTask]?
@@ -39,7 +39,7 @@ struct VitrinkaWorkRow: Identifiable {
     var id: Int64 { task.id }
 }
 
-struct VitrinkaWorkspaceSnapshot: Identifiable {
+struct VitrinkaWorkspaceSnapshot: Identifiable, Codable {
     let workspace: VitrinkaWorkspace
     var tray = VitrinkaTray()
     var work = VitrinkaMyWork()

@@ -59,4 +59,33 @@ actor SemaforClient {
         }
         return (throughput, nil)
     }
+
+    /// Each repo's job outcomes over Semafor's window (7 d) — `/api/v1/repos/health`.
+    /// Read on a CI run's explicit selection (WP6), never polled; nil off-mesh.
+    func repoHealth() async throws -> [SemaforRepoHealth] {
+        let (data, response) = try await session.data(from: Self.base.appending(path: "api/v1/repos/health"))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw URLError(.badServerResponse) }
+        return try SemaforRepoHealth.decode(data)
+    }
+}
+
+/// One repo's row of Semafor's `/api/v1/repos/health`: how its CI jobs ended
+/// over the window. Snake-case keys decode through explicit `CodingKeys`.
+struct SemaforRepoHealth: Codable, Sendable, Equatable {
+    let repo: String
+    let total: Int
+    let failureRate: Double
+    let cancelRate: Double
+
+    enum CodingKeys: String, CodingKey {
+        case repo, total
+        case failureRate = "failure_rate"
+        case cancelRate = "cancel_rate"
+    }
+
+    static func decode(_ data: Data) throws -> [SemaforRepoHealth] {
+        struct Answer: Decodable { let rows: [SemaforRepoHealth] }
+        return try JSONDecoder().decode(Answer.self, from: data).rows
+    }
 }

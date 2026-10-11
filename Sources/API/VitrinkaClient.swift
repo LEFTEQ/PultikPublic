@@ -4,7 +4,7 @@ import Foundation
 /// board (or repo+branch, or everything) and services its annotation queue.
 /// The lease's long-poll IS the heartbeat, so `lastSeen` going stale means
 /// the listener died — the row dims rather than lies.
-struct VitrinkaListening: Identifiable {
+struct VitrinkaListening: Identifiable, Codable {
     let id: Int64          // lease id
     let scope: String      // board slug, project name, or "*"
     let scopeKind: String  // board | project | all
@@ -26,7 +26,7 @@ struct VitrinkaListening: Identifiable {
 
 /// A board from the tray's recency window (100 most recently updated) —
 /// the "recent boards" slice and the `.b` palette mode.
-struct VitrinkaBoard: Identifiable, Hashable {
+struct VitrinkaBoard: Identifiable, Hashable, Codable {
     let slug: String
     let title: String
     let url: String
@@ -37,7 +37,7 @@ struct VitrinkaBoard: Identifiable, Hashable {
 }
 
 /// One `/api/v1/tray` answer, decorated: what the panel polls.
-struct VitrinkaTray {
+struct VitrinkaTray: Codable {
     var listeners: [VitrinkaListening] = []
     var boards: [VitrinkaBoard] = []
 }
@@ -149,6 +149,13 @@ actor VitrinkaClient {
         let found = Self.readToken(origin: origin)
         if let found { cachedToken = found } else { tokenMissedAt = .now }
         return found
+    }
+
+    /// Whose answers a snapshot holds: origin, workspace and the credential,
+    /// one-way (`QueryKey.digest`). nil without a credential — nothing to key.
+    func cacheIdentity() -> String? {
+        guard let token else { return nil }
+        return QueryKey.digest([origin, workspace ?? "", token].joined(separator: "\u{0}"))
     }
 
     nonisolated private static func readToken(origin: String) -> String? {

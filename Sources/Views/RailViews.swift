@@ -17,10 +17,17 @@ struct ServiceRail: View {
     /// Configured server order, so the groups read in the same sequence as the
     /// vitals dock's estate tier rather than alphabetically.
     let hostOrder: [String]
+    /// The Estate module's keyboard selection (`ServiceRail.objectID`).
+    var selectedID: String?
+    /// The Estate module's click: select the tile and open its detail.
+    var onOpen: ((String) -> Void)?
+
+    static func objectID(_ service: ServiceStatus) -> String { "service:\(service.id)" }
 
     /// Grouped and ordered. Services with no host land in a trailing group
-    /// rather than vanishing — an unfiled probe is still a probe.
-    private var groups: [(host: String?, services: [ServiceStatus])] {
+    /// rather than vanishing — an unfiled probe is still a probe. The order
+    /// is stable across polls: the keyboard walks it (`ordered`).
+    static func groups(_ statuses: [ServiceStatus], hostOrder: [String]) -> [(host: String?, services: [ServiceStatus])] {
         var byHost: [String?: [ServiceStatus]] = [:]
         for service in statuses {
             byHost[service.host, default: []].append(service)
@@ -31,22 +38,32 @@ struct ServiceRail: View {
         }
         // Hosts present on a service but absent from the server list — a
         // hand-edited settings.json can do this, and silently dropping the
-        // tile would look like the probe disappeared.
+        // tile would look like the probe disappeared. Sorted: a dictionary's
+        // order changes between polls, and the selection walk must not.
         let known = Set(hostOrder)
-        for (host, services) in byHost where host != nil && !known.contains(host!) {
-            ordered.append((host, services))
+        let strays = byHost.keys.compactMap { $0 }.filter { !known.contains($0) }.sorted()
+        for host in strays {
+            ordered.append((host, byHost[host] ?? []))
         }
         if let unfiled = byHost[nil], !unfiled.isEmpty { ordered.append((nil, unfiled)) }
         return ordered.map { (host: $0.0, services: $0.1) }
     }
 
+    /// The services in drawn order.
+    static func ordered(_ statuses: [ServiceStatus], hostOrder: [String]) -> [ServiceStatus] {
+        groups(statuses, hostOrder: hostOrder).flatMap(\.services)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
+            ForEach(Array(Self.groups(statuses, hostOrder: hostOrder).enumerated()), id: \.offset) { _, group in
                 VStack(alignment: .leading, spacing: 5) {
                     ServiceGroupHeader(host: group.host, services: group.services)
                     ForEach(group.services) { service in
-                        ServiceTile(service: service)
+                        let id = Self.objectID(service)
+                        ServiceTile(service: service, selected: selectedID == id,
+                                    onOpen: onOpen.map { open in { open(id) } })
+                            .id(id)
                     }
                 }
             }
@@ -90,6 +107,9 @@ private struct ServiceGroupHeader: View {
 
 struct ServiceTile: View {
     let service: ServiceStatus
+    var selected = false
+    /// Replaces the click's browser hop (a module opens its detail instead).
+    var onOpen: (() -> Void)?
     @State private var hovering = false
 
     private var down: Bool {
@@ -113,7 +133,14 @@ struct ServiceTile: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
-        .background(.white.opacity(hovering ? 0.06 : 0.035), in: RoundedRectangle(cornerRadius: 8))
+        .background {
+            // The Estate module's selection: the Kit's lift replaces the fill.
+            if selected {
+                RowBackground(selected: true)
+            } else {
+                RoundedRectangle(cornerRadius: 8).fill(.white.opacity(hovering ? 0.06 : 0.035))
+            }
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(down ? Color.red.opacity(0.35) : Theme.hairline, lineWidth: 1)
@@ -121,6 +148,7 @@ struct ServiceTile: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture {
+            if let onOpen { return onOpen() }
             // Container-internal probes aren't openable — fall back to Grafana.
             let target = service.probe.hasPrefix("https") ? service.probe : "https://grafana.ops.example.invalid"
             if let url = URL(string: target) {
@@ -193,7 +221,7 @@ private struct AlertRow: View {
             in: RoundedRectangle(cornerRadius: 7))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .help("\(alert.category) · \(alert.flow) — \(alert.ts.shortAge) ago\n\(alert.body)")
+        .help("\([alert.category, alert.flow].compactMap { $0 }.joined(separator: " · ")) — \(alert.ts.shortAge) ago\n\(alert.body)")
     }
 }
 

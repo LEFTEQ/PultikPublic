@@ -221,6 +221,25 @@ func TestReadSettingsRejectsWhatFailsTheAppsWholeDecode(t *testing.T) {
 
 // The kind table must name every field Preferences.init(from:) decodes, with
 // the JSON kind its Swift type needs — a new settings field cannot drift.
+// A pointer's release sources decode like the app's GitHubRelease.Source:
+// repo and environment required, branch optional; a wrong type skips the
+// whole pointer, as Swift's synthesized decode does.
+func TestDecodePointerMirrorsReleaseSources(t *testing.T) {
+	p, err := decodePointer(json.RawMessage(`{"key":"booking-sk","release":[{"repo":"Booking/Booking","environment":"sk","branch":"canary"}]}`))
+	if err != nil || len(p.Release) != 1 || p.Release[0].Branch != "canary" {
+		t.Fatalf("release %v, err %v", p.Release, err)
+	}
+	for _, bad := range []string{
+		`{"key":"a","release":{"repo":"o/r"}}`,
+		`{"key":"a","release":[{"repo":"o/r"}]}`,
+		`{"key":"a","release":[{"repo":"o/r","environment":"prod","branch":3}]}`,
+	} {
+		if _, err := decodePointer(json.RawMessage(bad)); err == nil {
+			t.Fatalf("%s decoded; the app skips it", bad)
+		}
+	}
+}
+
 func TestTopLevelKindsMatchPreferencesSwift(t *testing.T) {
 	src, err := os.ReadFile("../../Sources/Store/Preferences.swift")
 	if err != nil {

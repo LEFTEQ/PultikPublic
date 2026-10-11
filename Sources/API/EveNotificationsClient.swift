@@ -6,8 +6,10 @@ import Foundation
 /// any error so the alerts section simply hides.
 actor EveNotificationsClient {
     static let shared = EveNotificationsClient()
+    /// The ledger's host — Now's identity for its notifications.
+    static let origin = "eve.ops.example.invalid"
 
-    private let base = URL(string: "https://eve.ops.example.invalid")!
+    private let base = URL(string: "https://\(EveNotificationsClient.origin)")!
     private let session: URLSession
 
     init() {
@@ -46,9 +48,11 @@ actor EveNotificationsClient {
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601Flexible
-        guard let decoded = try? decoder.decode(EveAlertsResponse.self, from: data) else {
+        do {
+            return .value(try decoder.decode(EveAlertsResponse.self, from: data).notifications)
+        } catch {
+            NSLog("pultik: eve ledger unreadable — %@", ConfigIssueSink.describe(error))
             return .failed(.unreachable("unreadable ledger payload"))
         }
-        return .value(decoded.notifications)
     }
 }

@@ -41,6 +41,19 @@ actor HlidacClient {
         return (digest, nil)
     }
 
+    /// One deployment's detail on explicit selection — never polled, and
+    /// outside the fast lane's breaker: a failure leaves the digest's card
+    /// as the detail.
+    func deployment(base: URL, key: String) async throws -> HlidacDigest.Deployment {
+        let (data, response) = try await session.data(from: base.appending(path: "api/v1/prod/\(key)"))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw HTTPStatusError(status: status) }
+        guard let deployment = HlidacDigest.decodeDeployment(data) else {
+            throw URLError(.cannotParseResponse)
+        }
+        return deployment
+    }
+
     private static func failure(_ status: Int, _ what: String) -> ProbeFailure {
         let why = "\(what) answered \(status)"
         return [401, 403, 429].contains(status) ? .rejected(why) : .unreachable(why)
