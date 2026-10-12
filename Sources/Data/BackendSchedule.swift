@@ -74,12 +74,17 @@ final class BackendSchedule {
         guard let spec = specs[name] else { return }
         lanes[name, default: Lane()].running = true
         lanes[name]?.lastAttempt = Date()
-        let task = Task { @MainActor in await spec.work() }
+        let task = Task { @MainActor in
+            await spec.work()
+            // Clear admission before waking any joiner. An overdue loop can
+            // otherwise repeatedly await this completed task and starve the
+            // owner that would clear it, monopolising the main actor.
+            inFlight[name] = nil
+            lanes[name]?.running = false
+            onLaneComplete?()
+        }
         inFlight[name] = task
         await task.value
-        inFlight[name] = nil
-        lanes[name]?.running = false
-        onLaneComplete?()
     }
 
     /// A fresh run after an action: waits out the run in flight (it may have

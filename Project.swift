@@ -15,8 +15,8 @@ let project = Project(
             infoPlist: .extendingDefault(with: [
                 "LSUIElement": true,
                 "CFBundleDisplayName": "Pultík",
-                "CFBundleShortVersionString": "3.0",
-                "CFBundleVersion": "27",
+                "CFBundleShortVersionString": "3.0.1",
+                "CFBundleVersion": "28",
                 // pultik://pr/<owner>/<repo>/<n> opens a PR's detail (PultikLink).
                 "CFBundleURLTypes": [
                     ["CFBundleURLName": "dev.example.pultik", "CFBundleURLSchemes": ["pultik"]],
