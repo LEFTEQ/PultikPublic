@@ -12,7 +12,7 @@ sources=(Sources/Models/Models.swift Sources/Models/OverviewGlance.swift
   Sources/Models/ProdGlance.swift Sources/Models/ProdMatrix.swift Sources/Models/SettingsFile.swift
   Sources/Support/DateAge.swift Sources/Models/ProdTransitions.swift Sources/Models/ProdClaims.swift
   Sources/Models/NotificationContent.swift Sources/Models/PRDigest.swift Sources/Support/PultikFormat.swift
-  Sources/Data/QuerySnapshots.swift Sources/Data/QueryRepository.swift
+  Sources/Data/QuerySnapshots.swift Sources/Data/QueryRepository.swift Sources/Data/BackendSchedule.swift
   Sources/Views/Shell/PanelModule.swift Sources/Views/Shell/PaletteMode.swift Sources/Views/Shell/ModuleRouter.swift
   Sources/Views/Shell/KeyboardCoordinator.swift Sources/Models/FleetContract.swift
   "$repo"/Sources/Models/Now/*.swift "$repo"/Sources/Models/Now/Adapters/*.swift)
@@ -22,7 +22,7 @@ tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/Dev
   Tests/ProdGlanceTests.swift Tests/SettingsFileTests.swift Tests/ProdTransitionsTests.swift
   Tests/ProdClaimsTests.swift Tests/PRDigestTests.swift Tests/PultikFormatTests.swift Tests/QueryRepositoryTests.swift
   Tests/ModuleRouterTests.swift Tests/NowQueueTests.swift Tests/ObservationLedgerTests.swift Tests/NowAdaptersTests.swift
-  Tests/FleetContractTests.swift)
+  Tests/FleetContractTests.swift Tests/BackendScheduleTests.swift)
 # Golden payloads the contract tests read beside themselves (#filePath).
 cp -R "$repo/Tests/Fixtures" "$harness/Tests/PultikTests/Fixtures"
 for file in "${sources[@]}" "$repo"/Sources/API/GitHub*.swift; do
