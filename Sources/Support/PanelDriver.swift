@@ -68,7 +68,7 @@ enum PanelDriver {
             // The Settings pane's own setter, so AC6 checks what Settings does.
             guard let style = info["text"].flatMap(HomeStyle.init(rawValue:)) else { return }
             StatusStore.shared.setHomeStyle(style)
-        case "query", "key", "paste", "state", "clear-preview", "clear-action", "mac-stop", "home-toggle":
+        case "query", "key", "paste", "state", "clear-preview", "clear-action", "mac-stop", "home-toggle", "mark":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:
             NSLog("pultik: debug driver ignored %@", String(describing: info))
@@ -89,6 +89,7 @@ enum PanelDriver {
         case "v": (code, chars) = (9, "v")
         case "i": (code, chars) = (34, "i") // ⌘I: the detail's inspector
         case "r": (code, chars) = (15, "r") // ⌘R: CI's Re-run failed
+        case "a": (code, chars) = (0, "a") // ⌘A: mark every row shown (bulk D1)
         case "backspace": (code, chars) = (51, "\u{7f}")
         // ANSI key codes of the top-row digits — ⌘1–9 switch modules.
         case "1": (code, chars) = (18, "1")

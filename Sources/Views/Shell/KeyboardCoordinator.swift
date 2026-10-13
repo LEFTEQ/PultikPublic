@@ -52,16 +52,25 @@ struct KeyContext {
     /// The top card on the detail (D2), by its object key: its keys are the
     /// card's, and ⌘R re-runs a failed run card's failed jobs.
     var card: String?
+    /// The rows a bulk verb can take, in drawn order (bulk actions D1):
+    /// ⇧↑/⇧↓ and ⌘A mark them. Empty = the list has no bulk verb.
+    var markable: [String] = []
+    /// The bulk pane holds the detail's place — marks, or a batch on screen.
+    /// Its verbs are the ⇥ targets; ↵ only ever focuses or activates one.
+    var bulk = false
+    /// A destructive bulk verb's confirm is open in the pane.
+    var bulkConfirm = false
 }
 
 /// One peel of Esc (copilot shell layered Esc): note edit → expanded note →
 /// eve → the detail's focus ring → the top card (stay in Pultík D3) → the
-/// field's text (completion, path card, filter) → detail → selection →
+/// bulk confirm → the marks and the bulk pane (bulk actions D1) → the field's text
+/// (completion, path card, filter) → detail → selection →
 /// page → module → Home → close. It never closes the panel while a layer
 /// remains.
 enum EscStep: String, Equatable {
-    case cancelNoteEdit, foldNote, dismissEve, clearFocus, popCard, clearText, closeDetail, clearSelection, closePage,
-         leaveModule, close
+    case cancelNoteEdit, foldNote, dismissEve, clearFocus, popCard, cancelConfirm, clearMarks, clearText, closeDetail,
+         clearSelection, closePage, leaveModule, close
 }
 
 /// What a keystroke means; the panel performs it.
@@ -107,6 +116,10 @@ enum KeyIntent: Equatable {
     case cardMove(Int)
     case cardColumn(Int)
     case cardOpen
+    /// ⇧↑ (−1) / ⇧↓ (+1): the cursor moves and marks the rows it passes (bulk D1).
+    case extendMarks(Int)
+    /// ⌘A in a list with bulk verbs: every markable row shown.
+    case markAll
     /// Consumed, nothing to do: ⇥ on a row with nothing to triage.
     case ignore
 }
@@ -131,6 +144,8 @@ enum KeyboardCoordinator {
                 else { return nil }
                 return .rerunFailed(id)
             case "v": return context.fieldFocused ? .paste : nil
+            // A list without bulk verbs leaves ⌘A to the field: select all.
+            case "a": return context.markable.isEmpty ? nil : .markAll
             case "c":
                 guard !context.noteEditing, let id = context.selection, id.hasPrefix("note:") else { return nil }
                 return .copyNote(id)
@@ -153,6 +168,11 @@ enum KeyboardCoordinator {
             return .cardMove(1)
         case .up where context.card != nil:
             return .cardMove(-1)
+        // ⇧ with an arrow marks as it moves; a list without bulk verbs keeps plain arrows.
+        case .down where stroke.shift && !context.markable.isEmpty && !context.items.isEmpty:
+            return .extendMarks(1)
+        case .up where stroke.shift && !context.markable.isEmpty && !context.items.isEmpty:
+            return .extendMarks(-1)
         case .down:
             guard !context.items.isEmpty else { return nil }
             return .select(context.items[index.map { min($0 + 1, context.items.count - 1) } ?? 0])
@@ -162,7 +182,7 @@ enum KeyboardCoordinator {
             return .select(index == 0 ? nil : context.items[index - 1])
         case .tab:
             if context.card != nil { return .cardColumn(stroke.shift ? -1 : 1) }
-            if context.detailOpen, !context.focusTargets.isEmpty { return .focus(stroke.shift ? -1 : 1) }
+            if context.detailOpen || context.bulk, !context.focusTargets.isEmpty { return .focus(stroke.shift ? -1 : 1) }
             if context.pathCard, context.selection == nil { return .cyclePathVerb(stroke.shift ? -1 : 1) }
             if let id = context.selection {
                 // A module's other rows have nothing to triage, and ⇥ must not
@@ -175,7 +195,12 @@ enum KeyboardCoordinator {
             // ↵ belongs to a note edit (and ⌘↵ to its Save).
             if context.noteEditing { return nil }
             if !stroke.command, context.card != nil { return .cardOpen }
-            if !stroke.command, context.detailOpen, context.focus != nil { return .activateFocus }
+            if !stroke.command, context.detailOpen || context.bulk, context.focus != nil { return .activateFocus }
+            // The bulk pane holds the detail's place: ↵ reaches for its first
+            // verb, never a row's detail under it, and never runs a verb.
+            if !stroke.command, context.bulk {
+                return context.focusTargets.isEmpty ? .ignore : .focus(1)
+            }
             if stroke.command, context.notesDraft { return .createNote }
             if context.pathCard, context.selection == nil { return .runPathVerb }
             if let index {
@@ -207,6 +232,9 @@ enum KeyboardCoordinator {
         if context.eve { return .dismissEve }
         if context.focus != nil { return .clearFocus }
         if context.card != nil { return .popCard }
+        // A confirm closes first; marks peel before the filter that may have narrowed them.
+        if context.bulk, context.bulkConfirm { return .cancelConfirm }
+        if context.bulk { return .clearMarks }
         if !context.text.isEmpty || context.pathCard { return .clearText }
         if context.detailOpen { return .closeDetail }
         if context.selection != nil { return .clearSelection }
@@ -253,7 +281,7 @@ extension KeyStroke {
     /// ANSI key codes of the chords the panel owns.
     private static let chordKeys: [UInt16: String] = [
         18: "1", 19: "2", 20: "3", 21: "4", 23: "5", 22: "6", 26: "7", 28: "8", 25: "9",
-        34: "i", 9: "v", 8: "c", 15: "r",
+        34: "i", 9: "v", 8: "c", 15: "r", 0: "a",
     ]
 }
 

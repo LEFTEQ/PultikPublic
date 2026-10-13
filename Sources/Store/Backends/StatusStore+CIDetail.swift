@@ -122,25 +122,41 @@ final class CIRerunCenter {
     func rerun(_ ref: CIRunRef, shown: CIRun?, store: StatusStore) {
         guard outcomes[ref.runID] != .checking else { return }
         outcomes[ref.runID] = .checking
-        Task {
-            defer { generations[ref.runID, default: 0] += 1 }
-            do {
-                let host = store.ciHost
-                let identity = try await host.identity()
-                let attempt: CIRun
-                if let shown { attempt = shown } else { attempt = try await store.ciRun(ref).run }
-                let verdict = try await host.rerunFailedIfStill(ref, shown: attempt, identity: identity)
-                switch verdict {
-                case .rerun: outcomes[ref.runID] = .requested
-                case .running: outcomes[ref.runID] = .skipped("already running again")
-                case let .newerAttempt(attempt): outcomes[ref.runID] = .skipped("attempt \(attempt) exists")
-                case let .notFailed(conclusion): outcomes[ref.runID] = .skipped("now \(conclusion?.rawValue ?? "unknown")")
-                }
-                store.ciRunChanged(ref)
-            } catch {
-                NSLog("pultik: re-run %@ %d failed: %@", ref.repo, ref.runID, error.localizedDescription)
-                outcomes[ref.runID] = .failed(error.localizedDescription)
+        Task { await perform(ref, shown: shown, store: store) }
+    }
+
+    /// The same re-run, awaited: bulk Re-run failed walks its runs one at a
+    /// time inside the GitHub budget (bulk D6). A run already being checked
+    /// answers `.checking` and is left to that call.
+    func rerunNow(_ ref: CIRunRef, shown: CIRun?, store: StatusStore) async -> Outcome {
+        guard outcomes[ref.runID] != .checking else { return .checking }
+        outcomes[ref.runID] = .checking
+        return await perform(ref, shown: shown, store: store)
+    }
+
+    @discardableResult
+    private func perform(_ ref: CIRunRef, shown: CIRun?, store: StatusStore) async -> Outcome {
+        defer { generations[ref.runID, default: 0] += 1 }
+        let outcome: Outcome
+        do {
+            let host = store.ciHost
+            let identity = try await host.identity()
+            let attempt: CIRun
+            if let shown { attempt = shown } else { attempt = try await store.ciRun(ref).run }
+            let verdict = try await host.rerunFailedIfStill(ref, shown: attempt, identity: identity)
+            switch verdict {
+            case .rerun: outcome = .requested
+            case .running: outcome = .skipped("already running again")
+            case let .newerAttempt(attempt): outcome = .skipped("attempt \(attempt) exists")
+            case let .notFailed(conclusion): outcome = .skipped("now \(conclusion?.rawValue ?? "unknown")")
             }
+            outcomes[ref.runID] = outcome
+            store.ciRunChanged(ref)
+        } catch {
+            NSLog("pultik: re-run %@ %d failed: %@", ref.repo, ref.runID, error.localizedDescription)
+            outcome = .failed(error.localizedDescription)
+            outcomes[ref.runID] = outcome
         }
+        return outcome
     }
 }

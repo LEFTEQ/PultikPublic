@@ -101,6 +101,7 @@ final class ModuleRouter {
         selection = id ?? remembered[target]
         detailOpen = openDetail && selection != nil
         dropStack()
+        clearMarks()
     }
 
     /// Back to the global search — Home once nothing is typed.
@@ -112,13 +113,16 @@ final class ModuleRouter {
         selection = nil
         detailOpen = false
         dropStack()
+        clearMarks()
     }
 
     /// Moves the highlight; nil hands ↵ back to the field and closes the detail.
+    /// A plain move ends a ⇧ extension: the next one starts from here.
     func select(_ id: String?) {
         if id != selection { dropStack() }
         selection = id
         if id == nil { detailOpen = false }
+        markAnchor = nil
     }
 
     func openDetail(_ id: String) {
@@ -144,6 +148,91 @@ final class ModuleRouter {
     /// The selection `module` had when it was left — a warm body's frozen one.
     func rememberedSelection(_ module: PanelModule) -> String? {
         remembered[module]
+    }
+
+    // MARK: - Marks (bulk actions D1)
+
+    /// The rows marked for a bulk verb in the entered module, by object id
+    /// and apart from the cursor. They belong to the module: entering
+    /// another, leaving and a restored place drop them, and no place keeps them.
+    private(set) var marks: Set<String> = []
+    /// Where a ⇧ extension began, and the marks it extends (Finder's range).
+    private var markAnchor: String?
+    private var marksBeforeExtension: Set<String> = []
+    /// The destructive bulk verb whose confirm is open (bulk D2): Esc
+    /// cancels it before it drops the marks.
+    private(set) var confirming: String?
+
+    func confirm(_ verb: String?) {
+        confirming = verb
+    }
+
+    /// ⌘-click, or a click on a row's check: the row joins or leaves the
+    /// marks and the cursor follows it. Marking closes the detail — the
+    /// bulk pane takes its place.
+    func toggleMark(_ id: String) {
+        moveCursor(to: id)
+        if !marks.insert(id).inserted { marks.remove(id) }
+        markAnchor = id
+        marksBeforeExtension = marks
+    }
+
+    /// ⇧-click: every markable row from the cursor (or where the last
+    /// extension began) to `id`, on top of the marks before it.
+    func markRange(to id: String, in markable: [String]) {
+        guard markable.contains(id) else { return }
+        beginExtension(at: selection.flatMap { markable.contains($0) ? $0 : nil } ?? id, in: markable)
+        moveCursor(to: id)
+        extendMarks(to: id, in: markable)
+    }
+
+    /// ⇧↑ / ⇧↓: the cursor moves through `items` and the markable rows
+    /// between it and where the run began are marked; turning back unmarks
+    /// what the run passed.
+    func extendMarks(_ step: Int, in items: [String], markable: [String]) {
+        guard !items.isEmpty else { return }
+        let index = selection.flatMap { items.firstIndex(of: $0) }
+        let next = index.map { items[min(max($0 + step, 0), items.count - 1)] } ?? (step > 0 ? items[0] : items[items.count - 1])
+        beginExtension(at: selection.flatMap { items.contains($0) ? $0 : nil } ?? next, in: items)
+        moveCursor(to: next)
+        extendMarks(to: next, in: items, markable: markable)
+    }
+
+    /// ⌘A: every markable row the list draws — type a filter first to
+    /// narrow. With every one of them marked already, ⌘A unmarks.
+    func markAll(_ markable: [String]) {
+        guard !markable.isEmpty else { return }
+        closeDetail()
+        marks = marks.isSuperset(of: markable) ? [] : Set(markable)
+        markAnchor = nil
+    }
+
+    func clearMarks() {
+        marks = []
+        markAnchor = nil
+        marksBeforeExtension = []
+        confirming = nil
+    }
+
+    private func beginExtension(at anchor: String, in items: [String]) {
+        guard markAnchor.map({ !items.contains($0) }) ?? true else { return }
+        markAnchor = anchor
+        marksBeforeExtension = marks
+    }
+
+    private func extendMarks(to id: String, in items: [String], markable: [String]? = nil) {
+        guard let anchor = markAnchor, let from = items.firstIndex(of: anchor), let to = items.firstIndex(of: id)
+        else { return }
+        let range = items[min(from, to) ... max(from, to)].filter { markable?.contains($0) ?? true }
+        marks = marksBeforeExtension.union(range)
+    }
+
+    /// The cursor moves without ending the extension `select` would end.
+    /// The detail closes with every card on it — a hidden card must not
+    /// keep ⌘↵.
+    private func moveCursor(to id: String) {
+        selection = id
+        closeDetail()
     }
 
     // MARK: - The stack (stay in Pultík D2, D3, D11)
@@ -290,6 +379,7 @@ final class ModuleRouter {
             detailOpen = place.detailOpen && place.selection != nil
             stack = detailOpen ? place.stack : []
         }
+        clearMarks()
         inspectorOpen = place.inspectorOpen
         focus = nil
         focusTargets = []

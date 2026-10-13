@@ -131,6 +131,26 @@ final class MacHealthTests: XCTestCase {
         XCTAssertEqual(MacHealthStop.outcome(status: 2, stdout: Data(), stderr: "unknown flag --pid\n"),
                        .refused("unknown flag --pid"))
     }
+
+    /// Bulk D4: marked findings stop in ONE call carrying each pid once, and
+    /// the reply comes back per finding — a finding hears only its own pids.
+    func testBulkStopIsOneCallSplitPerFinding() {
+        let tail = MacHealthStop.Target(id: "finding:a", argv: ["toolkit", "macwatch", "stop", "--json",
+                                                              "--pid", "1", "--started", "t1", "--pid", "2", "--started", "t2"],
+                                        names: [1: "tail", 2: "ugrep"])
+        let shell = MacHealthStop.Target(id: "finding:b", argv: ["toolkit", "macwatch", "stop", "--json",
+                                                               "--pid", "2", "--started", "t2", "--pid", "3", "--started", "t3"],
+                                         names: [3: "zsh"])
+        XCTAssertEqual(MacHealthStop.combined([tail.argv, shell.argv]),
+                       ["toolkit", "macwatch", "stop", "--json", "--pid", "1", "--started", "t1",
+                        "--pid", "2", "--started", "t2", "--pid", "3", "--started", "t3"])
+        XCTAssertNil(MacHealthStop.combined([tail.argv, ["toolkit", "macwatch", "stop", "--pid=4"]]))
+
+        let reply = Data(#"{"stopped":[{"pid":1,"signal":"TERM"},{"pid":2,"signal":"TERM"}],"refused":[{"pid":3,"reason":"no longer flagged"}]}"#.utf8)
+        let outcomes = MacHealthStop.outcomes(status: 0, stdout: reply, stderr: "", targets: [tail, shell])
+        XCTAssertEqual(outcomes["finding:a"], .stopped("stopped tail (1), ugrep (2)"))
+        XCTAssertEqual(outcomes["finding:b"], .refused("zsh (3) — no longer flagged; stopped 2"))
+    }
 }
 
 private extension Result {

@@ -36,6 +36,14 @@ final class ResolvedStore {
         save()
     }
 
+    /// Bulk Resolve / Unresolve (bulk D7): an explicit side, never a
+    /// toggle, written once for the whole batch.
+    func set(_ ids: [String], resolved isResolved: Bool) {
+        let now = Date()
+        for id in ids { resolved[id] = isResolved ? resolved[id] ?? now : nil }
+        save()
+    }
+
     /// The ids to HIDE for a panel session — everything resolved before the
     /// panel opened. Taken as a snapshot at onAppear so a mid-session resolve
     /// dims instead of vanishing.

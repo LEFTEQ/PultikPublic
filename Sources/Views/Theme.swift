@@ -279,12 +279,16 @@ struct RailRow: View {
     var accessibilityLabel: String? = nil
     /// The keyboard's selection in a module list: the Kit's neutral lift.
     var selected = false
+    /// The row's object id where a bulk verb can take it (bulk D1): its dot
+    /// gives way to the mark's check.
+    var mark: String? = nil
     let action: () -> Void
     @State private var hovering = false
+    @Environment(\.rowMarks) private var marks
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: RailRowMetrics.dotGap) {
-            dotView
+            MarkSlot(id: mark ?? "", hovering: hovering, size: 9) { dotView }
                 .frame(width: RailRowMetrics.dotSize, height: RailRowMetrics.dotSize)
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 3 }
             VStack(alignment: .leading, spacing: 1) {
@@ -321,8 +325,8 @@ struct RailRow: View {
         .padding(.horizontal, RailRowMetrics.inset)
         .padding(.vertical, RailRowMetrics.verticalInset)
         .background {
-            if selected {
-                RowBackground(selected: true)
+            if selected || mark.map(marks.marked.contains) == true {
+                RowBackground(selected: selected, mark: mark)
             } else {
                 RoundedRectangle(cornerRadius: RailRowMetrics.radius)
                     .fill(hovering ? RailRowMetrics.hoverFill : .clear)

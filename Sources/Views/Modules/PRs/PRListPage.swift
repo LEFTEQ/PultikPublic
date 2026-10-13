@@ -102,6 +102,29 @@ struct PRListPage: View {
 }
 
 extension PRListPage: ModulePage {
+    /// ⇥'s local triage on every marked inbox PR (bulk D7), as two explicit
+    /// sides: resolved PRs leave the inbox from the next summon. Nothing
+    /// changes on GitHub.
+    var bulkVerbs: [BulkVerb] {
+        let resolved = ResolvedStore.shared
+        return [
+            BulkVerb(id: "resolve", title: "Resolve", symbol: "checkmark.circle", noun: "pull request",
+                     help: "Local triage: gone from the inbox from the next summon; nothing changes on GitHub",
+                     skip: { resolved.isResolved($0) ? "already resolved" : nil },
+                     run: { ids, report in
+                         resolved.set(ids, resolved: true)
+                         for id in ids { report(id, .done("resolved here — gone from the next summon")) }
+                     }),
+            BulkVerb(id: "unresolve", title: "Unresolve", symbol: "arrow.uturn.backward.circle", noun: "pull request",
+                     help: "Undo the local triage: stays in the inbox",
+                     skip: { resolved.isResolved($0) ? nil : "not resolved" },
+                     run: { ids, report in
+                         resolved.set(ids, resolved: false)
+                         for id in ids { report(id, .done("stays in the inbox")) }
+                     }),
+        ]
+    }
+
     var objects: [ModuleObject] {
         let now = Date()
         let inbox = Self.groups(entries).flatMap(\.entries).map { entry in
@@ -113,7 +136,8 @@ extension PRListPage: ModulePage {
             if let status = entry.eveSession?.status { facts.append(.init(label: "eve session", value: status)) }
             return ModuleObject(id: "pr:\(entry.id)", title: info.pr.title, label: "#\(info.pr.number)",
                                 status: Self.status(info), meta: entry.repoName, symbol: "arrow.triangle.pull",
-                                project: entry.repoName, url: URL(string: info.pr.htmlUrl), facts: facts)
+                                project: entry.repoName, url: URL(string: info.pr.htmlUrl), facts: facts,
+                                markable: true)
         }
         let archive: [ModuleObject] = searching ? store.searchMatches.map { pr -> ModuleObject in
             var facts = [ModuleObject.Fact(label: "repo", value: pr.repoSlug),

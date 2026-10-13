@@ -45,7 +45,7 @@ private struct RowChrome: ViewModifier {
             .padding(.vertical, 4)
             .padding(.horizontal, 8)
             .padding(.trailing, hovering ? 18 : 0)
-            .background { RowBackground(selected: selected, hovering: hovering) }
+            .background { RowBackground(selected: selected, hovering: hovering, mark: id) }
             .overlay(alignment: .trailing) {
                 if hovering { LinkGlyph(url: url.flatMap(URL.init(string:)), label: "Open the page").padding(.trailing, 4) }
             }
@@ -81,12 +81,14 @@ struct InboxPRRow: View {
     /// heading already names the repo.
     var showsRepo = true
     @Environment(\.panelIsPresented) private var panelIsPresented
+    /// Shows the mark's check in a list with bulk verbs (bulk D1).
+    @State private var hovering = false
 
     private var info: PRInfo { entry.info }
 
     var body: some View {
         HStack(spacing: 7) {
-            stateGlyph
+            MarkSlot(id: "pr:\(entry.id)", hovering: hovering) { stateGlyph }
                 .frame(width: 14)
             if showsRepo {
                 Text(entry.repoName)
@@ -116,6 +118,7 @@ struct InboxPRRow: View {
         }
         .opacity(info.isDraft ? 0.55 : 1)
         .modifier(RowChrome(id: "pr:\(entry.id)", url: info.pr.htmlUrl, selected: selected))
+        .onHover { hovering = $0 }
     }
 
     @ViewBuilder

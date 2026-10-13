@@ -226,4 +226,81 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertEqual(intent(.right, KeyContext(module: .ci, order: order)), .module(.prs))
         XCTAssertEqual(PanelModule.prs.number(in: order), 3)
     }
+
+    /// Bulk D1: ⌘-click toggles, ⇧-click marks the range from the cursor,
+    /// ⇧↓/⇧↑ extend and turning back unmarks, ⌘A marks what is shown (then
+    /// unmarks), unmarkable rows are passed over, and leaving drops the marks.
+    func testMarksAreFindersRangesByID() {
+        let items = ["fans", "finding:a", "finding:b", "finding:c", "finding:d"]
+        let markable = Array(items.dropFirst())
+        let router = ModuleRouter()
+        router.enter(.mac, select: "finding:a", openDetail: true)
+        router.toggleMark("finding:b")
+        XCTAssertEqual(router.marks, ["finding:b"])
+        XCTAssertEqual(router.selection, "finding:b")
+        XCTAssertFalse(router.detailOpen)
+        router.markRange(to: "finding:d", in: markable)
+        XCTAssertEqual(router.marks, ["finding:b", "finding:c", "finding:d"])
+        router.toggleMark("finding:c")
+        XCTAssertEqual(router.marks, ["finding:b", "finding:d"])
+
+        router.clearMarks()
+        router.select("fans")
+        router.extendMarks(1, in: items, markable: markable)
+        router.extendMarks(1, in: items, markable: markable)
+        XCTAssertEqual(router.marks, ["finding:a", "finding:b"])
+        router.extendMarks(-1, in: items, markable: markable)
+        XCTAssertEqual(router.marks, ["finding:a"])
+        XCTAssertEqual(router.selection, "finding:a")
+
+        router.markAll(["finding:c", "finding:d"])
+        XCTAssertEqual(router.marks, ["finding:c", "finding:d"])
+        router.markAll(["finding:c", "finding:d"])
+        XCTAssertTrue(router.marks.isEmpty)
+
+        // A hidden run card never outlives the detail marking closed (⌘↵ is the row's).
+        router.openDetail("finding:a")
+        router.push(DetailRef(kind: .run, id: "o/r#1"))
+        router.markAll(markable)
+        XCTAssertFalse(router.detailOpen)
+        XCTAssertTrue(router.stack.isEmpty)
+        router.enter(.devbox)
+        XCTAssertTrue(router.marks.isEmpty)
+    }
+
+    /// Bulk D1: ⇧-arrows and ⌘A mark only where the list has bulk verbs;
+    /// with the bulk pane up ↵ reaches for its first verb, never a detail,
+    /// ⇥ walks its verbs, and Esc drops the marks before the filter.
+    func testBulkKeysMarkFocusAndPeelBeforeTheFilter() {
+        let shiftDown = KeyStroke(key: .down, shift: true)
+        let plain = KeyContext(module: .mac, items: ["finding:a"], selection: "finding:a")
+        XCTAssertEqual(KeyboardCoordinator.intent(for: shiftDown, in: plain), .select("finding:a"))
+        XCTAssertNil(intent(.character("a"), command: true, plain))
+
+        var marking = plain
+        marking.markable = ["finding:a"]
+        XCTAssertEqual(KeyboardCoordinator.intent(for: shiftDown, in: marking), .extendMarks(1))
+        XCTAssertEqual(intent(.character("a"), command: true, marking), .markAll)
+
+        var pane = marking
+        pane.text = "agent"
+        pane.bulk = true
+        pane.focusTargets = ["bulk:stop"]
+        XCTAssertEqual(intent(.enter, pane), .focus(1))
+        XCTAssertEqual(intent(.tab, pane), .focus(1))
+        XCTAssertEqual(intent(.esc, pane), .escape(.clearMarks))
+        pane.focus = "bulk:stop"
+        XCTAssertEqual(intent(.enter, pane), .activateFocus)
+        XCTAssertEqual(intent(.esc, pane), .escape(.clearFocus))
+        pane.focus = nil
+        pane.bulkConfirm = true
+        XCTAssertEqual(intent(.esc, pane), .escape(.cancelConfirm))
+
+        let router = ModuleRouter()
+        router.enter(.mac)
+        router.toggleMark("finding:a")
+        router.confirm("stop")
+        router.clearMarks()
+        XCTAssertNil(router.confirming)
+    }
 }
