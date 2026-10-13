@@ -66,21 +66,33 @@ extension ModulePage where DetailContent == EmptyView {
     func detailContent(for _: ModuleObject) -> EmptyView { EmptyView() }
 }
 
-/// Hosts a module page in the frame, its detail resolved from the router's
-/// selection — a selection the list no longer holds draws no detail.
+/// Hosts a module page in the frame, its detail resolved from the selection
+/// — a selection the list no longer holds draws no detail — with the
+/// detail's card stack over it (stay in Pultík D2). The inputs are explicit:
+/// the displayed module passes the router's, a warm hidden one its frozen
+/// ones (`ModuleWarmth`), and `objects` comes memoised (`ModulePageMemo`).
 struct ModuleHost<Page: ModulePage>: View {
     let page: Page
-    let router: ModuleRouter
+    let objects: [ModuleObject]
+    var selection: String?
+    var detailOpen = false
+    var inspectorOpen = false
+    var stack: [DetailRef] = []
+    var onPop: () -> Void = {}
+    var card: (DetailRef) -> AnyView = { _ in AnyView(EmptyView()) }
 
     var body: some View {
-        let objects = page.objects
-        let open = router.detailOpen ? router.selection.flatMap { id in objects.first { $0.id == id } } : nil
+        let open = detailOpen ? selection.flatMap { id in objects.first { $0.id == id } } : nil
         ModuleFrame(listWidth: page.listWidth, minListWidth: page.minListWidth,
-                    inspectorOpen: router.inspectorOpen, detail: open) {
+                    inspectorOpen: inspectorOpen, detail: open) {
             page
         } detailView: { object in
-            ObjectDetail(object: object, showsFacts: !router.inspectorOpen, scrollsItself: page.detailScrollsItself) {
-                page.detailContent(for: object)
+            StackedDetail(stack: stack, onPop: onPop) {
+                ObjectDetail(object: object, showsFacts: !inspectorOpen, scrollsItself: page.detailScrollsItself) {
+                    page.detailContent(for: object)
+                }
+            } card: { ref in
+                card(ref)
             }
         } inspector: { object in
             ScrollView {
@@ -88,6 +100,48 @@ struct ModuleHost<Page: ModulePage>: View {
                     .padding(14)
             }
         }
+    }
+}
+
+/// Each module page's objects, computed once per input and kept until a
+/// value they read changes (D4 "precompute"): the keyboard reads them per
+/// keystroke and the host per body, and neither recomputes a list nobody
+/// changed. Invalidation rides Observation, so a page that reads a new
+/// store needs no wiring here.
+@MainActor
+@Observable
+final class ModulePageMemo {
+    /// Bumped after an invalidation: a reader that hit the memo read no
+    /// store property, so this is what redraws it.
+    private(set) var revision = 0
+    @ObservationIgnored private var entries: [PanelModule: (inputs: String, objects: [ModuleObject])] = [:]
+    /// Marked from Observation's `onChange`, which may run off the main actor.
+    @ObservationIgnored private let stale = StaleModules()
+
+    func objects(_ module: PanelModule, inputs: String, compute: () -> [ModuleObject]) -> [ModuleObject] {
+        _ = revision
+        if stale.take(module) { entries[module] = nil }
+        if let entry = entries[module], entry.inputs == inputs { return entry.objects }
+        let stale = stale
+        let objects = withObservationTracking(compute) { [weak self] in
+            stale.mark(module)
+            Task { @MainActor in self?.revision &+= 1 }
+        }
+        entries[module] = (inputs, objects)
+        return objects
+    }
+}
+
+private final class StaleModules: @unchecked Sendable {
+    private let lock = NSLock()
+    private var modules: Set<PanelModule> = []
+
+    func mark(_ module: PanelModule) {
+        lock.withLock { _ = modules.insert(module) }
+    }
+
+    func take(_ module: PanelModule) -> Bool {
+        lock.withLock { modules.remove(module) != nil }
     }
 }
 

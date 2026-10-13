@@ -32,7 +32,7 @@ extension StatusStore {
             catch {
                 NSLog("pultik: GitHub estate failed: %@", error.localizedDescription)
                 globalError = error.localizedDescription
-                recordStalePRNeeds(nil, estate: [:], identity: identity)
+                recordStalePRNeeds(nil, answered: [], identity: identity)
                 return ProbeFailure.tripping(error)
             }
 
@@ -94,7 +94,7 @@ extension StatusStore {
                 merged[slug] = status
             }
             repos = slugs.compactMap { merged[$0] }
-            recordStalePRNeeds(repos, estate: estate, identity: identity)
+            recordStalePRNeeds(repos, answered: Set(estate.keys), identity: identity)
             if prIndexIdentity != nil {
                 let now = Date()
                 for (slug, repo) in estate where repo.error == nil {
@@ -112,6 +112,8 @@ extension StatusStore {
                 lastRefresh = Date()
                 if let identity { recordGitHubSnapshot(identity: identity, slugs: slugs) }
             }
+            // The warm set rides this lane: the index just learnt what moved.
+            if answered { await syncWarmSet() }
             onChange?()
             globalError = !repos.isEmpty && repos.allSatisfy { $0.error != nil } ? repos.first?.error : nil
             return nil

@@ -280,7 +280,7 @@ extension StatusPanelView {
 
             ForEach(matches) { prodIssue in
                 ProdIssueRow(prodIssue: prodIssue,
-                             selected: isSelected("sentry:\(prodIssue.id)"))
+                             selected: isSelected("sentry:\(prodIssue.id)"), rowID: "sentry:\(prodIssue.id)")
                     .id("sentry:\(prodIssue.id)")
             }
         }

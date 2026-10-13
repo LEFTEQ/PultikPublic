@@ -9,7 +9,7 @@ extension StatusStore {
     enum ProdDetailResources {
         /// Persisted, so a cold start draws the last line, marked, while it
         /// revalidates.
-        static let release = QueryResource<GitHubRelease.Line>(name: "github.release", staleAfter: 60, keep: 12)
+        static let release = QueryResource<ReleaseLine>(name: "github.release", staleAfter: 60, keep: 12)
         /// `/api/v1/prod/{key}`: the deployment with 25 Sentry issues. Memory
         /// only — prod is never judged from disk.
         static let deployment = QueryResource<HlidacDigest.Deployment>(
@@ -17,29 +17,29 @@ extension StatusStore {
         static let shelf = QueryResource<[ShelfRelease]>(name: "shelf.releases", staleAfter: ShelfRelease.staleAfter)
     }
 
-    private func releaseKey(_ source: GitHubRelease.Source, identity: String) -> QueryKey {
+    private func releaseKey(_ source: ReleaseSource, identity: String) -> QueryKey {
         QueryKey(resource: ProdDetailResources.release.name, identity: identity,
                  scope: "\(source.repo)@\(source.environment):\(source.branch ?? "")")
     }
 
     /// What memory holds for `source` under the current identity, any age.
-    func cachedReleaseLine(_ source: GitHubRelease.Source) -> (line: GitHubRelease.Line, fetchedAt: Date)? {
+    func cachedReleaseLine(_ source: ReleaseSource) -> (line: ReleaseLine, fetchedAt: Date)? {
         guard let identity = prIndexIdentity else { return nil }
-        return QueryRepository.shared.cached(GitHubRelease.Line.self, key: releaseKey(source, identity: identity))
+        return QueryRepository.shared.cached(ReleaseLine.self, key: releaseKey(source, identity: identity))
             .map { ($0.value, $0.fetchedAt) }
     }
 
     /// `maxAge: .infinity` answers from memory or the snapshot at once; the
     /// default revalidates.
-    func releaseLine(_ source: GitHubRelease.Source,
+    func releaseLine(_ source: ReleaseSource,
                      maxAge: TimeInterval = ProdDetailResources.release.staleAfter) async throws
-        -> (line: GitHubRelease.Line, fetchedAt: Date) {
+        -> (line: ReleaseLine, fetchedAt: Date) {
         let identity = try await client.cacheIdentity()
         let key = releaseKey(source, identity: identity)
         let line = try await QueryRepository.shared.load(ProdDetailResources.release, key: key, maxAge: maxAge) { [client] in
             try await client.releaseLine(source, identity: identity)
         }
-        return (line, QueryRepository.shared.cached(GitHubRelease.Line.self, key: key)?.fetchedAt ?? Date())
+        return (line, QueryRepository.shared.cached(ReleaseLine.self, key: key)?.fetchedAt ?? Date())
     }
 
     /// Only while Hlídač answers live: a blind or restored board keeps the

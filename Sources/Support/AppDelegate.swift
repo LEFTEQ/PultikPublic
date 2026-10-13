@@ -41,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Warm between quick summons, released after 30 seconds hidden.
     private var panel: StatusPanel?
     private let panelSession = PanelSession()
+    /// Where a summon lands (stay in Pultík D1): the router lives here, not
+    /// in the view, so the place survives the hosting tree's release.
+    private let panelPlace = PanelPlace()
     private let store = StatusStore.shared
     private var userRequestedQuit = false
     private var sigtermSource: DispatchSourceSignal?
@@ -195,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// away, resignKey, explicit close) already goes through.
     private func warmPanel() -> StatusPanel {
         if let panel { return panel }
-        let panel = StatusPanel(rootView: StatusPanelView(store: store, session: panelSession))
+        let panel = StatusPanel(rootView: StatusPanelView(store: store, session: panelSession, place: panelPlace))
         panel.onClose = { [weak self] in self?.panelDidClose() }
         panel.prewarm()
         self.panel = panel

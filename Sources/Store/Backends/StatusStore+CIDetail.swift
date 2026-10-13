@@ -1,22 +1,19 @@
 import Foundation
 import Observation
 
-/// One Actions run as the CI module reads it.
-struct CIRunRef: Hashable, Sendable {
-    let repo: String
-    let runID: Int
-}
-
 extension StatusStore {
     /// The CI run detail reads (WP6), through the query repository: explicit
     /// selection only (D8), keyed by the GitHub credential digest, never polled.
     enum CIDetailResources {
         /// The run and its jobs move while it runs; fresh for 15 s.
-        static let run = QueryResource<GitHubCIRun.Detail>(
-            name: "github.ci.run", staleAfter: 15, persists: false, keep: 24)
+        static let run = QueryResource<CIRunDetail>(
+            name: "ci.run", staleAfter: 15, persists: false, keep: 24)
         /// A finished job's log never changes: served at any age.
-        static let log = QueryResource<GitHubCIRun.LogTail>(
-            name: "github.ci.log", staleAfter: .infinity, persists: false, keep: 12)
+        static let log = QueryResource<LogTail>(
+            name: "ci.log", staleAfter: .infinity, persists: false, keep: 12)
+        /// A run's job graph (stay in Pultík D11): its workflow file at the run's
+        /// head never changes, so it is kept across relaunches.
+        static let graph = QueryResource<WorkflowGraph>(name: "ci.graph", staleAfter: .infinity, keep: 60)
         /// Semafor's 7 d repo health; no credential, the mesh is the identity.
         static let health = QueryResource<[SemaforRepoHealth]>(
             name: "semafor.repos.health", staleAfter: 300, persists: false, keep: 1)
@@ -27,31 +24,57 @@ extension StatusStore {
         repos.first { $0.runs.contains { $0.id == runID } }.map { CIRunRef(repo: $0.slug, runID: runID) }
     }
 
-    func cachedCIRun(_ ref: CIRunRef) -> GitHubCIRun.Detail? {
+    func cachedCIRun(_ ref: CIRunRef) -> CIRunDetail? {
         guard let identity = prIndexIdentity else { return nil }
-        return QueryRepository.shared.cached(GitHubCIRun.Detail.self, key: ciRunKey(ref, identity: identity))?.value
+        return QueryRepository.shared.cached(CIRunDetail.self, key: ciRunKey(ref, identity: identity))?.value
     }
 
     func ciRun(_ ref: CIRunRef, maxAge: TimeInterval = CIDetailResources.run.staleAfter) async throws
-        -> GitHubCIRun.Detail {
-        let identity = try await client.cacheIdentity()
+        -> CIRunDetail {
+        let host = ciHost
+        let identity = try await host.identity()
         return try await QueryRepository.shared.load(CIDetailResources.run, key: ciRunKey(ref, identity: identity),
-                                                     maxAge: maxAge) { [client] in
-            try await client.ciRunDetail(repo: ref.repo, runID: ref.runID, identity: identity)
+                                                     maxAge: maxAge) {
+            try await host.run(ref, identity: identity)
         }
     }
 
     /// A job's log tail. A completed job's is final and kept; a running job's
     /// is still being written, so it lives under its own key and never
     /// stands in for the final one.
-    func ciLogTail(_ ref: CIRunRef, job: GitHubCIRun.Job) async throws -> GitHubCIRun.LogTail {
-        let identity = try await client.cacheIdentity()
-        let final = job.status == "completed"
+    func ciLogTail(_ ref: CIRunRef, job: CIRunJob) async throws -> LogTail {
+        let host = ciHost
+        let identity = try await host.identity()
+        let final = job.status == .completed
         let key = QueryKey(resource: CIDetailResources.log.name, identity: identity,
                            scope: "\(ref.repo)/job/\(job.id)/\(final ? "final" : "live")")
         return try await QueryRepository.shared.load(CIDetailResources.log, key: key,
-                                                     maxAge: final ? .infinity : 0) { [client] in
-            try await client.ciJobLogTail(repo: ref.repo, jobID: job.id, identity: identity)
+                                                     maxAge: final ? .infinity : 0) {
+            try await host.logTail(ref, job: job, identity: identity)
+        }
+    }
+
+    /// The run's `needs:` graph from the git mirror (D10, D11); nil without a
+    /// workflow path or when the mirror cannot read it — the card falls back
+    /// to timing waves.
+    func workflowGraph(_ run: CIRun) async -> WorkflowGraph? {
+        guard let path = run.workflowPath, !path.isEmpty else { return nil }
+        let host = codeHost
+        do {
+            let identity = try await host.identity()
+            let key = QueryKey(resource: CIDetailResources.graph.name, identity: identity,
+                               scope: "\(run.ref.repo)@\(run.headSHA):\(path)")
+            return try await QueryRepository.shared.load(CIDetailResources.graph, key: key, maxAge: .infinity) {
+                let yaml = try await GitMirror.shared.file(run.ref.repo, path: path, at: run.headSHA,
+                                                           remote: host.remoteURL(repo: run.ref.repo),
+                                                           password: try await host.gitPassword(identity: identity))
+                return WorkflowGraph.parse(yaml)
+            }
+        } catch is CancellationError {
+            return nil
+        } catch {
+            NSLog("pultik: workflow graph of %@ unavailable: %@", run.ref.key, error.localizedDescription)
+            return nil
         }
     }
 
@@ -96,21 +119,22 @@ final class CIRerunCenter {
 
     /// `shown` is the attempt the detail drew; nil = not read yet, so the
     /// run is read first and that attempt is the one judged.
-    func rerun(_ ref: CIRunRef, shown: GitHubCIRun.Run?, store: StatusStore) {
+    func rerun(_ ref: CIRunRef, shown: CIRun?, store: StatusStore) {
         guard outcomes[ref.runID] != .checking else { return }
         outcomes[ref.runID] = .checking
         Task {
             defer { generations[ref.runID, default: 0] += 1 }
             do {
-                let identity = try await store.client.cacheIdentity()
-                let attempt: GitHubCIRun.Run
+                let host = store.ciHost
+                let identity = try await host.identity()
+                let attempt: CIRun
                 if let shown { attempt = shown } else { attempt = try await store.ciRun(ref).run }
-                let verdict = try await store.client.rerunFailedIfStill(repo: ref.repo, shown: attempt, identity: identity)
+                let verdict = try await host.rerunFailedIfStill(ref, shown: attempt, identity: identity)
                 switch verdict {
                 case .rerun: outcomes[ref.runID] = .requested
                 case .running: outcomes[ref.runID] = .skipped("already running again")
                 case let .newerAttempt(attempt): outcomes[ref.runID] = .skipped("attempt \(attempt) exists")
-                case let .notFailed(conclusion): outcomes[ref.runID] = .skipped("now \(conclusion ?? "unknown")")
+                case let .notFailed(conclusion): outcomes[ref.runID] = .skipped("now \(conclusion?.rawValue ?? "unknown")")
                 }
                 store.ciRunChanged(ref)
             } catch {

@@ -2,6 +2,11 @@ import ProjectDescription
 
 let project = Project(
     name: "Pultik",
+    // Stay in Pultík D8: descriptions render as GitHub-flavoured markdown
+    // natively (cmark-gfm under swift-markdown, Apache-2.0).
+    packages: [
+        .remote(url: "https://github.com/swiftlang/swift-markdown.git", requirement: .upToNextMinor(from: "0.9.0")),
+    ],
     targets: [
         .target(
             name: "Pultik",
@@ -15,8 +20,8 @@ let project = Project(
             infoPlist: .extendingDefault(with: [
                 "LSUIElement": true,
                 "CFBundleDisplayName": "Pultík",
-                "CFBundleShortVersionString": "3.0.1",
-                "CFBundleVersion": "28",
+                "CFBundleShortVersionString": "3.0.2",
+                "CFBundleVersion": "29",
                 // pultik://pr/<owner>/<repo>/<n> opens a PR's detail (PultikLink).
                 "CFBundleURLTypes": [
                     ["CFBundleURLName": "dev.example.pultik", "CFBundleURLSchemes": ["pultik"]],
@@ -43,7 +48,7 @@ let project = Project(
                     basedOnDependencyAnalysis: true
                 )
             ],
-            dependencies: [.target(name: "PultikFanHelper")],
+            dependencies: [.target(name: "PultikFanHelper"), .package(product: "Markdown")],
             settings: .settings(base: [
                 "CODE_SIGN_IDENTITY": "-",
                 "CODE_SIGN_STYLE": "Automatic",

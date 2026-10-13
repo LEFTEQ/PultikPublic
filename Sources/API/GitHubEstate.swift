@@ -21,7 +21,7 @@ enum GitHubEstate {
     static let recentLimit = 20
     /// Open PRs per repo, most recently updated first: a repo that fills it
     /// may hold more, so nothing may read its list as complete.
-    static let openLimit = 5
+    static let openLimit = ChangeRequestInbox.openLimit
     static let chunkSize = 12
 
     /// Owners and names travel as variables, never spliced into the query text.

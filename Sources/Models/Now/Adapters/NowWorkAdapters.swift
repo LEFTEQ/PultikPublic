@@ -59,7 +59,7 @@ extension NowAdapters {
                     target: NowTarget(module: .prs, objectID: "pr:\(info.pr.id)", url: info.pr.htmlUrl)))
             }
         }
-        let partial = repos.contains { $0.error != nil || $0.prs.count >= GitHubEstate.openLimit }
+        let partial = repos.contains { $0.error != nil || $0.prs.count >= ChangeRequestInbox.openLimit }
         return NowRead(source: source, coverage: partial ? .partial : .complete, needs: needs)
     }
 

@@ -13,6 +13,7 @@ struct PanelShell<Field: View, Content: View, Footer: View>: View {
     var chatting = false
     var showsHints = true
     let onSelectModule: (PanelModule) -> Void
+    var order: [PanelModule] = PanelModule.allCases
     @Binding var topBarHeight: CGFloat
     @Binding var footerHeight: CGFloat
     @ViewBuilder var field: () -> Field
@@ -29,7 +30,7 @@ struct PanelShell<Field: View, Content: View, Footer: View>: View {
                     field()
                 }
             } strip: {
-                ModuleStrip(current: current, signals: signals, onSelect: onSelectModule)
+                ModuleStrip(current: current, signals: signals, onSelect: onSelectModule, order: order)
             }
             .background(
                 GeometryReader { proxy in

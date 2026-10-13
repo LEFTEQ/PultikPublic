@@ -12,7 +12,7 @@ final class GitHubCIRunTests: XCTestCase {
     }()
 
     private func makeRun(status: String = "completed", conclusion: String? = "failure", attempt: Int = 1) throws
-        -> GitHubCIRun.Run {
+        -> CIRun {
         let body = """
             {"id": 8812, "name": "CI", "display_title": "Provider pool cooldown", "head_branch": "feat/pool",
              "head_sha": "abc1234def", "event": "pull_request", "status": "\(status)",
@@ -21,13 +21,13 @@ final class GitHubCIRunTests: XCTestCase {
              "updated_at": "2026-10-10T15:03:12Z", "run_started_at": "2026-10-10T15:00:00Z",
              "pull_requests": [{"number": 412}]}
             """
-        return try GitHubCIRun.decodeRun(Data(body.utf8), decoder: decoder)
+        return try GitHubCIRun.decodeRun(Data(body.utf8), repo: "o/eve", decoder: decoder)
     }
 
     func testRunAndJobsDecodeWithTheFailingJobAndStep() throws {
         let shown = try makeRun()
         XCTAssertTrue(shown.failed)
-        XCTAssertEqual(shown.pullRequests, [412])
+        XCTAssertEqual(shown.changeRequests, [412])
         let jobs = """
             {"total_count": 2, "jobs": [
               {"id": 1, "name": "lint", "status": "completed", "conclusion": "success",
@@ -46,13 +46,15 @@ final class GitHubCIRunTests: XCTestCase {
             """
         let page = try GitHubCIRun.decodeJobs(Data(jobs.utf8), decoder: decoder)
         XCTAssertEqual(page.total, 2)
-        let cancelledSibling = GitHubCIRun.Job(id: 3, name: "matrix-b", status: "completed", conclusion: "cancelled",
-                                               startedAt: nil, completedAt: nil, htmlUrl: nil, runnerName: nil, steps: [])
-        let detail = GitHubCIRun.Detail(run: shown, jobs: [cancelledSibling] + page.jobs)
+        let cancelledSibling = CIRunJob(id: 3, name: "matrix-b", status: .completed, conclusion: .cancelled,
+                                               startedAt: nil, completedAt: nil, url: nil, runnerName: nil, steps: [])
+        let detail = CIRunDetail(run: shown, jobs: [cancelledSibling] + page.jobs)
         XCTAssertEqual(detail.failingJob?.name, "test", "a fail-fast-cancelled sibling never leads")
         XCTAssertEqual(detail.failingJob?.failingStep?.name, "test")
         XCTAssertEqual(detail.failingJob?.failingStep?.duration, 69)
         XCTAssertEqual(detail.failingJob?.duration, 192)
+        XCTAssertEqual(shown.ref.key, "gh:o/eve/run/\(shown.id)")
+        XCTAssertEqual(CIRunRef(key: shown.ref.key), shown.ref)
     }
 
     func testTheTailEndsJustAfterTheLastErrorWithoutTimestampsColourOrGroupMarkers() {
@@ -103,12 +105,12 @@ final class GitHubCIRunTests: XCTestCase {
 
     func testCommandRReRunsOnlyTheFailedAttemptOnScreen() throws {
         let shown = try makeRun()
-        XCTAssertEqual(GitHubCIRun.Revalidation.judge(shown: shown, fresh: try makeRun()), .rerun)
-        XCTAssertEqual(GitHubCIRun.Revalidation.judge(shown: shown, fresh: try makeRun(status: "in_progress", conclusion: nil)),
+        XCTAssertEqual(RerunVerdict.judge(shown: shown, fresh: try makeRun()), .rerun)
+        XCTAssertEqual(RerunVerdict.judge(shown: shown, fresh: try makeRun(status: "in_progress", conclusion: nil)),
                        .running)
-        XCTAssertEqual(GitHubCIRun.Revalidation.judge(shown: shown, fresh: try makeRun(conclusion: "failure", attempt: 2)),
+        XCTAssertEqual(RerunVerdict.judge(shown: shown, fresh: try makeRun(conclusion: "failure", attempt: 2)),
                        .newerAttempt(2))
-        XCTAssertEqual(GitHubCIRun.Revalidation.judge(shown: shown, fresh: try makeRun(conclusion: "success")),
-                       .notFailed("success"))
+        XCTAssertEqual(RerunVerdict.judge(shown: shown, fresh: try makeRun(conclusion: "success")),
+                       .notFailed(.success))
     }
 }

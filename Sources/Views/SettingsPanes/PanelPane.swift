@@ -32,6 +32,21 @@ struct PanelPane: View {
             }
 
             Section {
+                Picker("Return to the last place for", selection: Binding(
+                    get: { Int(store.homeAfter / 60) },
+                    set: { store.setHomeAfterMinutes($0) }
+                )) {
+                    ForEach([5, 15, 30, 60, 240], id: \.self) { Text("\($0) min").tag($0) }
+                }
+            } header: {
+                Text("Summon")
+            } footer: {
+                Text("⌥Space opens where you last rested for a moment — a PR's detail, a run card, a module — even after an Esc run out of it. Hidden longer than this, it opens on Home.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 ForEach(Self.sections, id: \.0) { key, label in
                     Toggle(label, isOn: Binding(
                         get: { store.isSectionVisible(key) },

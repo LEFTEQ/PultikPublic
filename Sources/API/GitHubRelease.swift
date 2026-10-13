@@ -9,68 +9,15 @@ import Foundation
 /// 300 files of patches (773 KB for one ExampleApp release); the comparison
 /// carries none.
 enum GitHubRelease {
-    /// Where a deployment's release is read: a repository's GitHub
-    /// environment and the branch it deploys from (nil = the newest
-    /// deployment's own ref, else the default branch).
-    struct Source: Codable, Hashable, Sendable {
-        let repo: String
-        let environment: String
-        var branch: String?
-    }
+    /// The release line is Pultík's (`Sources/Domain/Release.swift`); these
+    /// names keep the adapter's wire code short.
+    typealias Source = ReleaseSource
+    typealias Deploy = ReleaseDeploy
+    typealias Commit = ReleaseCommit
+    typealias Line = ReleaseLine
 
-    struct Deploy: Codable, Sendable, Equatable {
-        let id: Int
-        let sha: String
-        let ref: String?
-        let createdAt: Date
-        /// GitHub's latest status, lowercased: success, failure, error,
-        /// in_progress, queued, pending, inactive.
-        let state: String
-        let stateAt: Date?
-        let creator: String?
-        let url: String?
-
-        var short: String { String(sha.prefix(7)) }
-        var isFailed: Bool { ["failure", "error"].contains(state) }
-    }
-
-    struct Commit: Codable, Sendable, Equatable, Identifiable {
-        let sha: String
-        let headline: String
-        let author: String?
-        let committedAt: Date
-        var id: String { sha }
-        var short: String { String(sha.prefix(7)) }
-    }
-
-    struct Line: Codable, Sendable, Equatable {
-        let source: Source
-        /// The branch compared: the source's, else what the environment
-        /// deploys from.
-        let branch: String
-        /// The newest deployment whose status is success (or since made
-        /// inactive by a newer success): what runs.
-        let live: Deploy?
-        /// The newest deployment when it is not the live one — in flight
-        /// or failed.
-        let latest: Deploy?
-        let branchHead: String?
-        /// Commits on `branch` the live commit lacks; nil = not known (no
-        /// live deployment, or the branch is gone).
-        let waiting: Int?
-        /// Commits the live one carries that `branch` does not (a hotfix
-        /// deployed from elsewhere).
-        let ahead: Int?
-        /// The newest waiting commits, newest first, at most `commitLimit`.
-        let commits: [Commit]
-
-        var deploymentsURL: URL? {
-            URL(string: "https://github.com/\(source.repo)/deployments/\(source.environment)")
-        }
-    }
-
-    static let deploymentLimit = 10
-    static let commitLimit = 8
+    static let deploymentLimit = ReleaseLine.deploymentLimit
+    static let commitLimit = ReleaseLine.commitLimit
 
     enum Failure: Error {
         case rateLimited
@@ -244,5 +191,12 @@ enum GitHubRelease {
             let name: String?
             let user: DeploymentNode.Login?
         }
+    }
+}
+
+extension ReleaseLine {
+    /// The environment's deployments page on GitHub.
+    var deploymentsURL: URL? {
+        URL(string: "https://github.com/\(source.repo)/deployments/\(source.environment)")
     }
 }

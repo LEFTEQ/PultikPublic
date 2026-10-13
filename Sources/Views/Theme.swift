@@ -62,6 +62,47 @@ enum Theme {
         static let row: CGFloat = 8
         static let kbd: CGFloat = 4
     }
+
+    /// Motion (stay in Pultík, DESIGN.md §10): every animated change takes a
+    /// token, and each token degrades to a short crossfade under Reduce
+    /// Motion — `Theme.Motion.status(reduce)`, never a raw curve in a view.
+    /// Entering springs a little, leaving is faster and flat (asymmetric
+    /// push and pop); status changes crossfade with a one-shot symbol effect.
+    enum Motion {
+        /// A badge, chip or dot changing state.
+        static func status(_ reduce: Bool) -> Animation {
+            reduce ? fade : .easeInOut(duration: 0.22)
+        }
+
+        /// A card sliding up over its detail.
+        static func push(_ reduce: Bool) -> Animation {
+            reduce ? fade : .spring(duration: 0.34, bounce: 0.12)
+        }
+
+        /// A card sliding away: shorter, no overshoot.
+        static func pop(_ reduce: Bool) -> Animation {
+            reduce ? fade : .spring(duration: 0.24, bounce: 0)
+        }
+
+        /// The ⇥ focus ring moving.
+        static func focus(_ reduce: Bool) -> Animation {
+            reduce ? fade : .snappy(duration: 0.14)
+        }
+
+        /// A module body swapping in after the strip's keys settle.
+        static func swap(_ reduce: Bool) -> Animation {
+            reduce ? fade : .snappy(duration: 0.18)
+        }
+
+        static let fade = Animation.easeInOut(duration: 0.15)
+
+        /// The card's own entrance and exit: up from the bottom edge, out
+        /// the same way; a crossfade under Reduce Motion.
+        static func card(_ reduce: Bool) -> AnyTransition {
+            reduce ? .opacity : .asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
+                                            removal: .move(edge: .bottom).combined(with: .opacity))
+        }
+    }
 }
 
 extension Color {

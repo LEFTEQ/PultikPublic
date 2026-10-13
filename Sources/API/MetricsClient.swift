@@ -117,6 +117,29 @@ actor MetricsClient {
         return series
     }
 
+    /// Stay in Pultík D7: the jobs our CI runs right now (one series each,
+    /// carrying its run link) and each lane's backlog — two instant queries,
+    /// the CI watch's whole read. Throws when Prometheus does not answer:
+    /// the watch must not read silence as "every job finished".
+    func liveJobs() async throws -> (jobs: [CIJob], queued: [String: Int]) {
+        async let jobsQuery = instantSeries("ci_runner_job_info == 1")
+        async let queuedQuery = instantSeries("sum by (lane) (ci_jobs_queued)")
+        let (jobSeries, queuedSeries) = try await (jobsQuery, queuedQuery)
+        let jobs = jobSeries.compactMap { series -> CIJob? in
+            let labels = series.labels
+            guard let lane = labels["lane"] else { return nil }
+            return CIJob(org: labels["org"] ?? "", repo: labels["repo"] ?? "?", lane: lane,
+                         workflow: labels["workflow"] ?? "", jobName: labels["job_name"] ?? "",
+                         runURL: labels["run_url"].flatMap(URL.init(string:)),
+                         since: labels["since"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
+        }
+        var queued: [String: Int] = [:]
+        for series in queuedSeries {
+            if let lane = series.labels["lane"] { queued[lane] = Int(series.value) }
+        }
+        return (jobs, queued)
+    }
+
     /// The BuildServer JIT fleet, lane by lane. Runners are per-job and
     /// nameless since 2026-08-30, so the stable unit is the controller
     /// instance (`ci_kvm_controller_up`), its occupancy the collector's

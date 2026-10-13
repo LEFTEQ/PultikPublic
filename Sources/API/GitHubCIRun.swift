@@ -6,107 +6,8 @@ import Foundation
 /// first and fires only while it is still the failed attempt on screen.
 /// Foundation-only: the contract harness decodes it.
 enum GitHubCIRun {
-    struct Run: Codable, Sendable, Equatable {
-        let id: Int
-        let name: String?
-        let displayTitle: String?
-        let headBranch: String?
-        let headSha: String
-        let event: String
-        /// queued · in_progress · completed · waiting · pending
-        let status: String
-        let conclusion: String?
-        let runAttempt: Int
-        let htmlUrl: String
-        let createdAt: Date
-        let updatedAt: Date
-        let runStartedAt: Date?
-        /// The PR numbers this run is for, base repo only.
-        let pullRequests: [Int]
-
-        var failed: Bool { Self.failing.contains(conclusion ?? "") }
-
-        static let failing: Set<String> = ["failure", "timed_out", "startup_failure"]
-    }
-
-    struct Job: Codable, Sendable, Equatable, Identifiable {
-        let id: Int
-        let name: String
-        let status: String
-        let conclusion: String?
-        let startedAt: Date?
-        let completedAt: Date?
-        let htmlUrl: String?
-        let runnerName: String?
-        let steps: [Step]
-
-        var failed: Bool { Run.failing.contains(conclusion ?? "") || conclusion == "cancelled" }
-        var duration: TimeInterval? { GitHubCIRun.duration(startedAt, completedAt) }
-        /// The step that failed: the first with a failing conclusion.
-        var failingStep: Step? { steps.first { Run.failing.contains($0.conclusion ?? "") } }
-    }
-
-    struct Step: Codable, Sendable, Equatable, Identifiable {
-        let number: Int
-        let name: String
-        let status: String
-        let conclusion: String?
-        let startedAt: Date?
-        let completedAt: Date?
-
-        var id: Int { number }
-        var duration: TimeInterval? { GitHubCIRun.duration(startedAt, completedAt) }
-    }
-
-    /// What the detail holds: the run and its attempt's jobs.
-    struct Detail: Codable, Sendable, Equatable {
-        let run: Run
-        let jobs: [Job]
-        /// The attempt has more than `jobLimit` jobs.
-        var jobsTruncated = false
-
-        /// The job to read first: one that failed, else one cancelled — a
-        /// matrix's fail-fast cancels siblings of the job that broke.
-        var failingJob: Job? {
-            jobs.first { Run.failing.contains($0.conclusion ?? "") } ?? jobs.first(where: \.failed)
-        }
-    }
-
-    /// The lines around the failing job's last error.
-    struct LogTail: Codable, Sendable, Equatable {
-        struct Line: Codable, Sendable, Equatable {
-            /// 1-based, in the whole job log.
-            let number: Int
-            let text: String
-            let error: Bool
-        }
-
-        let lines: [Line]
-        let totalLines: Int
-        /// The window ends on an `##[error]` line; false = the log's last lines.
-        let anchored: Bool
-    }
-
-    /// What ⌘R found when it looked again.
-    enum Revalidation: Equatable {
-        /// Still the failed attempt on screen: re-run its failed jobs.
-        case rerun
-        /// It is running again (someone re-ran it, or it never finished).
-        case running
-        /// A later attempt exists; the screen is stale.
-        case newerAttempt(Int)
-        /// It no longer reads failed.
-        case notFailed(String?)
-
-        static func judge(shown: Run, fresh: Run) -> Revalidation {
-            if fresh.status != "completed" { return .running }
-            if fresh.runAttempt != shown.runAttempt { return .newerAttempt(fresh.runAttempt) }
-            return fresh.failed ? .rerun : .notFailed(fresh.conclusion)
-        }
-    }
-
-    static let tailLimit = 40
-    static let jobLimit = 100
+    static let tailLimit = LogTail.limit
+    static let jobLimit = CIRunDetail.jobLimit
     /// A streamed log keeps this many recent lines, each cut at `lineByteLimit`.
     static let windowLines = 4000
     static let lineByteLimit = 4096
@@ -164,34 +65,57 @@ enum GitHubCIRun {
         }
     }
 
-    static func duration(_ start: Date?, _ end: Date?) -> TimeInterval? {
-        guard let start, let end else { return nil }
-        return max(0, end.timeIntervalSince(start))
-    }
-
     // MARK: - Decoding (REST, convertFromSnakeCase)
 
-    static func decodeRun(_ data: Data, decoder: JSONDecoder) throws -> Run {
+    static func decodeRun(_ data: Data, repo: String, decoder: JSONDecoder) throws -> CIRun {
         let wire = try decoder.decode(RunWire.self, from: data)
-        return Run(id: wire.id, name: wire.name, displayTitle: wire.displayTitle, headBranch: wire.headBranch,
-                   headSha: wire.headSha, event: wire.event, status: wire.status, conclusion: wire.conclusion,
-                   runAttempt: wire.runAttempt ?? 1, htmlUrl: wire.htmlUrl, createdAt: wire.createdAt,
-                   updatedAt: wire.updatedAt, runStartedAt: wire.runStartedAt,
-                   pullRequests: (wire.pullRequests ?? []).map(\.number))
+        return CIRun(ref: CIRunRef(repo: repo, runID: wire.id), name: wire.name, displayTitle: wire.displayTitle,
+                     headBranch: wire.headBranch, headSHA: wire.headSha, event: wire.event,
+                     status: status(wire.status), conclusion: wire.conclusion.map(conclusion),
+                     attempt: wire.runAttempt ?? 1, url: wire.htmlUrl, createdAt: wire.createdAt,
+                     updatedAt: wire.updatedAt, startedAt: wire.runStartedAt,
+                     changeRequests: (wire.pullRequests ?? []).map(\.number), workflowPath: wire.path)
     }
 
-    static func decodeJobs(_ data: Data, decoder: JSONDecoder) throws -> (jobs: [Job], total: Int) {
+    static func decodeJobs(_ data: Data, decoder: JSONDecoder) throws -> (jobs: [CIRunJob], total: Int) {
         let wire = try decoder.decode(JobsWire.self, from: data)
         let jobs = wire.jobs.map { job in
-            Job(id: job.id, name: job.name, status: job.status, conclusion: job.conclusion,
-                startedAt: job.startedAt, completedAt: job.completedAt, htmlUrl: job.htmlUrl,
-                runnerName: job.runnerName,
-                steps: (job.steps ?? []).map {
-                    Step(number: $0.number, name: $0.name, status: $0.status, conclusion: $0.conclusion,
-                         startedAt: $0.startedAt, completedAt: $0.completedAt)
-                })
+            CIRunJob(id: job.id, name: job.name, status: status(job.status), conclusion: job.conclusion.map(conclusion),
+                     startedAt: job.startedAt, completedAt: job.completedAt, url: job.htmlUrl,
+                     runnerName: job.runnerName,
+                     steps: (job.steps ?? []).map {
+                         CIRunStep(number: $0.number, name: $0.name, status: status($0.status),
+                                   conclusion: $0.conclusion.map(conclusion),
+                                   startedAt: $0.startedAt, completedAt: $0.completedAt)
+                     })
         }
         return (jobs, wire.totalCount ?? jobs.count)
+    }
+
+    /// queued · in_progress · completed · waiting · pending · requested
+    static func status(_ raw: String) -> CIStatus {
+        switch raw {
+        case "in_progress": .running
+        case "completed": .completed
+        case "waiting": .waiting
+        case "pending": .pending
+        default: .queued
+        }
+    }
+
+    static func conclusion(_ raw: String) -> CIConclusion {
+        switch raw {
+        case "success": .success
+        case "failure": .failure
+        case "timed_out": .timedOut
+        case "startup_failure": .startupFailure
+        case "cancelled": .cancelled
+        case "skipped": .skipped
+        case "neutral": .neutral
+        case "action_required": .actionRequired
+        case "stale": .stale
+        default: .unknown
+        }
     }
 
     // MARK: - The log tail
@@ -269,6 +193,8 @@ enum GitHubCIRun {
         let updatedAt: Date
         let runStartedAt: Date?
         let pullRequests: [PRWire]?
+        /// `.github/workflows/ci.yml` — the job graph's source (WorkflowGraph).
+        let path: String?
 
         struct PRWire: Decodable { let number: Int }
     }

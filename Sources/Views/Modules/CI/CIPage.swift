@@ -245,9 +245,17 @@ extension CIPage: ModulePage {
         }]
     }
 
+    /// A running job's run, from its run link (stay in Pultík: any run opens).
+    static func runRef(url: URL?) -> CIRunRef? {
+        guard let url, let runID = CIWatch.runID(in: url) else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count >= 2 else { return nil }
+        return CIRunRef(repo: "\(parts[0])/\(parts[1])", runID: runID)
+    }
+
     @ViewBuilder
     func detailContent(for object: ModuleObject) -> some View {
-        if let ref = runRef(for: object.id) {
+        if let ref = runRef(for: object.id) ?? Self.runRef(url: object.url) {
             CIRunDetailContent(store: store, ref: ref).id(ref)
         }
     }
@@ -271,10 +279,12 @@ private struct CIJobPageRow: View {
     let now: Date
     var selected = false
     @State private var hovering = false
+    @Environment(\.openRow) private var openRow
 
     var body: some View {
         Button {
-            if let url = job.runURL { NSWorkspace.shared.open(url) }
+            // Stay in Pultík: the run opens here; its page is ⌘↵.
+            openRow?(CIPage.jobID(job))
         } label: {
             HStack(spacing: 8) {
                 Circle().fill(Color.green.opacity(0.85))

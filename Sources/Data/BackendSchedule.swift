@@ -30,6 +30,7 @@ final class BackendSchedule {
     @ObservationIgnored private var order: [String] = []
     @ObservationIgnored private var inFlight: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var loops: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var started = false
 
     var isRunning: Bool { lanes.values.contains(where: \.running) }
 
@@ -38,10 +39,37 @@ final class BackendSchedule {
         if specs[name] == nil { order.append(name) }
         specs[name] = Spec(interval: interval, work: work)
         if lanes[name] == nil { lanes[name] = Lane() }
+        // A lane added while polling (the CI watch) starts its loop at once.
+        if started { start() }
+    }
+
+    /// Retires a lane (stay in Pultík: the CI watch exists only while a
+    /// detail with running checks is visible). A run in flight finishes;
+    /// nothing re-arms it.
+    func remove(_ name: String) {
+        loops[name]?.cancel()
+        loops[name] = nil
+        specs[name] = nil
+        order.removeAll { $0 == name }
+        lanes[name] = nil
+    }
+
+    func contains(_ name: String) -> Bool {
+        specs[name] != nil
+    }
+
+    /// An interval just changed (the visible module's refresh speed, N1):
+    /// every loop re-reads it now instead of finishing its 15 s sleep.
+    func nudge() {
+        guard started else { return }
+        loops.values.forEach { $0.cancel() }
+        loops = [:]
+        start()
     }
 
     /// Starts every lane's loop; idempotent.
     func start() {
+        started = true
         for name in order where loops[name] == nil {
             loops[name] = Task { [weak self] in
                 while !Task.isCancelled {
@@ -61,6 +89,7 @@ final class BackendSchedule {
     }
 
     func stop() {
+        started = false
         loops.values.forEach { $0.cancel() }
         loops = [:]
     }

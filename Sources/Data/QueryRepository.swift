@@ -142,6 +142,43 @@ final class QueryRepository {
         return typed
     }
 
+    /// What memory or the key's snapshot holds, at any age, without a fetch:
+    /// the caller judges currency itself (a change request against its
+    /// index's `updatedAt`). A snapshot read lands in memory.
+    /// `remember: false` peeks without pulling the snapshot into memory (a
+    /// background sync walking a hundred keys).
+    func held<Value>(_ resource: QueryResource<Value>, key: QueryKey,
+                     remember keeps: Bool = true) async -> (value: Value, fetchedAt: Date)? {
+        if let hit = cached(Value.self, key: key) { return hit }
+        guard resource.persists,
+              let snapshot = await store.load(Value.self, key: key, schema: resource.schema) else { return nil }
+        if let hit = cached(Value.self, key: key) { return hit }
+        if keeps { remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep) }
+        return (snapshot.value, snapshot.fetchedAt)
+    }
+
+    /// A background sync's answer (the warm set, D9): written to disk only,
+    /// so syncing a hundred objects never pushes what is on screen out of
+    /// memory. A copy memory already holds is refreshed in place.
+    /// The returned write can be awaited (a sync that promises "on disk").
+    @discardableResult
+    func persist<Value>(_ resource: QueryResource<Value>, key: QueryKey, value: Value,
+                        at date: Date = Date()) -> Task<Void, Never>? {
+        if memory[key] != nil { memory[key] = (value, date) }
+        guard resource.persists else { return nil }
+        let store = store
+        let schema = resource.schema
+        let keep = resource.keep
+        return Task.detached(priority: .utility) {
+            await store.save(value, key: key, schema: schema, fetchedAt: date, keep: keep)
+        }
+    }
+
+    /// Whether the key has a snapshot on disk, without reading it.
+    func isPersisted(_ key: QueryKey) async -> Bool {
+        await store.exists(key)
+    }
+
     /// Warm a key the operator just selected (D8: explicit selection only,
     /// inside the caller's budgets) without waiting for it.
     func prefetch<Value>(_ resource: QueryResource<Value>, key: QueryKey, maxAge: TimeInterval,

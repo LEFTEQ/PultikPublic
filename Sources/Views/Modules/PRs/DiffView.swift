@@ -15,7 +15,7 @@ import SwiftUI
 struct DiffView: NSViewRepresentable {
     static let chunkSize = 32
 
-    let lines: [GitHubPRDetail.DiffLine]
+    let lines: [DiffLine]
     /// The gutter's figure width, shared by every chunk of one file so the
     /// columns line up; nil = this view's own widest number.
     var digits: Int?
@@ -35,7 +35,7 @@ struct DiffView: NSViewRepresentable {
 }
 
 final class DiffTextView: NSTextView {
-    private var shown: (lines: [GitHubPRDetail.DiffLine], digits: Int)?
+    private var shown: (lines: [DiffLine], digits: Int)?
 
     init() {
         let storage = NSTextStorage()
@@ -66,14 +66,14 @@ final class DiffTextView: NSTextView {
         textContainer?.containerSize = NSSize(width: newSize.width, height: .greatestFiniteMagnitude)
     }
 
-    func show(_ lines: [GitHubPRDetail.DiffLine], digits: Int) {
+    func show(_ lines: [DiffLine], digits: Int) {
         if let shown, shown.lines == lines, shown.digits == digits { return }
         shown = (lines, digits)
         textStorage?.setAttributedString(Self.render(lines, digits: digits))
     }
 
     /// The widest line number, at least three figures.
-    static func digits(_ lines: [GitHubPRDetail.DiffLine]) -> Int {
+    static func digits(_ lines: [DiffLine]) -> Int {
         max(3, String(lines.compactMap { max($0.old ?? 0, $0.new ?? 0) }.max() ?? 0).count)
     }
 
@@ -93,7 +93,7 @@ final class DiffTextView: NSTextView {
     private static let ok = NSColor(Theme.ok)
     private static let danger = NSColor(Theme.danger)
 
-    static func render(_ lines: [GitHubPRDetail.DiffLine], digits: Int) -> NSAttributedString {
+    static func render(_ lines: [DiffLine], digits: Int) -> NSAttributedString {
         let advance = ("0" as NSString).size(withAttributes: [.font: font]).width
         // "old new ± " — wrapped continuations start under the code, not the gutter.
         let gutter = digits * 2 + 4

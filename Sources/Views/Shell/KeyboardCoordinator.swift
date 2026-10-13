@@ -25,6 +25,8 @@ struct KeyContext {
     /// keys, never Esc.
     var textViewFocused = false
     var module: PanelModule?
+    /// The strip's order (Settings ▸ Modules): ⌘1–9 and ←/→ follow it.
+    var order: [PanelModule] = PanelModule.allCases
     var text = ""
     /// The unread tail of a `.x` alias (`ModuleRouter.pendingToken`).
     var pendingToken = ""
@@ -44,14 +46,22 @@ struct KeyContext {
     var eve = false
     var noteEditing = false
     var noteExpanded = false
+    /// The detail's ⇥ targets on its top layer, and the one focused (D3).
+    var focusTargets: [String] = []
+    var focus: String?
+    /// The top card on the detail (D2), by its object key: its keys are the
+    /// card's, and ⌘R re-runs a failed run card's failed jobs.
+    var card: String?
 }
 
 /// One peel of Esc (copilot shell layered Esc): note edit → expanded note →
-/// eve → the field's text (completion, path card, filter) → detail →
-/// selection → page → module → Home → close. It never closes the panel
-/// while a layer remains.
+/// eve → the detail's focus ring → the top card (stay in Pultík D3) → the
+/// field's text (completion, path card, filter) → detail → selection →
+/// page → module → Home → close. It never closes the panel while a layer
+/// remains.
 enum EscStep: String, Equatable {
-    case cancelNoteEdit, foldNote, dismissEve, clearText, closeDetail, clearSelection, closePage, leaveModule, close
+    case cancelNoteEdit, foldNote, dismissEve, clearFocus, popCard, clearText, closeDetail, clearSelection, closePage,
+         leaveModule, close
 }
 
 /// What a keystroke means; the panel performs it.
@@ -88,6 +98,15 @@ enum KeyIntent: Equatable {
     /// A key typed into an entered module's empty filter: the tail of its
     /// `.x` token (`i` after `.c`) or the space that ends it is swallowed.
     case swallowToken(String)
+    /// ⇥ / ⇧⇥ in a detail: the next target on its top layer (D3).
+    case focus(Int)
+    /// ↵ on the focused target: a run badge pushes its card.
+    case activateFocus
+    /// The top card's keys (D11): ↑/↓ in its column, ⇥ between columns, ↵
+    /// narrows the next column. Never a mutation.
+    case cardMove(Int)
+    case cardColumn(Int)
+    case cardOpen
     /// Consumed, nothing to do: ⇥ on a row with nothing to triage.
     case ignore
 }
@@ -103,10 +122,11 @@ enum KeyboardCoordinator {
         let index = context.selection.flatMap { context.items.firstIndex(of: $0) }
         switch stroke.key {
         case let .character(key) where stroke.command:
-            if let digit = Int(key), let module = PanelModule.numbered(digit) { return .module(module) }
+            if let digit = Int(key), let module = PanelModule.numbered(digit, in: context.order) { return .module(module) }
             switch key {
             case "i": return context.module == nil ? nil : .toggleInspector
             case "r":
+                if let card = context.card { return .rerunFailed("run:" + card) }
                 guard context.module == .ci, context.detailOpen, let id = context.selection, id.hasPrefix("run:")
                 else { return nil }
                 return .rerunFailed(id)
@@ -128,7 +148,11 @@ enum KeyboardCoordinator {
             guard context.fieldFocused, context.text.isEmpty, !stroke.command, !stroke.shift,
                   !context.pathCard, !context.completion, !context.page, !context.eve, !context.noteEditing
             else { return nil }
-            return .module((context.module ?? .home).neighbour(stroke.key == .right ? 1 : -1))
+            return .module((context.module ?? .home).neighbour(stroke.key == .right ? 1 : -1, in: context.order))
+        case .down where context.card != nil:
+            return .cardMove(1)
+        case .up where context.card != nil:
+            return .cardMove(-1)
         case .down:
             guard !context.items.isEmpty else { return nil }
             return .select(context.items[index.map { min($0 + 1, context.items.count - 1) } ?? 0])
@@ -137,6 +161,8 @@ enum KeyboardCoordinator {
             guard let index else { return nil }
             return .select(index == 0 ? nil : context.items[index - 1])
         case .tab:
+            if context.card != nil { return .cardColumn(stroke.shift ? -1 : 1) }
+            if context.detailOpen, !context.focusTargets.isEmpty { return .focus(stroke.shift ? -1 : 1) }
             if context.pathCard, context.selection == nil { return .cyclePathVerb(stroke.shift ? -1 : 1) }
             if let id = context.selection {
                 // A module's other rows have nothing to triage, and ⇥ must not
@@ -148,6 +174,8 @@ enum KeyboardCoordinator {
         case .enter:
             // ↵ belongs to a note edit (and ⌘↵ to its Save).
             if context.noteEditing { return nil }
+            if !stroke.command, context.card != nil { return .cardOpen }
+            if !stroke.command, context.detailOpen, context.focus != nil { return .activateFocus }
             if stroke.command, context.notesDraft { return .createNote }
             if context.pathCard, context.selection == nil { return .runPathVerb }
             if let index {
@@ -177,6 +205,8 @@ enum KeyboardCoordinator {
         if context.noteEditing { return .cancelNoteEdit }
         if context.noteExpanded { return .foldNote }
         if context.eve { return .dismissEve }
+        if context.focus != nil { return .clearFocus }
+        if context.card != nil { return .popCard }
         if !context.text.isEmpty || context.pathCard { return .clearText }
         if context.detailOpen { return .closeDetail }
         if context.selection != nil { return .clearSelection }
@@ -200,7 +230,8 @@ extension KeyStroke {
         case 125: key = .down
         case 126: key = .up
         // Plain ←/→ only: ⌥ and ⌃ arrows stay the field's and the system's.
-        case 123, 124 where !flags.contains(.option) && !flags.contains(.control):
+        case 123 where !flags.contains(.option) && !flags.contains(.control),
+             124 where !flags.contains(.option) && !flags.contains(.control):
             key = event.keyCode == 123 ? .left : .right
         case 36, 76: key = .enter
         case 48: key = .tab
@@ -222,7 +253,7 @@ extension KeyStroke {
     /// ANSI key codes of the chords the panel owns.
     private static let chordKeys: [UInt16: String] = [
         18: "1", 19: "2", 20: "3", 21: "4", 23: "5", 22: "6", 26: "7", 28: "8", 25: "9",
-        34: "i", 9: "v", 8: "c",
+        34: "i", 9: "v", 8: "c", 15: "r",
     ]
 }
 

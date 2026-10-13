@@ -44,10 +44,10 @@ struct PRListPage: View {
         Self.inbox(store.inbox, hidden: hidden, matching: filter)
     }
 
-    /// Repos whose open list filled `GitHubEstate.openLimit`: their count is
+    /// Repos whose open list filled `ChangeRequestInbox.openLimit`: their count is
     /// a floor wherever their section draws.
     static func cappedRepos(_ store: StatusStore) -> Set<String> {
-        Set(store.repos.filter { $0.prs.count >= GitHubEstate.openLimit }.map(\.slug))
+        Set(store.repos.filter { $0.prs.count >= ChangeRequestInbox.openLimit }.map(\.slug))
     }
 
     /// The archive is searched once two characters are typed.
@@ -80,21 +80,24 @@ struct PRListPage: View {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let conversation = try? await store.prConversation(ref),
                   !Task.isCancelled else { return }
-            _ = try? await store.prFiles(ref, of: conversation)
+            _ = try? await store.prFiles(conversation)
         }
     }
 
-    /// The PR behind an object id: an inbox row by its database id, an
-    /// archive hit by `repo#number`.
-    func ref(for id: String) -> PRRef? {
+    /// The PR behind an object id: an inbox row by its database id, any other
+    /// by `archive:repo#number` — a search hit, or one opened from a link.
+    func ref(for id: String) -> ChangeRequestRef? {
         if id.hasPrefix("pr:"), let databaseID = Int(id.dropFirst(3)),
            let entry = store.inbox.first(where: { $0.id == databaseID }) {
-            return PRRef(repo: entry.repoSlug, number: entry.info.pr.number)
+            return ChangeRequestRef(repo: entry.repoSlug, number: entry.info.pr.number)
         }
-        if id.hasPrefix("archive:"), let hit = store.searchMatches.first(where: { "archive:\($0.id)" == id }) {
-            return PRRef(repo: hit.repoSlug, number: hit.number)
-        }
-        return nil
+        return Self.archiveRef(id)
+    }
+
+    /// `archive:owner/repo#123` → its ref.
+    static func archiveRef(_ id: String) -> ChangeRequestRef? {
+        guard id.hasPrefix("archive:") else { return nil }
+        return ChangeRequestRef(key: "gh:" + id.dropFirst(8))
     }
 }
 
@@ -110,9 +113,7 @@ extension PRListPage: ModulePage {
             if let status = entry.eveSession?.status { facts.append(.init(label: "eve session", value: status)) }
             return ModuleObject(id: "pr:\(entry.id)", title: info.pr.title, label: "#\(info.pr.number)",
                                 status: Self.status(info), meta: entry.repoName, symbol: "arrow.triangle.pull",
-                                project: entry.repoName, url: URL(string: info.pr.htmlUrl),
-                                context: [Chip(info.pr.head.ref, .neutral, symbol: "arrow.triangle.branch")],
-                                facts: facts)
+                                project: entry.repoName, url: URL(string: info.pr.htmlUrl), facts: facts)
         }
         let archive: [ModuleObject] = searching ? store.searchMatches.map { pr -> ModuleObject in
             var facts = [ModuleObject.Fact(label: "repo", value: pr.repoSlug),
@@ -124,7 +125,20 @@ extension PRListPage: ModulePage {
                                 symbol: "arrow.triangle.pull", project: pr.repoName, url: URL(string: pr.url),
                                 facts: facts)
         } : []
-        return inbox + archive
+        return inbox + archive + opened(beside: inbox + archive)
+    }
+
+    /// A PR opened from a link or a reference that no list holds (stay in
+    /// Pultík: every PR opens here): an object of its own, from the warm
+    /// set's conversation when it holds one.
+    private func opened(beside listed: [ModuleObject]) -> [ModuleObject] {
+        guard let id = selectedID, !listed.contains(where: { $0.id == id }), let ref = Self.archiveRef(id) else { return [] }
+        let held = store.cachedPRDetail(ref).conversation
+        let name = ref.repo.split(separator: "/").last.map(String.init) ?? ref.repo
+        return [ModuleObject(id: id, title: held?.title ?? ref.key, label: "#\(ref.number)",
+                             status: held.map { Chip($0.state.rawValue, .neutral) }, meta: name,
+                             symbol: "arrow.triangle.pull", project: name,
+                             url: held.flatMap { URL(string: $0.url) }, facts: [.init(label: "repo", value: ref.repo)])]
     }
 
     /// The mini app's diff is lazy items of its own scroller.
@@ -161,7 +175,7 @@ struct PRRepoSection: View {
 
     let group: Repo
     var selectedID: String?
-    /// The estate read stopped at `GitHubEstate.openLimit` open PRs: the
+    /// The estate read stopped at `ChangeRequestInbox.openLimit` open PRs: the
     /// repo may hold more, so its count reads `5+`, never complete.
     var capped = false
 
@@ -174,7 +188,7 @@ struct PRRepoSection: View {
             action: { OverviewURL.open(OverviewURL.repoPulls(group.slug)) },
             actionRole: .link,
             actionHelp: capped
-                ? "The newest \(GitHubEstate.openLimit) open PRs — open all of \(group.slug)'s on GitHub"
+                ? "The newest \(ChangeRequestInbox.openLimit) open PRs — open all of \(group.slug)'s on GitHub"
                 : "Open \(group.slug) pull requests on GitHub"
         )
             .padding(.horizontal, 8)
