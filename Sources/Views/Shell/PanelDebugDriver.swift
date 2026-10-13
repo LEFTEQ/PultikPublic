@@ -25,6 +25,14 @@ extension StatusPanelView {
                     if name == "enter" { submitPalette() }
                 }
             }
+        case "mark":
+            // A ⌘-click on the row (bulk D1); `all` is ⌘A, `none` is Esc's unmark.
+            switch info["text"] as? String ?? "" {
+            case "all": router.markAll(markableIDs)
+            case "none": router.clearMarks()
+            case let id where markableIDs.contains(id): router.toggleMark(id)
+            default: break
+            }
         case "home-toggle":
             let text = info["text"] as? String ?? ""
             let key = text == "fold" ? PRDigest<StatusStore.InboxPR>.foldKey : text
@@ -63,6 +71,13 @@ extension StatusPanelView {
                 },
                 "focus": router.focus ?? NSNull(),
                 "focusTargets": router.focusTargets,
+                // Bulk actions: the marked rows as drawn, the pane, and the module's batch.
+                "marks": markableIDs.filter(router.marks.contains),
+                "bulkShown": bulkShown,
+                "bulk": router.module.flatMap { BulkRuns.shared.batch($0) }.map { batch -> [String: Any] in
+                    ["verb": batch.verb, "shown": batch.shown, "running": batch.running, "summary": batch.summary,
+                     "rows": batch.rows.map { ["id": $0.id, "state": "\($0.state)"] }]
+                } ?? NSNull(),
                 "displayedModule": warmth.displayed.rawValue,
                 "mountedModules": warmth.mounted.map(\.rawValue),
                 "moduleBuilds": warmth.totalBuilds,

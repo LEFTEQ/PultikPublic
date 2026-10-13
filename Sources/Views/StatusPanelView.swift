@@ -490,7 +490,7 @@ struct StatusPanelView: View {
     func modulePage(_ module: PanelModule, inputs: ModuleInputs) -> (any ModulePage)? {
         let filter = inputs.filter
         let selected = inputs.selection
-        let open: (String) -> Void = { router.openDetail($0) }
+        let open: (String) -> Void = { clickRow($0) }
         switch module {
         case .home:
             return nil
@@ -533,9 +533,22 @@ struct StatusPanelView: View {
     }
 
     func hosted(_ page: some ModulePage, module: PanelModule, inputs: ModuleInputs) -> AnyView {
-        AnyView(ModuleHost(page: page, objects: pageObjects(module, inputs), selection: inputs.selection,
-                           detailOpen: inputs.detailOpen, inspectorOpen: inputs.inspectorOpen, stack: inputs.stack,
-                           onPop: { popCard() }, card: { cardView($0) }))
+        let objects = pageObjects(module, inputs)
+        let entered = router.module == module
+        let markable = objects.filter(\.markable)
+        // Only the entered module marks; a warm hidden one still shows its batch.
+        let marks = RowMarks(marked: entered ? router.marks : [], markable: Set(markable.map(\.id)),
+                             states: BulkRuns.shared.states(module),
+                             toggle: entered && !page.bulkVerbs.isEmpty ? { router.toggleMark($0) } : nil)
+        let marked = markable.filter { marks.marked.contains($0.id) }
+        let bulk = entered && (!marked.isEmpty || BulkRuns.shared.batch(module)?.shown == true)
+            ? AnyView(BulkPane(module: module, marked: marked, markable: markable.count, verbs: page.bulkVerbs,
+                               router: router))
+            : nil
+        return AnyView(ModuleHost(page: page, objects: objects, selection: inputs.selection,
+                                  detailOpen: inputs.detailOpen, inspectorOpen: inputs.inspectorOpen, stack: inputs.stack,
+                                  onPop: { popCard() }, card: { cardView($0) }, bulk: bulk)
+                .environment(\.rowMarks, marks))
     }
 
     /// One warm body in the content stack: drawn and hit-testable only while
@@ -570,7 +583,32 @@ struct StatusPanelView: View {
 
     /// Is the selected object's detail on screen (not just requested)?
     var detailShown: Bool {
-        router.detailOpen && moduleObjects.contains { $0.id == router.selection }
+        !bulkShown && router.detailOpen && moduleObjects.contains { $0.id == router.selection }
+    }
+
+    /// The entered module's rows a bulk verb can take, in drawn order (bulk D1).
+    var markableIDs: [String] {
+        moduleObjects.filter(\.markable).map(\.id)
+    }
+
+    /// The bulk pane holds the detail's place: marked rows the list draws,
+    /// or a batch still on screen.
+    var bulkShown: Bool {
+        guard let module = router.module else { return false }
+        return markableIDs.contains(where: router.marks.contains) || BulkRuns.shared.batch(module)?.shown == true
+    }
+
+    /// A module row's click (bulk D1): ⌘ toggles its mark and ⇧ marks the
+    /// range from the cursor where a bulk verb can take it; a plain click
+    /// drops the marks and opens its detail.
+    func clickRow(_ id: String) {
+        let markable = markableIDs
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if markable.contains(id), flags.contains(.command) { return router.toggleMark(id) }
+        if markable.contains(id), flags.contains(.shift) { return router.markRange(to: id, in: markable) }
+        router.clearMarks()
+        if let module = router.module { BulkRuns.shared.dismiss(module) }
+        router.openDetail(id)
     }
 
     /// A PR row on Home or in the global results: ↵ opens its detail in PRs
@@ -598,7 +636,7 @@ struct StatusPanelView: View {
     /// global results the row's own ↵ — a PR opens its detail in PRs.
     func openRow(_ id: String) {
         if router.module != nil {
-            router.openDetail(id)
+            clickRow(id)
         } else if !perform(.activate(id)), id.hasPrefix("pr:") || id.hasPrefix("archive:") {
             // A PR row no palette list holds (Home's tiles, a project page).
             openPRDetail(id)
@@ -618,6 +656,7 @@ struct StatusPanelView: View {
     func keyContext(synthetic: Bool = false) -> KeyContext {
         let global = router.module == nil
         let shown = detailShown
+        let bulk = bulkShown
         return KeyContext(
             fieldFocused: synthetic || paletteFocused,
             textViewFocused: !synthetic && !paletteFocused && NSApp.keyWindow?.firstResponder is NSTextView,
@@ -635,9 +674,12 @@ struct StatusPanelView: View {
             eve: eveAskedPrompt != nil,
             noteEditing: global && editingNoteID != nil,
             noteExpanded: global && expandedNoteID != nil,
-            focusTargets: shown ? router.focusTargets : [],
-            focus: shown ? router.focus : nil,
-            card: shown ? router.stack.last?.id : nil
+            focusTargets: shown || bulk ? router.focusTargets : [],
+            focus: shown || bulk ? router.focus : nil,
+            card: shown ? router.stack.last?.id : nil,
+            markable: global ? [] : markableIDs,
+            bulk: bulk,
+            bulkConfirm: bulk && router.confirming != nil
         )
     }
 
@@ -742,6 +784,10 @@ struct StatusPanelView: View {
             router.moveCardColumn(step)
         case .cardOpen:
             router.openInCard()
+        case let .extendMarks(step):
+            router.extendMarks(step, in: keyItems, markable: markableIDs)
+        case .markAll:
+            router.markAll(markableIDs)
         case .ignore:
             break
         }
@@ -762,6 +808,11 @@ struct StatusPanelView: View {
             withAnimation(Theme.Motion.focus(reduceMotion)) { router.clearFocus() }
         case .popCard:
             popCard()
+        case .cancelConfirm:
+            router.confirm(nil)
+        case .clearMarks:
+            router.clearMarks()
+            if let module = router.module { BulkRuns.shared.dismiss(module) }
         case .clearText:
             // A mode, completion or path card exits; a filter empties.
             query = ""

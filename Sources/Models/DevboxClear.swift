@@ -33,6 +33,17 @@ struct DevboxClearReport: Sendable {
     static func failure(_ reason: String, log: String = "") -> Self {
         Self(ok: false, summary: reason, diagnostics: [], next: [], log: log)
     }
+
+    /// One line for a bulk row, which has no log below it (bulk D5): the
+    /// primary diagnostic with its fix, else the last line the command
+    /// wrote to stderr, else the summary.
+    var reason: String {
+        if let primary = diagnostics.first(where: { $0.severity == "error" }) ?? diagnostics.first {
+            return [primary.detail ?? primary.code, primary.fix].compactMap { $0 }.joined(separator: " — ")
+        }
+        let stderr = log.components(separatedBy: "\n\nstderr:\n").dropFirst().last ?? ""
+        return stderr.split(whereSeparator: \.isNewline).last.map(String.init) ?? summary
+    }
 }
 
 struct DevboxClearPreview: Sendable {

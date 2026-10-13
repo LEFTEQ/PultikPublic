@@ -20,6 +20,9 @@ final class DevboxClearTests: XCTestCase {
         XCTAssertFalse(malformed.ok)
         XCTAssertTrue(malformed.log.contains("unexpected output"))
         XCTAssertTrue(malformed.log.contains("connection refused"))
+        // A bulk row's one line: the error with its fix, else stderr's last line.
+        XCTAssertEqual(report.reason, "Workspace is held — devbox unhold demo --box b")
+        XCTAssertEqual(malformed.reason, "connection refused")
     }
 
     func testSummaryJoinsStatusWithNumstatAndJudgesTheChosenAction() {

@@ -231,7 +231,7 @@ struct MacHealthPage: View {
             }
             ForEach(rows) { finding in
                 let id = Self.objectID(finding)
-                MacHealthFindingRow(finding: finding, now: now(),
+                MacHealthFindingRow(finding: finding, markID: id, now: now(),
                                     state: stops[finding.id],
                                     selected: selectedID == id,
                                     onOpen: { onOpen(id) },
@@ -285,6 +285,42 @@ extension MacHealthPage: ModulePage {
     var listWidth: CGFloat { 580 }
     var minListWidth: CGFloat { 580 }
 
+    /// Stop on every marked finding toolkit allows it for (bulk D4): one
+    /// `macwatch stop` call for all their processes, each finding told its
+    /// own answer. Only a fresh report's findings are ever offered.
+    var bulkVerbs: [BulkVerb] {
+        let findings = health.status.fresh?.findings ?? []
+        func finding(_ id: String) -> MacHealth.Finding? { findings.first { Self.objectID($0) == id } }
+        return [BulkVerb(
+            id: "stop", title: "Stop", symbol: "stop.circle", noun: "finding", destructive: true,
+            help: "Asks first — names every process before anything is stopped",
+            caution: "toolkit re-checks each process is the same one, still flagged, before it signals it.",
+            skip: { id in
+                guard let finding = finding(id) else { return "no longer in the report" }
+                return finding.stop.supported && finding.stop.argv != nil ? nil : finding.stop.reason ?? "not stoppable here"
+            },
+            describe: { id in finding(id).map { MacHealthFormat.processes($0.processes) } },
+            run: { ids, report in
+                let targets = ids.compactMap { id in
+                    finding(id).flatMap { finding in
+                        finding.stop.argv.map { argv in
+                            MacHealthStop.Target(id: id, argv: argv,
+                                                 names: Dictionary(finding.processes.map { ($0.pid, $0.name) }) { first, _ in first })
+                        }
+                    }
+                }
+                for target in targets { report(target.id, .running) }
+                for (id, outcome) in await MacHealthStop.run(targets) {
+                    switch outcome {
+                    case let .stopped(said): report(id, .done(said))
+                    case let .refused(why): report(id, .failed("refused — \(why)"))
+                    }
+                }
+                health.reread()
+            }
+        )]
+    }
+
     func findingRows(_ report: MacHealth) -> [MacHealth.Finding] {
         report.findingsWorstFirst.filter { matches($0.title, $0.family, $0.project, $0.detail) }
     }
@@ -307,7 +343,7 @@ extension MacHealthPage: ModulePage {
             }
             return ModuleObject(id: Self.objectID(finding), title: finding.title, status: status,
                                 meta: finding.family, symbol: MacHealthTone.symbol(finding.severity),
-                                project: finding.project, facts: facts)
+                                project: finding.project, facts: facts, markable: finding.stop.supported)
         }
     }
 
@@ -481,6 +517,8 @@ enum MacHealthTone {
 /// and runs only on a second, explicit click.
 private struct MacHealthFindingRow: View {
     let finding: MacHealth.Finding
+    /// Its object id: the mark's check takes the severity glyph's place.
+    let markID: String
     let now: Date
     let state: MacHealthStopState?
     var selected = false
@@ -493,10 +531,12 @@ private struct MacHealthFindingRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
-            Image(systemName: MacHealthTone.symbol(finding.severity))
-                .font(.system(size: 9.5))
-                .foregroundStyle(MacHealthTone.color(finding.severity))
-                .frame(width: 11)
+            MarkSlot(id: markID, hovering: hovering, size: 9.5) {
+                Image(systemName: MacHealthTone.symbol(finding.severity))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(MacHealthTone.color(finding.severity))
+            }
+            .frame(width: 11)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(finding.title)
@@ -542,7 +582,7 @@ private struct MacHealthFindingRow: View {
         }
         .padding(.horizontal, RailRowMetrics.inset)
         .padding(.vertical, 6)
-        .background { RowBackground(selected: selected, hovering: hovering || state != nil) }
+        .background { RowBackground(selected: selected, hovering: hovering || state != nil, mark: markID) }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture(perform: onOpen)

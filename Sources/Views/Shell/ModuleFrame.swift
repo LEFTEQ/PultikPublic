@@ -29,6 +29,9 @@ struct ModuleObject: Identifiable {
     var context: [Chip] = []
     /// The context sections below the content, or in the ⌘I inspector.
     var facts: [Fact] = []
+    /// A bulk verb can take it (bulk actions D1): ⌘-click, ⇧-click, ⇧↑/⇧↓
+    /// and ⌘A mark it. A lane, a running job or the fans row never are.
+    var markable = false
 }
 
 /// A module's list as the shell hosts it (D4-B): the page draws its rows —
@@ -54,12 +57,16 @@ protocol ModulePage: View {
     /// live in ⌘I's inspector. A lazy stack only stays lazy as the scroll
     /// view's direct content.
     var detailScrollsItself: Bool { get }
+    /// What the marked rows can take, in the bulk pane's order (bulk D2).
+    /// Read on the main actor when the pane draws and when a verb runs.
+    var bulkVerbs: [BulkVerb] { get }
 }
 
 extension ModulePage {
     var listWidth: CGFloat { 480 }
     var minListWidth: CGFloat { 0 }
     var detailScrollsItself: Bool { false }
+    var bulkVerbs: [BulkVerb] { [] }
 }
 
 extension ModulePage where DetailContent == EmptyView {
@@ -80,11 +87,13 @@ struct ModuleHost<Page: ModulePage>: View {
     var stack: [DetailRef] = []
     var onPop: () -> Void = {}
     var card: (DetailRef) -> AnyView = { _ in AnyView(EmptyView()) }
+    /// The bulk pane (bulk D2): while rows are marked it holds the detail's place.
+    var bulk: AnyView?
 
     var body: some View {
-        let open = detailOpen ? selection.flatMap { id in objects.first { $0.id == id } } : nil
+        let open = detailOpen && bulk == nil ? selection.flatMap { id in objects.first { $0.id == id } } : nil
         ModuleFrame(listWidth: page.listWidth, minListWidth: page.minListWidth,
-                    inspectorOpen: inspectorOpen, detail: open) {
+                    inspectorOpen: inspectorOpen, detail: open, bulk: bulk) {
             page
         } detailView: { object in
             StackedDetail(stack: stack, onPop: onPop) {
@@ -153,6 +162,8 @@ struct ModuleFrame<List: View, Detail: View, Inspector: View>: View {
     var minListWidth: CGFloat = 0
     var inspectorOpen: Bool
     let detail: ModuleObject?
+    /// The bulk pane, drawn where the detail would be.
+    var bulk: AnyView?
     @ViewBuilder var list: () -> List
     @ViewBuilder var detailView: (ModuleObject) -> Detail
     @ViewBuilder var inspector: (ModuleObject) -> Inspector
@@ -165,7 +176,8 @@ struct ModuleFrame<List: View, Detail: View, Inspector: View>: View {
         GeometryReader { geo in
             let inspecting = inspectorOpen && detail != nil
             let room = geo.size.width - (inspecting ? Self.inspectorWidth + 1 : 0) - Self.detailFloor - 1
-            let width = detail == nil ? geo.size.width : min(listWidth, max(320, room))
+            let paned = detail != nil || bulk != nil
+            let width = paned ? min(listWidth, max(320, room)) : geo.size.width
             HStack(spacing: 0) {
                 // Always the same scroller, so the page keeps its state when
                 // the detail or inspector narrows it: it only scrolls once the
@@ -177,7 +189,12 @@ struct ModuleFrame<List: View, Detail: View, Inspector: View>: View {
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                 .frame(width: width)
-                if let detail {
+                if let bulk {
+                    divider
+                    bulk
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .background(Theme.canvas)
+                } else if let detail {
                     divider
                     detailView(detail)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -190,7 +207,7 @@ struct ModuleFrame<List: View, Detail: View, Inspector: View>: View {
                     }
                 }
             }
-            .animation(.snappy(duration: 0.2), value: detail == nil)
+            .animation(.snappy(duration: 0.2), value: paned)
             .animation(.snappy(duration: 0.2), value: inspecting)
         }
     }

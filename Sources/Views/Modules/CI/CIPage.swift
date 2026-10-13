@@ -8,6 +8,7 @@ struct CIPage: View {
     let store: StatusStore
     let filter: String
     var selectedID: String?
+    @Environment(\.openRow) private var openRow
 
     private enum Slice: String {
         case running, queued, failed
@@ -129,7 +130,9 @@ struct CIPage: View {
                                 meta: run.at.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated)),
                                 help: run.url?.absoluteString ?? "",
                                 selected: selectedID == run.id,
-                                action: { if let url = run.url { NSWorkspace.shared.open(url) } })
+                                mark: run.id,
+                                // Stay in Pultík: the run's detail; its page is ⌘↵.
+                                action: { openRow?(run.id) })
                             .id(run.id)
                     }
                 }
@@ -223,7 +226,7 @@ extension CIPage: ModulePage {
                                     status: Chip("failed", .failing), meta: run.branch, symbol: "xmark.octagon",
                                     project: run.repo, url: run.url, verbs: rerunVerb(run.id),
                                     context: run.branch.map { [Chip($0, .neutral, symbol: "arrow.triangle.branch")] } ?? [],
-                                    facts: facts)
+                                    facts: facts, markable: runRef(for: run.id) != nil)
             }
         }
         return objects
@@ -233,6 +236,30 @@ extension CIPage: ModulePage {
     func runRef(for id: String) -> CIRunRef? {
         guard id.hasPrefix("run:"), let runID = Int(id.dropFirst(4)) else { return nil }
         return store.ciRunRef(runID: runID)
+    }
+
+    /// Re-run failed on every marked failed run (bulk D6): one at a time,
+    /// each read fresh and re-run only while it is still the failed attempt
+    /// — never a whole-run re-run, and no other CI verb.
+    var bulkVerbs: [BulkVerb] {
+        let store = store
+        return [BulkVerb(
+            id: "rerun", title: "Re-run failed", symbol: "arrow.clockwise", noun: "run",
+            help: "Re-run each run's failed jobs once GitHub confirms that attempt still failed",
+            skip: { id in runRef(for: id) == nil ? "not a workflow run" : nil },
+            run: { ids, report in
+                for id in ids {
+                    guard let ref = runRef(for: id) else { continue }
+                    report(id, .running)
+                    switch await CIRerunCenter.shared.rerunNow(ref, shown: store.cachedCIRun(ref)?.run, store: store) {
+                    case .requested: report(id, .done("re-run of its failed jobs requested"))
+                    case .checking: report(id, .skipped("already being re-run"))
+                    case let .skipped(why): report(id, .skipped(why))
+                    case let .failed(why): report(id, .failed(why))
+                    }
+                }
+            }
+        )]
     }
 
     /// Re-run failed (⌘R): the detail's primary verb, the same path the key

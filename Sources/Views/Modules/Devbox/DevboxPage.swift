@@ -182,7 +182,7 @@ struct DevboxPage: View {
                 .padding(.bottom, 2)
             ForEach(rows) { workspace in
                 let id = Self.objectID(workspace)
-                DevboxTableRow(workspace: workspace, store: store, onClear: { clearing = workspace },
+                DevboxTableRow(workspace: workspace, markID: id, store: store, onClear: { clearing = workspace },
                                selected: selectedID == id, onOpen: { onOpen(id) })
                     .id(id)
             }
@@ -220,6 +220,75 @@ extension DevboxPage: ModulePage {
     /// `DevboxColumn` at its floors, the row inset and the page padding.
     var minListWidth: CGFloat { 580 }
 
+    /// The row's lifecycle verbs on every marked workspace (bulk D5), one
+    /// after another — the CLI takes one workspace per call and its
+    /// admission locks — each row settled as it lands and the boxes re-read
+    /// once at the end. Clear is Clear this's Keep: the runtime only, never
+    /// a worktree; that stays a per-row decision in its popover.
+    var bulkVerbs: [BulkVerb] {
+        let workspaces = store.devboxWorkspaces
+        let store = store
+        func workspace(_ id: String) -> DevboxWorkspace? { workspaces.first { Self.objectID($0) == id } }
+        func eligible(_ reason: @escaping (DevboxWorkspace) -> String?) -> @MainActor (String) -> String? {
+            { id in workspace(id).map(reason) ?? "gone from the box" }
+        }
+        func each(_ done: String, _ work: @escaping (DevboxWorkspace) async -> String?)
+            -> @MainActor ([String], @escaping BulkVerb.Report) async -> Void
+        {
+            { ids, report in
+                for id in ids {
+                    guard let workspace = workspace(id) else {
+                        report(id, .skipped("gone from the box"))
+                        continue
+                    }
+                    report(id, .running)
+                    report(id, await work(workspace).map(BulkRowState.failed) ?? .done(done))
+                }
+                await store.refreshDevboxNow()
+            }
+        }
+        let describe: @MainActor (String) -> String? = { id in
+            workspace(id).map { [$0.box?.name, $0.project, $0.branch].compactMap { $0 }.joined(separator: " · ") }
+        }
+        return [
+            BulkVerb(id: "park", title: "Park", symbol: "parkingsign.circle", noun: "workspace", destructive: true,
+                     help: "Stop each stack; identity, ports and data stay, and Revive brings it back",
+                     caution: "Each stack stops. Identity, ports and data stay; Revive brings it back in ~16 s.",
+                     skip: eligible { $0.isParked ? "already parked" : nil }, describe: describe,
+                     run: each("parked") { await DevboxClient.shared.attempt(.park, workspace: $0.name) }),
+            BulkVerb(id: "revive", title: "Revive", symbol: "play.circle", noun: "workspace",
+                     help: "devbox up from each workspace's own Mac worktree",
+                     skip: eligible { workspace in
+                         guard workspace.isParked else { return "running" }
+                         guard let macPath = workspace.macPath else { return "the box recorded no Mac path" }
+                         return DevboxLauncher.localDirectory(macPath, quiet: true) == nil ? "\(macPath) is not on this Mac" : nil
+                     },
+                     run: each("revived") { workspace in
+                         guard let macPath = workspace.macPath else { return "no Mac path" }
+                         return await DevboxClient.shared.up(workspace: workspace.name, macPath: macPath)
+                             ? nil : "devbox up failed — Console has its output"
+                     }),
+            BulkVerb(id: "hold", title: "Hold", symbol: "pin", noun: "workspace",
+                     help: "Exempt each from the park sweep",
+                     skip: eligible { $0.hold ? "already held" : nil },
+                     run: each("held") { await DevboxClient.shared.attempt(.hold, workspace: $0.name) }),
+            BulkVerb(id: "unhold", title: "Unhold", symbol: "pin.slash", noun: "workspace",
+                     help: "Return each to auto-parking",
+                     skip: eligible { $0.hold ? nil : "not held" },
+                     run: each("unheld") { await DevboxClient.shared.attempt(.unhold, workspace: $0.name) }),
+            BulkVerb(id: "clear", title: "Clear", symbol: "trash", noun: "workspace", destructive: true,
+                     help: "Retire each runtime; every source, worktree, commit and the data stay",
+                     caution: "Retires each runtime. Mac source, worktrees, commits, the guest's source and its data all stay — removing a worktree is Clear this, one row at a time.",
+                     skip: eligible { $0.hold ? "held — unhold it first" : nil }, describe: describe,
+                     run: each("cleared — source and data kept") { workspace in
+                         let report = await DevboxClient.shared.clearRuntime(workspace)
+                         guard !report.ok else { return nil }
+                         NSLog("pultik: bulk clear %@ failed:\n%@", workspace.name, report.log)
+                         return report.reason
+                     }),
+        ]
+    }
+
     var objects: [ModuleObject] {
         let rows = workspaces
         return (Self.running(rows) + Self.parked(rows)).map { workspace in
@@ -239,7 +308,7 @@ extension DevboxPage: ModulePage {
                                 meta: [workspace.project, workspace.branch].compactMap { $0 }.joined(separator: " · "),
                                 symbol: "shippingbox", project: workspace.project,
                                 context: workspace.hold ? [Chip("held", .neutral, symbol: "pin.fill")] : [],
-                                facts: facts)
+                                facts: facts, markable: true)
         }
     }
 
@@ -269,6 +338,8 @@ private enum DevboxColumn {
 /// every idle line in the panel wears; a stale one's age is orange.
 private struct DevboxTableRow: View {
     let workspace: DevboxWorkspace
+    /// Its object id: the mark's check takes the dot's place.
+    let markID: String
     let store: StatusStore
     let onClear: () -> Void
     var selected = false
@@ -295,7 +366,7 @@ private struct DevboxTableRow: View {
     var body: some View {
         HStack(spacing: DevboxColumn.spacing) {
             HStack(spacing: RailRowMetrics.dotGap) {
-                Group {
+                MarkSlot(id: markID, hovering: hovering, size: 9) {
                     if workspace.isParked {
                         Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1)
                     } else {
@@ -339,7 +410,7 @@ private struct DevboxTableRow: View {
         }
         .padding(.horizontal, RailRowMetrics.inset)
         .padding(.vertical, RailRowMetrics.verticalInset)
-        .background { RowBackground(selected: selected, hovering: hovering) }
+        .background { RowBackground(selected: selected, hovering: hovering, mark: markID) }
         .onHover { hovering = $0 }
         .help(help)
         .accessibilityElement(children: .contain)

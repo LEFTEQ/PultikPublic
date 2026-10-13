@@ -876,16 +876,21 @@ actor DevboxClient {
     /// driver forwards the verb to the box by name.
     @discardableResult
     func run(_ verb: WorkspaceVerb, workspace: String) async -> Bool {
+        await attempt(verb, workspace: workspace) == nil
+    }
+
+    /// `run`, saying why it failed: nil is success, else the last line the
+    /// command wrote to stderr — a bulk verb's row shows it (bulk D5).
+    func attempt(_ verb: WorkspaceVerb, workspace: String) async -> String? {
         guard DevboxName.isValid(workspace) else {
             NSLog("pultik: refusing devbox %@ — unsafe workspace name", verb.rawValue)
-            return false
+            return "unsafe workspace name"
         }
         let result = localDevbox([verb.rawValue, workspace], timeout: 90)
-        if !result.ok {
-            NSLog("pultik: devbox %@ %@ failed: %@", verb.rawValue, workspace,
-                  result.stderr.isEmpty ? "no output" : result.stderr)
-        }
-        return result.ok
+        guard !result.ok else { return nil }
+        NSLog("pultik: devbox %@ %@ failed: %@", verb.rawValue, workspace,
+              result.stderr.isEmpty ? "no output" : result.stderr)
+        return result.stderr.split(whereSeparator: \.isNewline).last.map(String.init) ?? "devbox \(verb.rawValue) failed"
     }
 
     /// Explicit operator clear. Source removal is separately selected after
@@ -901,12 +906,19 @@ actor DevboxClient {
                 return .failure("Local work changed or could not be inspected. Refresh the changes preview before removing its worktree.", log: current.log)
             }
         }
-        let arguments = workspaceArguments("clear", workspace)
-        let result = localDevbox(arguments, timeout: 300, retainFailureOutput: true)
-        let report = DevboxClearReport.command(arguments, ok: result.ok, stdout: result.stdout, stderr: result.stderr)
+        let report = clearRuntime(workspace)
         guard report.ok, source != .keep else { return report }
         let policy = clearWorktree
         return await Task.detached { policy.remove(preview, source: source, after: report) }.value
+    }
+
+    /// Clear this's Keep — the runtime retired; Mac source, guest source and
+    /// data stay. Bulk Clear runs only this (bulk D5).
+    func clearRuntime(_ workspace: DevboxWorkspace) -> DevboxClearReport {
+        guard DevboxName.isValid(workspace.name) else { return .failure("Unsafe workspace name") }
+        let arguments = workspaceArguments("clear", workspace)
+        let result = localDevbox(arguments, timeout: 300, retainFailureOutput: true)
+        return .command(arguments, ok: result.ok, stdout: result.stdout, stderr: result.stderr)
     }
 
     private func workspaceArguments(_ verb: String, _ workspace: DevboxWorkspace) -> [String] {

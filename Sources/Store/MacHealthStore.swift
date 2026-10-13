@@ -132,15 +132,21 @@ enum MacHealthStop {
     /// refusal, naming what did stop too. Without one, the exit status does,
     /// with stderr as the reason. `names` maps the finding's pids to names.
     static func outcome(status: Int32, stdout: Data, stderr: String, names: [Int: String] = [:]) -> Outcome {
-        func named(_ pid: Int) -> String { names[pid].map { "\($0) (\(pid))" } ?? "\(pid)" }
-        var reply: Reply?
-        if !stdout.isEmpty {
-            do {
-                reply = try JSONDecoder().decode(Reply.self, from: stdout)
-            } catch {
-                NSLog("pultik: macwatch stop printed no readable reply — %@", ConfigIssueSink.describe(error))
-            }
+        outcome(reply: decode(stdout), status: status, stderr: stderr, names: names)
+    }
+
+    private static func decode(_ stdout: Data) -> Reply? {
+        guard !stdout.isEmpty else { return nil }
+        do {
+            return try JSONDecoder().decode(Reply.self, from: stdout)
+        } catch {
+            NSLog("pultik: macwatch stop printed no readable reply — %@", ConfigIssueSink.describe(error))
+            return nil
         }
+    }
+
+    private static func outcome(reply: Reply?, status: Int32, stderr: String, names: [Int: String]) -> Outcome {
+        func named(_ pid: Int) -> String { names[pid].map { "\($0) (\(pid))" } ?? "\(pid)" }
         let stopped = (reply?.stopped ?? []).map { "\(named($0.pid))\($0.signal == "KILL" ? " after SIGKILL" : "")" }
         let refused = (reply?.refused ?? []).map { "\(named($0.pid)) — \($0.reason)" }
         if !refused.isEmpty {
@@ -158,10 +164,104 @@ enum MacHealthStop {
         guard let resolved = resolve(argv) else {
             return .refused("toolkit not found — brew install --cask toolkit")
         }
-        return await Task.detached(priority: .userInitiated) { execute(resolved, names: names) }.value
+        let exit = await Task.detached(priority: .userInitiated) { execute(resolved) }.value
+        return outcome(status: exit.status, stdout: exit.stdout, stderr: exit.stderr, names: names)
     }
 
-    private static func execute(_ argv: [String], names: [Int: String]) -> Outcome {
+    // MARK: - Bulk Stop (bulk actions D4)
+
+    /// One marked finding: its object id, its `stop.argv`, its pids' names.
+    struct Target {
+        let id: String
+        let argv: [String]
+        let names: [Int: String]
+    }
+
+    /// The `--pid`/`--started` pairs an argv asks for, after its command.
+    /// Nil when it is not that shape — it then runs on its own.
+    static func pairs(_ argv: [String]) -> (command: [String], pairs: [(pid: String, started: String)])? {
+        guard let first = argv.firstIndex(of: "--pid") else { return nil }
+        var pairs: [(pid: String, started: String)] = []
+        var rest = argv[first...]
+        while !rest.isEmpty {
+            let pair = Array(rest.prefix(4))
+            guard pair.count == 4, pair[0] == "--pid", pair[2] == "--started", Int(pair[1]) != nil else { return nil }
+            pairs.append((pair[1], pair[3]))
+            rest = rest.dropFirst(4)
+        }
+        return (Array(argv[..<first]), pairs)
+    }
+
+    /// Several findings' argvs as ONE call: their shared command with every
+    /// pair, each pid once — toolkit samples the machine once, not once per
+    /// finding, and still re-checks every process. Nil when the commands
+    /// differ or one is not the expected shape.
+    static func combined(_ argvs: [[String]]) -> [String]? {
+        var command: [String]?
+        var pairs: [(pid: String, started: String)] = []
+        for argv in argvs {
+            guard let parsed = Self.pairs(argv), command == nil || command == parsed.command else { return nil }
+            command = parsed.command
+            for pair in parsed.pairs where !pairs.contains(where: { $0.pid == pair.pid }) {
+                pairs.append(pair)
+            }
+        }
+        guard let command, !pairs.isEmpty else { return nil }
+        return command + pairs.flatMap { ["--pid", $0.pid, "--started", $0.started] }
+    }
+
+    /// One combined reply split back per finding: each hears only its own
+    /// pids. A reply that does not parse gives every finding the call's own
+    /// outcome; a finding the reply never mentions is told so.
+    static func outcomes(status: Int32, stdout: Data, stderr: String, targets: [Target]) -> [String: Outcome] {
+        let reply = decode(stdout)
+        return targets.reduce(into: [:]) { outcomes, target in
+            guard let reply else {
+                outcomes[target.id] = outcome(reply: nil, status: status, stderr: stderr, names: target.names)
+                return
+            }
+            let pids = Set((pairs(target.argv)?.pairs ?? []).compactMap { Int($0.pid) })
+            let own = Reply(stopped: reply.stopped?.filter { pids.contains($0.pid) },
+                            refused: reply.refused?.filter { pids.contains($0.pid) })
+            outcomes[target.id] = (own.stopped ?? []).isEmpty && (own.refused ?? []).isEmpty
+                ? .refused("toolkit did not answer for its processes")
+                : outcome(reply: own, status: status, stderr: stderr, names: target.names)
+        }
+    }
+
+    /// Stops every target: one call per command their argvs share, and a
+    /// call of its own for an argv of another shape. Never retried.
+    static func run(_ targets: [Target]) async -> [String: Outcome] {
+        var groups: [(command: [String], targets: [Target])] = []
+        var alone: [Target] = []
+        for target in targets {
+            guard let command = pairs(target.argv)?.command else {
+                alone.append(target)
+                continue
+            }
+            if let index = groups.firstIndex(where: { $0.command == command }) {
+                groups[index].targets.append(target)
+            } else {
+                groups.append((command, [target]))
+            }
+        }
+        var outcomes: [String: Outcome] = [:]
+        for group in groups {
+            guard let argv = combined(group.targets.map(\.argv)), let resolved = resolve(argv) else {
+                for target in group.targets { outcomes[target.id] = .refused("toolkit not found — brew install --cask toolkit") }
+                continue
+            }
+            let exit = await Task.detached(priority: .userInitiated) { execute(resolved) }.value
+            outcomes.merge(Self.outcomes(status: exit.status, stdout: exit.stdout, stderr: exit.stderr, targets: group.targets)) { _, new in new }
+        }
+        for target in alone {
+            outcomes[target.id] = await run(target.argv, names: target.names)
+        }
+        return outcomes
+    }
+
+    /// A launch failure reads as a failed exit whose stderr says why.
+    private static func execute(_ argv: [String]) -> (status: Int32, stdout: Data, stderr: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: argv[0])
         process.arguments = Array(argv.dropFirst())
@@ -176,10 +276,9 @@ enum MacHealthStop {
             try process.run()
         } catch {
             NSLog("pultik: macwatch stop could not start — %@", error.localizedDescription)
-            return .refused("could not start toolkit — \(error.localizedDescription)")
+            return (-1, Data(), "could not start toolkit — \(error.localizedDescription)")
         }
         let (out, err) = ProcessOutput.collect(process, stdout: outPipe, stderr: errPipe)
-        return outcome(status: process.terminationStatus, stdout: out,
-                       stderr: String(data: err, encoding: .utf8) ?? "", names: names)
+        return (process.terminationStatus, out, String(data: err, encoding: .utf8) ?? "")
     }
 }
