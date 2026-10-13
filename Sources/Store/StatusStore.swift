@@ -123,14 +123,38 @@ final class StatusStore {
     /// One lane per backend; see `startPolling`.
     let schedule = BackendSchedule()
     var pollingStarted = false
+    /// The module on screen; see `setVisibleModule`.
+    @ObservationIgnored var visibleModule: PanelModule?
     var globalError: String?
 
     let client = GitHubClient()
+    /// The forge and the CI behind the detail card and the run card (stay in
+    /// Pultík N2): GitHub today, through the one client and its budgets.
+    var codeHost: any CodeHost { GitHubCodeHost(client: client) }
+    var ciHost: any CIHost { GitHubCIHost(client: client) }
+    /// Where `#123`, `@user` and SHAs in a description open (D8): Pultík's own
+    /// detail for a change request its indexes hold, else the host's page.
+    var autolinks: any AutolinkResolver { GitHubAutolinks { [weak self] in self?.indexedUpdatedAt($0) != nil } }
     var prIndex = GitHubPRIndex()
     let prIndexDisk = GitHubPRIndexDisk()
     var prIndexIdentity: String?
     var prIndexLoad: (identity: String, task: Task<GitHubPRIndex, Never>)?
     var prIndexRevision = 0
+    /// The warm set (stay in Pultík D9): the `updatedAt` each change request
+    /// was synced at, the diffs on disk, and the one mirror pass in flight.
+    @ObservationIgnored var warmUpdatedAt: [ChangeRequestRef: Date] = [:]
+    @ObservationIgnored var warmFiles: Set<String> = []
+    @ObservationIgnored var warmMirrorTask: Task<Void, Never>?
+    @ObservationIgnored var warmMirrorQueue: [ChangeRequest] = []
+    var warmSyncedAt: Date?
+    /// The CI watch (stay in Pultík D7): what it watches, our CI's last read,
+    /// the last host confirm and how many there were, and per request a
+    /// generation the open detail reloads on.
+    var ciWatchTarget: CIWatchTarget?
+    var ciLive: CIStatusSnapshot?
+    @ObservationIgnored var ciConfirmedAt: Date?
+    var ciConfirmReads = 0
+    var ciConfirmed: [ChangeRequestRef: Int] = [:]
     var archiveCursor = 0
     var archiveAttemptedAt: Date?
     /// Circuit breaker in front of every remote host Pultík polls — including
@@ -297,17 +321,21 @@ final class StatusStore {
         startWatchingSettings()
         schedule.onLaneComplete = { [weak self] in self?.onRefreshComplete?() }
         let cadence: @MainActor () -> TimeInterval = { [weak self] in (self?.anyRunning ?? false) ? 30 : 90 }
-        schedule.add("prod", every: { 15 }) { [weak self] in
+        // N1: a visible module's refresh speed tightens its backends' lanes.
+        func lane(_ name: String) -> @MainActor () -> TimeInterval {
+            { [weak self] in min(cadence(), self?.visibleCadence(name) ?? .infinity) }
+        }
+        schedule.add("prod", every: { [weak self] in min(15, self?.visibleCadence("prod") ?? 15) }) { [weak self] in
             await self?.refreshProd()
             // One stat: the directory watch misses in-place writes (an
             // editor that truncates and rewrites keeps the inode).
             self?.settingsDirectoryChanged()
         }
-        schedule.add("github", every: cadence) { [weak self] in await self?.refreshGitHubLane() }
-        schedule.add("eve", every: cadence) { [weak self] in await self?.refreshEve() }
-        schedule.add("infra", every: cadence) { [weak self] in await self?.refreshInfraMetrics() }
-        schedule.add("vitrinka", every: cadence) { [weak self] in await self?.refreshVitrinka() }
-        schedule.add("devbox", every: cadence) { [weak self] in await self?.refreshDevbox() }
+        schedule.add("github", every: lane("github")) { [weak self] in await self?.refreshGitHubLane() }
+        schedule.add("eve", every: lane("eve")) { [weak self] in await self?.refreshEve() }
+        schedule.add("infra", every: lane("infra")) { [weak self] in await self?.refreshInfraMetrics() }
+        schedule.add("vitrinka", every: lane("vitrinka")) { [weak self] in await self?.refreshVitrinka() }
+        schedule.add("devbox", every: lane("devbox")) { [weak self] in await self?.refreshDevbox() }
         // Both keep their own five-minute floors inside.
         schedule.add("sentry", every: cadence) { [weak self] in await self?.refreshSentryIfStale() }
         schedule.add("issues", every: cadence) { [weak self] in await self?.refreshIssuesIfStale() }
@@ -315,6 +343,35 @@ final class StatusStore {
             await restoreSnapshots()
             schedule.start()
         }
+    }
+
+    /// The module on screen (nil while the panel is hidden): its backends
+    /// refresh at its Settings ▸ Modules speed (stay in Pultík N1).
+    func setVisibleModule(_ module: PanelModule?) {
+        guard module != visibleModule else { return }
+        let before = Self.lanes.map(visibleCadence)
+        visibleModule = module
+        if Self.lanes.map(visibleCadence) != before { schedule.nudge() }
+    }
+
+    static let lanes = ["prod", "github", "eve", "infra", "vitrinka", "devbox"]
+    /// The lanes a module draws from.
+    static let moduleLanes: [PanelModule: Set<String>] = [
+        .home: ["prod", "github", "eve", "infra", "vitrinka", "devbox"],
+        .prs: ["github"], .ci: ["github", "infra"], .prod: ["prod"], .devbox: ["devbox"],
+        .work: ["vitrinka"], .sessions: ["eve", "vitrinka"], .estate: ["infra"], .mac: [],
+    ]
+    /// GitHub-backed modules never poll it faster than this: the hourly
+    /// request budget is shared with every other GitHub read.
+    static let githubFloor: TimeInterval = 30
+
+    /// `lane`'s cadence while the visible module draws from it; nil = the
+    /// shared one.
+    func visibleCadence(_ lane: String) -> TimeInterval? {
+        guard let module = visibleModule, Self.moduleLanes[module]?.contains(lane) == true,
+              let interval = moduleSettings.first(where: { $0.module == module })?.visibleRefresh.interval
+        else { return nil }
+        return lane == "github" ? max(interval, Self.githubFloor) : interval
     }
 
     /// Runs a remote subsystem's fetch unless its breaker is open.

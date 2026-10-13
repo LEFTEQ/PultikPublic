@@ -134,4 +134,96 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertEqual(peeled, [.clearText, .closeDetail, .clearSelection, .leaveModule, .close])
         XCTAssertEqual(KeyboardCoordinator.escape(KeyContext(text: "x", eve: true, noteEditing: true)), .cancelNoteEdit)
     }
+
+    // MARK: - Stay in Pultík (D2, D3, D11; AC 7)
+
+    /// ⇥/⇧⇥ walk the detail's targets, ↵ on a focused badge slides its run
+    /// card over the PR, Esc clears the ring, then the card — whose badge is
+    /// focused again — then the detail.
+    func testTabFocusesBadgesEnterPushesTheRunCardAndEscPeelsInOrder() {
+        let badge = "run:gh:o/r/run/42"
+        let targets = [badge, "thread:T1", "file:a.swift"]
+        let detail = KeyContext(module: .prs, items: ["pr:1"], selection: "pr:1", detailOpen: true, focusTargets: targets)
+        XCTAssertEqual(KeyboardCoordinator.intent(for: KeyStroke(key: .tab), in: detail), .focus(1))
+        XCTAssertEqual(KeyboardCoordinator.intent(for: KeyStroke(key: .tab, shift: true), in: detail), .focus(-1))
+        XCTAssertEqual(intent(.enter, detail), .openDetail("pr:1"), "no ring: ↵ is the list's")
+
+        let router = ModuleRouter()
+        router.enter(.prs, select: "pr:1", openDetail: true)
+        router.setFocusTargets(targets)
+        router.moveFocus(-1)
+        XCTAssertEqual(router.focus, "file:a.swift", "⇧⇥ from none starts at the last")
+        router.moveFocus(1)
+        XCTAssertEqual(router.focus, badge, "wrapping")
+        var focused = detail
+        focused.focus = router.focus
+        XCTAssertEqual(intent(.enter, focused), .activateFocus)
+        XCTAssertEqual(intent(.esc, focused), .escape(.clearFocus))
+        router.activateFocus()
+        XCTAssertEqual(router.stack, [DetailRef(kind: .run, id: "gh:o/r/run/42")])
+        XCTAssertNil(router.focus)
+
+        var carded = detail
+        carded.card = "gh:o/r/run/42"
+        XCTAssertEqual(intent(.esc, carded), .escape(.popCard))
+        XCTAssertEqual(intent(.down, carded), .cardMove(1))
+        XCTAssertEqual(intent(.tab, carded), .cardColumn(1))
+        XCTAssertEqual(intent(.enter, carded), .cardOpen)
+        XCTAssertEqual(intent(.character("r"), command: true, carded), .rerunFailed("run:gh:o/r/run/42"))
+        router.pop()
+        XCTAssertTrue(router.stack.isEmpty)
+        XCTAssertEqual(router.focus, badge, "the badge is refocused after the pop")
+        XCTAssertEqual(intent(.esc, detail), .escape(.closeDetail))
+
+        router.activateFocus()
+        router.select("pr:2")
+        XCTAssertTrue(router.stack.isEmpty, "a new selection drops the card")
+        XCTAssertNil(router.focus)
+    }
+
+    /// The run card's walk: ↑/↓ inside a column, ⇥ between columns, ↵ narrows
+    /// the next column from the pick.
+    func testTheRunCardWalksItsColumns() {
+        let router = ModuleRouter()
+        router.enter(.ci, select: "run:42", openDetail: true)
+        router.push(DetailRef(kind: .run, id: "gh:o/r/run/42"))
+        router.setCardColumns([["job:1", "job:2"], ["step:1:1", "step:1:2"], []])
+        router.moveInCard(1)
+        XCTAssertEqual(router.stack.last?.picks[0], "job:1")
+        router.moveInCard(1)
+        XCTAssertEqual(router.stack.last?.picks[0], "job:2")
+        router.openInCard()
+        XCTAssertEqual(router.stack.last?.column, 1)
+        router.moveCardColumn(-1)
+        XCTAssertEqual(router.stack.last?.column, 0)
+        router.setCardColumns([["job:1"], [], []])
+        XCTAssertNil(router.stack.last?.picks[0], "a pick the card no longer draws is dropped")
+    }
+
+    /// The place is the module, filter, selection, detail, inspector and
+    /// stack — never the global query — and restores exactly.
+    func testThePlaceRestoresTheDetailAndItsStack() {
+        let router = ModuleRouter()
+        router.enter(.prs, filter: "pool", select: "pr:7", openDetail: true)
+        router.push(DetailRef(kind: .run, id: "gh:o/r/run/9"))
+        let place = router.place
+        router.leave(keeping: "anything typed")
+        XCTAssertEqual(router.place, .home, "the global query is no place")
+        router.restore(place)
+        XCTAssertEqual([router.module?.rawValue, router.text, router.selection], ["prs", "pool", "pr:7"])
+        XCTAssertTrue(router.detailOpen)
+        XCTAssertEqual(router.stack, place.stack)
+        router.restore(.home)
+        XCTAssertNil(router.module)
+        XCTAssertTrue(router.stack.isEmpty)
+    }
+
+    /// AC 13: Settings ▸ Modules' order is the strip's — ⌘1–9 and ←/→ follow it.
+    func testTheModuleOrderDrivesCommandDigitsAndArrows() {
+        let order: [PanelModule] = [.home, .ci, .prs, .prod, .devbox, .work, .sessions, .estate, .mac]
+        XCTAssertEqual(intent(.character("2"), command: true, KeyContext(order: order)), .module(.ci))
+        XCTAssertEqual(intent(.right, KeyContext(order: order)), .module(.ci))
+        XCTAssertEqual(intent(.right, KeyContext(module: .ci, order: order)), .module(.prs))
+        XCTAssertEqual(PanelModule.prs.number(in: order), 3)
+    }
 }

@@ -76,6 +76,15 @@ struct Preferences: Codable {
     /// Settings ▸ Panel. Nil = the Now Line.
     var homeStyle: HomeStyle?
 
+    /// Settings ▸ Modules (stay in Pultík D4, N1): the strip's order and ⌘1–9
+    /// (Home first), the bodies kept hot while the panel is up, and each
+    /// module's refresh speed while it is visible. Seeded by
+    /// `applyMigrations()`; nil only in a file older than that step.
+    var modules: [ModuleSetting]?
+    /// Settings ▸ Panel: hidden longer than this many minutes, a summon
+    /// opens on Home instead of the last place (D1). Nil = 15.
+    var homeAfterMinutes: Int?
+
     /// Every lane eve routes to a Telegram forum topic today — the Settings
     /// toggle list. An unknown lane in the feed still shows once toggled in
     /// via settings.json; this is UI vocabulary, not a filter whitelist.
@@ -453,6 +462,8 @@ struct Preferences: Codable {
         notifyFiring = try container.decodeIfPresent(Bool.self, forKey: .notifyFiring) ?? true
         // An unknown style is a newer build's: read it as the default.
         homeStyle = try container.decodeIfPresent(String.self, forKey: .homeStyle).flatMap(HomeStyle.init(rawValue:))
+        modules = try container.decodeIfPresent(LossyArray<ModuleSetting>.self, forKey: .modules)?.elements
+        homeAfterMinutes = try container.decodeIfPresent(Int.self, forKey: .homeAfterMinutes)
         activeFanCurve = try container.decodeIfPresent(String.self, forKey: .activeFanCurve)
         fanCurves = try container.decodeIfPresent([String: [CurvePoint]].self, forKey: .fanCurves)
             ?? [:]
@@ -563,7 +574,31 @@ struct Preferences: Codable {
         let repos = migrateRepoSlugs()
         let probes = migrateRetiredServiceRefs()
         let prod = seedProdPointers()
-        return retired || servers || services || presets || repos || probes || prod
+        let modules = seedModules()
+        return retired || servers || services || presets || repos || probes || prod || modules
+    }
+
+    /// Stay in Pultík (D4, N1): an absent `modules` becomes the defaults —
+    /// strip order, Home, PRs and CI hot, every refresh standard. A saved
+    /// list gains a module it lacks, drops one Pultík no longer has, and
+    /// keeps Home first. Idempotent: a settled list reports no change.
+    mutating func seedModules() -> Bool {
+        let normalized = Self.normalizedModules(modules)
+        guard normalized != modules else { return false }
+        modules = normalized
+        return true
+    }
+
+    static func normalizedModules(_ saved: [ModuleSetting]?) -> [ModuleSetting] {
+        var seen = Set<String>()
+        var list = (saved ?? []).filter { PanelModule(rawValue: $0.id) != nil && seen.insert($0.id).inserted }
+        for module in PanelModule.allCases where !seen.contains(module.rawValue) {
+            list.append(ModuleSetting(module: module))
+        }
+        if let home = list.firstIndex(where: { $0.id == PanelModule.home.rawValue }), home != 0 {
+            list.insert(list.remove(at: home), at: 0)
+        }
+        return list
     }
 
     /// The 2026-10-03 prod-watch pass, step 1: saved tiles that probe a dead
@@ -853,4 +888,55 @@ extension Preferences: SettingsDocument {
         services.restore(skipped, list: "services", from: lastGood.services, id: \.ref)
         servers.restore(skipped, list: "servers", from: lastGood.servers, id: \.ref)
     }
+}
+
+/// One row of Settings ▸ Modules (stay in Pultík D4, N1).
+struct ModuleSetting: Codable, Equatable, Identifiable, Sendable {
+    /// How fast a module's backends refresh while it is on screen (N1).
+    /// Hidden modules keep the shared 30 s / 90 s cadence.
+    enum Refresh: String, Codable, CaseIterable, Sendable {
+        case standard, fast, live
+
+        var title: String {
+            switch self {
+            case .standard: "Standard"
+            case .fast: "Fast · 15 s"
+            case .live: "Live · 5 s"
+            }
+        }
+
+        /// The visible cadence; nil = the shared one.
+        var interval: TimeInterval? {
+            switch self {
+            case .standard: nil
+            case .fast: 15
+            case .live: 5
+            }
+        }
+    }
+
+    /// `PanelModule.rawValue`.
+    var id: String
+    var keepHot: Bool
+    var visibleRefresh: Refresh
+
+    init(module: PanelModule, keepHot: Bool? = nil, visibleRefresh: Refresh = .standard) {
+        id = module.rawValue
+        self.keepHot = keepHot ?? ModuleWarmth.defaultHot.contains(module)
+        self.visibleRefresh = visibleRefresh
+    }
+
+    var module: PanelModule? { PanelModule(rawValue: id) }
+
+    /// Lenient: a hand-edited row missing a field keeps its default.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        keepHot = try c.decodeIfPresent(Bool.self, forKey: .keepHot)
+            ?? PanelModule(rawValue: id).map(ModuleWarmth.defaultHot.contains) ?? false
+        visibleRefresh = try c.decodeIfPresent(String.self, forKey: .visibleRefresh).flatMap(Refresh.init(rawValue:))
+            ?? .standard
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, keepHot, visibleRefresh }
 }

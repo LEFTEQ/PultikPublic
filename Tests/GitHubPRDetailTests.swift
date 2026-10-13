@@ -10,10 +10,11 @@ final class GitHubPRDetailTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
+    private let ref = ChangeRequestRef(repo: "o/eve", number: 412)
 
     func testConversationLeadsWithFailingChecksAndKeepsThreadsReviewsAndRequests() throws {
         let body = """
-            {"data": {"repository": {"pullRequest": {
+            {"data": {"r0": {"pullRequest": {
               "number": 412, "title": "Provider pool cooldown", "url": "https://github.com/o/eve/pull/412",
               "body": "Fixes the cooldown.", "state": "OPEN", "isDraft": false,
               "createdAt": "2026-10-02T09:00:00Z", "updatedAt": "2026-10-10T14:00:00Z", "mergedAt": null,
@@ -45,7 +46,7 @@ final class GitHubPRDetailTests: XCTestCase {
                  "targetUrl": "https://preview", "createdAt": "2026-10-10T13:05:00Z"}]}}}}]}
             }}}}
             """
-        let pr = try GitHubPRDetail.decodeConversation(Data(body.utf8), decoder: decoder)
+        let pr = try GitHubPRDetail.decodeConversation(Data(body.utf8), ref: ref, decoder: decoder)
         XCTAssertEqual(pr.checks.map(\.name), ["test", "build", "lint", "build", "deploy/preview"],
                        "failed, then running, then passed")
         XCTAssertEqual(pr.checks.map(\.outcome), [.failed, .running, .passed, .passed, .passed],
@@ -58,24 +59,26 @@ final class GitHubPRDetailTests: XCTestCase {
         XCTAssertEqual(pr.threads.first?.comments.first?.author, "ghost")
         XCTAssertTrue(pr.threadsTruncated, "GitHub holds three threads, the read returned two")
         XCTAssertEqual(pr.requested, ["eve-bot", "core"])
-        XCTAssertEqual(pr.reviews.first?.state, "CHANGES_REQUESTED")
+        XCTAssertEqual(pr.reviews.first?.verdict, .changesRequested)
+        XCTAssertEqual(pr.reviewVerdict, .changesRequested)
+        XCTAssertEqual(pr.ref.key, "gh:o/eve#412")
         XCTAssertEqual([pr.baseSHA, pr.headSHA], ["base1", "head1"])
     }
 
     func testQuotaExhaustionAndAMissingPullRequestNeverDecodeAsAnEmptyPR() {
         let limited = #"{"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}"#
-        XCTAssertThrowsError(try GitHubPRDetail.decodeConversation(Data(limited.utf8), decoder: decoder)) { error in
+        XCTAssertThrowsError(try GitHubPRDetail.decodeConversation(Data(limited.utf8), ref: ref, decoder: decoder)) { error in
             guard case GitHubPRDetail.Failure.rateLimited = error else { return XCTFail("\(error)") }
         }
-        let missing = #"{"data": {"repository": {"pullRequest": null}}, "errors": [{"type": "NOT_FOUND", "message": "gone"}]}"#
-        XCTAssertThrowsError(try GitHubPRDetail.decodeConversation(Data(missing.utf8), decoder: decoder)) { error in
+        let missing = #"{"data": {"r0": {"pullRequest": null}}, "errors": [{"type": "NOT_FOUND", "message": "gone"}]}"#
+        XCTAssertThrowsError(try GitHubPRDetail.decodeConversation(Data(missing.utf8), ref: ref, decoder: decoder)) { error in
             guard case GitHubError.graphQL("gone") = error else { return XCTFail("\(error)") }
         }
     }
 
     func testFilesKeepTheirHeadersPastThePatchBudgetAndReadTruncatedPastGitHubsCap() throws {
-        let long = (0 ..< GitHubPRDetail.patchLineLimit + 5).map { "+line \($0)" }.joined(separator: "\\n")
-        let huge = String(repeating: "x", count: GitHubPRDetail.patchByteBudget)
+        let long = (0 ..< ChangeSet.patchLineLimit + 5).map { "+line \($0)" }.joined(separator: "\\n")
+        let huge = String(repeating: "x", count: ChangeSet.patchByteBudget)
         let body = """
             {"files": [
               {"filename": "a.swift", "previous_filename": "old.swift", "status": "renamed", "additions": 605,
@@ -88,7 +91,7 @@ final class GitHubPRDetailTests: XCTestCase {
         let first = files.files[0]
         XCTAssertEqual(first.previousPath, "old.swift")
         XCTAssertTrue(first.trimmed)
-        XCTAssertEqual(first.patch?.split(separator: "\n").count, GitHubPRDetail.patchLineLimit)
+        XCTAssertEqual(first.patch?.split(separator: "\n").count, ChangeSet.patchLineLimit)
         XCTAssertNil(files.files[1].patch)
         XCTAssertFalse(files.files[1].trimmed, "a binary file is not a budget cut")
         XCTAssertNil(files.files[2].patch, "past the PR's byte budget the file keeps its header only")
@@ -99,7 +102,7 @@ final class GitHubPRDetailTests: XCTestCase {
 
     func testDiffLinesCarryBothGutterNumbersAcrossHunks() {
         let patch = "@@ -10,3 +10,3 @@ func pool()\n context\n-old\n+new\n \n\\ No newline at end of file\n@@ -40,1 +40,2 @@\n x\n+y\n"
-        let lines = GitHubPRDetail.DiffLine.parse(patch)
+        let lines = DiffLine.parse(patch)
         XCTAssertEqual(lines.map(\.kind), [.hunk, .context, .removed, .added, .context, .note, .hunk, .context, .added])
         XCTAssertEqual(lines[1].old, 10)
         XCTAssertEqual(lines[2].old, 11)

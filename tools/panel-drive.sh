@@ -9,6 +9,7 @@
 #   tools/panel-drive.sh query '<text>'            # set the palette text
 #   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V; makes the panel key)
 #   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|1-9|i|r (key 3 cmd = CI)
+#   tools/panel-drive.sh key left "" 5            # the same key 5× at key-repeat speed (50 ms apart, in the app)
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window (+ any open popover) as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette + shell state as JSON (module, selection, detailOpen, strip…)
 #   tools/panel-drive.sh metrics [/tmp/mem.json]   # footprint + summon time, also hidden
@@ -33,7 +34,7 @@ case "$cmd" in
   open|close|github-pause|github-resume) ;;
   query|size|clear-preview|clear-action|mac-stop|home-toggle|home-style) PD_TEXT="${1-}" ;;
   paste) ;;
-  key) PD_KEY="${1:?key name}"; PD_MODS="${2-}" ;;
+  key) PD_KEY="${1:?key name}"; PD_MODS="${2-}"; PD_TEXT="${3-}" ;;
   capture) PD_PATH="${1:?png path}" ;;
   state) PD_PATH="${1:-/tmp/pultik-panel-state.json}" ;;
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;

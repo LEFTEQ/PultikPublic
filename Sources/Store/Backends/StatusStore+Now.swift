@@ -59,14 +59,14 @@ extension StatusStore {
     /// repo the estate did not answer for keeps its last PRs but makes the
     /// read partial; nil = the estate read failed. No identity, no account's
     /// needs: the feed is forgotten.
-    func recordStalePRNeeds(_ repos: [RepoStatus]?, estate: [String: GitHubEstate.Repo], identity: String?) {
+    func recordStalePRNeeds(_ repos: [RepoStatus]?, answered: Set<String>, identity: String?) {
         guard let identity else {
             NowStore.shared.forget(.githubStalePRs)
             return
         }
         let seen = repos?.map { repo -> RepoStatus in
             var repo = repo
-            if estate[repo.slug] == nil, repo.error == nil { repo.error = "missing from the estate read" }
+            if !answered.contains(repo.slug), repo.error == nil { repo.error = "missing from the estate read" }
             return repo
         }
         let now = Date()

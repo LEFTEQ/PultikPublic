@@ -1,180 +1,49 @@
 import SwiftUI
 
-/// A failed run's own content under the detail header (WP6, AC 10; the D4-B
-/// frame, card 77428): the failing job's steps with their durations, the
-/// tail of its log around the error, every job, and context — the repo's 7 d
-/// failure rate, the workflow's recent runs, the PR. Re-run failed (⌘R) is
-/// the header's primary verb. Read on open, never polled.
+/// A CI run as a card over its change request (stay in Pultík D2, D11): a
+/// header — the run's state, workflow, attempt, branch and timer, the mini
+/// needs graph, Re-run failed (⌘R) on a failed run — over three keyboard
+/// lists, jobs | steps | log. Any run opens: running, passed or failed. The
+/// top card owns the keys: ↑/↓ walk the focused column, ⇥ moves between
+/// columns, ↵ narrows the next one — never a mutation.
+struct RunCard: View {
+    let store: StatusStore
+    let ref: CIRunRef
+    let walk: DetailRef
+    let router: ModuleRouter
+
+    var body: some View {
+        RunDetailLoader(store: store, ref: ref) { detail, graph in
+            VStack(alignment: .leading, spacing: 10) {
+                RunCardHeader(store: store, ref: ref, detail: detail, graph: graph)
+                RunColumns(store: store, ref: ref, detail: detail, graph: graph, walk: walk, router: router)
+            }
+            .padding(14)
+        }
+    }
+}
+
+/// A failed run in the CI module's detail (WP6): the same columns under the
+/// module's header, plus its re-run outcome and its context.
 struct CIRunDetailContent: View {
     let store: StatusStore
     let ref: CIRunRef
-
-    @State private var detail: GitHubCIRun.Detail?
-    @State private var log: GitHubCIRun.LogTail?
     @State private var health: SemaforRepoHealth?
-    @State private var failure: String?
-    @State private var logFailure: String?
-    @State private var showsPassedJobs = false
-    @State private var showsPassedSteps = false
-
-    init(store: StatusStore, ref: CIRunRef) {
-        self.store = store
-        self.ref = ref
-        _detail = State(initialValue: store.cachedCIRun(ref))
-    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let rerun = CIRerunCenter.shared.outcomes[ref.runID] { rerunLine(rerun) }
-            if let detail {
-                if let job = detail.failingJob {
-                    steps(job)
-                    logTile(job)
-                }
-                jobs(detail)
+        RunDetailLoader(store: store, ref: ref) { detail, graph in
+            VStack(alignment: .leading, spacing: 10) {
+                if let rerun = CIRerunCenter.shared.outcomes[ref.runID] { RerunLine(outcome: rerun) }
+                RunColumns(store: store, ref: ref, detail: detail, graph: graph, walk: nil, router: nil)
+                    .frame(height: 420)
                 context(detail.run)
-            } else if let failure {
-                Tile(kicker: "Run") { Text(failure).font(Theme.Typo.meta).foregroundStyle(Theme.ink2) }
-            } else {
-                Tile { SkeletonBars(widths: [0.6, 0.4]) }
-                Tile { SkeletonBars(widths: [0.8, 0.7, 0.75, 0.5]) }
             }
         }
-        // A settled re-run bumps the generation: the run is read again.
-        .task(id: LoadKey(ref: ref, generation: CIRerunCenter.shared.generations[ref.runID] ?? 0)) { await load() }
-        // Semafor is context: it never holds back the log.
+        // Semafor is context: it never holds back the run.
         .task(id: ref) { health = (try? await store.semaforRepoHealth())?.first { $0.repo == ref.repo } }
     }
 
-    private struct LoadKey: Equatable {
-        let ref: CIRunRef
-        let generation: Int
-    }
-
-    private func load() async {
-        do {
-            let fresh = try await store.ciRun(ref)
-            try Task.checkCancellation()
-            // Another attempt or failing job: the old log no longer explains it.
-            if fresh.run.runAttempt != detail?.run.runAttempt || fresh.failingJob?.id != detail?.failingJob?.id {
-                log = nil
-                logFailure = nil
-            }
-            detail = fresh
-            failure = nil
-        } catch is CancellationError {
-            return
-        } catch {
-            NSLog("pultik: CI run %@ %d failed: %@", ref.repo, ref.runID, error.localizedDescription)
-            failure = error.localizedDescription
-        }
-        guard let job = detail?.failingJob, !Task.isCancelled else { return }
-        do {
-            let tail = try await store.ciLogTail(ref, job: job)
-            try Task.checkCancellation()
-            log = tail
-            logFailure = nil
-        } catch is CancellationError {
-        } catch {
-            NSLog("pultik: CI log %@ job %d failed: %@", ref.repo, job.id, error.localizedDescription)
-            logFailure = error.localizedDescription
-        }
-    }
-
-    // MARK: - Re-run
-
-    private func rerunLine(_ outcome: CIRerunCenter.Outcome) -> some View {
-        HStack(spacing: 8) {
-            switch outcome {
-            case .checking: Chip("checking the run…", .neutral, symbol: "arrow.clockwise")
-            case .requested: Chip("re-run of the failed jobs requested", .ok, symbol: "arrow.clockwise")
-            case let .skipped(why): Chip("not re-run · \(why)", .dashed)
-            case let .failed(why): Chip("re-run failed", .danger).help(why)
-            }
-            Spacer()
-        }
-    }
-
-    // MARK: - Steps
-
-    private func steps(_ job: GitHubCIRun.Job) -> some View {
-        let passed = job.steps.filter { $0.conclusion == "success" }.count
-        let total = job.duration.map(PultikFormat.duration) ?? ""
-        // A long job folds its passed steps: the failing one leads the glance.
-        let folds = job.steps.count > 8 && passed > 0
-        let shown = folds && !showsPassedSteps ? job.steps.filter { $0.conclusion != "success" } : job.steps
-        return Tile(kicker: "Steps · \(job.name)", caption: "\(passed)/\(job.steps.count) passed · \(total)") {
-            VStack(alignment: .leading, spacing: 10) {
-                FlowRow(hSpacing: 6, vSpacing: 6) {
-                    ForEach(shown) { step in stepChip(step) }
-                }
-                if folds {
-                    DisclosureLine(text: showsPassedSteps ? "hide the \(passed) passed" : "\(passed) passed",
-                                   open: $showsPassedSteps) {
-                        StatusDot(tone: Theme.ok, size: 5)
-                    }
-                }
-                StepBar(steps: job.steps)
-            }
-        }
-    }
-
-    private func stepChip(_ step: GitHubCIRun.Step) -> Chip {
-        let label = [step.name, step.duration.map(PultikFormat.duration)].compactMap { $0 }.joined(separator: " ")
-        switch step.conclusion {
-        case "success": return Chip(label, .passing)
-        case "failure", "timed_out", "startup_failure": return Chip(label, .failing)
-        case "skipped": return Chip(label, .dashed)
-        case nil: return Chip(label, .neutral, symbol: "circle.dotted")
-        default: return Chip(label, .neutral)
-        }
-    }
-
-    // MARK: - Log
-
-    private func logTile(_ job: GitHubCIRun.Job) -> some View {
-        let step = job.failingStep?.name ?? job.name
-        let caption: String? = log.map { tail in
-            guard let first = tail.lines.first?.number, let last = tail.lines.last?.number else { return "empty log" }
-            return "lines \(first)–\(last) of \(tail.totalLines)"
-        }
-        return Tile(kicker: "Log · \(step) · tail", caption: caption) {
-            if let log {
-                LogWell(tail: log)
-                if !log.anchored {
-                    Text("No ##[error] line — the log's last lines").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
-                }
-            } else if let logFailure {
-                Text(verbatim: "Log not loaded — \(logFailure)").font(Theme.Typo.meta).foregroundStyle(Theme.ink2)
-            } else {
-                SkeletonBars(widths: [0.9, 0.7, 0.8, 0.6, 0.85])
-            }
-        }
-    }
-
-    // MARK: - Jobs
-
-    private func jobs(_ detail: GitHubCIRun.Detail) -> some View {
-        let failing = detail.jobs.filter(\.failed)
-        let other = detail.jobs.filter { !$0.failed }
-        let caption = "attempt \(detail.run.runAttempt) · \(failing.count) failed · \(other.count) other"
-            + (detail.jobsTruncated ? " · first \(GitHubCIRun.jobLimit)" : "")
-        return Tile(kicker: "Jobs", caption: caption) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(failing) { JobRow(job: $0) }
-                if !other.isEmpty {
-                    DisclosureLine(text: "\(other.count) passed, skipped or running", open: $showsPassedJobs) {
-                        StatusDot(tone: Theme.ok, size: 5)
-                    }
-                    if showsPassedJobs { ForEach(other) { JobRow(job: $0) } }
-                }
-            }
-        }
-    }
-
-    // MARK: - Context
-
-    private func context(_ run: GitHubCIRun.Run) -> some View {
+    private func context(_ run: CIRun) -> some View {
         let recent = store.repos.first { $0.slug == ref.repo }?.runs
             .filter { $0.name == run.name }
             .sorted { $0.createdAt < $1.createdAt } ?? []
@@ -185,9 +54,7 @@ struct CIRunDetailContent: View {
                     HStack(spacing: 8) {
                         Text("\(run.name ?? "workflow") · last \(recent.count)").microLabel()
                         HStack(spacing: 3) {
-                            ForEach(recent) { past in
-                                RunDot(run: past, current: past.id == run.id)
-                            }
+                            ForEach(recent) { past in RunDot(run: past, current: past.id == run.id) }
                         }
                         Text(verbatim: "\(failedRecent) of \(recent.count) failed")
                             .font(Theme.Typo.meta).monospacedDigit()
@@ -200,11 +67,11 @@ struct CIRunDetailContent: View {
                             + "\(PultikFormat.percent(health.failureRate, tenths: true)) of jobs · 7 d",
                             health.failureRate > 0.1 ? .warn : .neutral, symbol: "waveform.path.ecg")
                     }
-                    ForEach(run.pullRequests, id: \.self) { number in
+                    ForEach(run.changeRequests, id: \.self) { number in
                         Chip("PR #\(number)", .neutral, symbol: "arrow.triangle.pull")
                     }
                     if let branch = run.headBranch {
-                        Chip("\(branch) @ \(run.headSha.prefix(7))", .neutral, symbol: "arrow.triangle.branch")
+                        Chip("\(branch) @ \(run.headSHA.prefix(7))", .neutral, symbol: "arrow.triangle.branch")
                     }
                 }
             }
@@ -212,31 +79,372 @@ struct CIRunDetailContent: View {
     }
 }
 
-/// Each step's share of the job's time on one 4 pt track: the failing
-/// step in `danger`, the rest quiet.
-private struct StepBar: View {
-    let steps: [GitHubCIRun.Step]
+/// Reads the run (held first, then fresh), its graph from the mirror, and
+/// reads it again on a re-run, on the CI watch's confirm, and every 30 s
+/// while it runs on screen.
+private struct RunDetailLoader<Content: View>: View {
+    let store: StatusStore
+    let ref: CIRunRef
+    @ViewBuilder var content: (CIRunDetail, WorkflowGraph?) -> Content
+    @Environment(\.panelIsPresented) private var presented
+    @State private var detail: CIRunDetail?
+    @State private var graph: WorkflowGraph?
+    @State private var failure: String?
+
+    init(store: StatusStore, ref: CIRunRef, @ViewBuilder content: @escaping (CIRunDetail, WorkflowGraph?) -> Content) {
+        self.store = store
+        self.ref = ref
+        self.content = content
+        _detail = State(initialValue: store.cachedCIRun(ref))
+    }
+
+    private struct LoadKey: Equatable {
+        let ref: CIRunRef
+        let rerun: Int
+        let confirmed: Int
+        let live: [CILiveJob]
+    }
 
     var body: some View {
-        let durations = steps.map { max($0.duration ?? 0, 0) }
-        let total = max(durations.reduce(0, +), 1)
-        GeometryReader { proxy in
-            HStack(spacing: 2) {
-                ForEach(steps.indices, id: \.self) { index in
-                    Capsule()
-                        .fill(GitHubCIRun.Run.failing.contains(steps[index].conclusion ?? "") ? Theme.danger : Theme.hairlineStrong)
-                        .frame(width: max(2, (proxy.size.width - CGFloat(steps.count) * 2) * durations[index] / total))
+        Group {
+            if let detail {
+                content(detail, graph)
+            } else if let failure {
+                Tile(kicker: "Run") { Text(failure).font(Theme.Typo.meta).foregroundStyle(Theme.ink2) }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Tile { SkeletonBars(widths: [0.6, 0.4]) }
+                    Tile { SkeletonBars(widths: [0.8, 0.7, 0.75, 0.5]) }
                 }
             }
         }
-        .frame(height: 4)
+        .task(id: LoadKey(ref: ref, rerun: CIRerunCenter.shared.generations[ref.runID] ?? 0,
+                          confirmed: store.ciConfirmReads, live: store.ciLive?.jobs[ref.runID] ?? [])) {
+            await load()
+            // Live while visible: a running run is read again every 30 s.
+            while !Task.isCancelled, presented, detail?.run.status != .completed {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
+                await load(maxAge: 30)
+            }
+        }
+    }
+
+    private func load(maxAge: TimeInterval = StatusStore.CIDetailResources.run.staleAfter) async {
+        do {
+            let fresh = try await store.ciRun(ref, maxAge: maxAge)
+            try Task.checkCancellation()
+            detail = fresh
+            failure = nil
+            if graph == nil { graph = await store.workflowGraph(fresh.run) }
+        } catch is CancellationError {
+        } catch {
+            NSLog("pultik: CI run %@ failed: %@", ref.key, error.localizedDescription)
+            failure = error.localizedDescription
+        }
+    }
+}
+
+/// The card's header: state, workflow, attempt, branch, the timer, the mini
+/// graph and the verbs.
+private struct RunCardHeader: View {
+    let store: StatusStore
+    let ref: CIRunRef
+    let detail: CIRunDetail
+    let graph: WorkflowGraph?
+    @Environment(\.panelIsPresented) private var presented
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let run = detail.run
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                RunStateGlyph(status: run.status, conclusion: run.conclusion)
+                Text(run.name ?? "Run").font(Theme.Typo.detailTitle).foregroundStyle(Theme.ink).lineLimit(1)
+                if let title = run.displayTitle {
+                    Text(title).font(Theme.Typo.body).foregroundStyle(Theme.ink2).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                MiniGraph(waves: waves)
+                if run.failed {
+                    Button { CIRerunCenter.shared.rerun(ref, shown: run, store: store) } label: {
+                        Label("Re-run failed", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(Theme.accent)
+                    .controlSize(.small)
+                    .help("⌘R — re-run the failed jobs once the host confirms this attempt still failed")
+                }
+                LinkGlyph(url: URL(string: run.url), label: "Open the run — ⌘↵")
+            }
+            HStack(spacing: 6) {
+                Text(verbatim: meta(run)).font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink2).lineLimit(1)
+                timer(run)
+                if let outcome = CIRerunCenter.shared.outcomes[ref.runID] { RerunLine(outcome: outcome) }
+            }
+        }
+        .animation(Theme.Motion.status(reduceMotion), value: run.status)
+    }
+
+    private var waves: [[CIRunJob]] {
+        graph.map { $0.ordered(detail.jobs) } ?? WorkflowGraph.timingWaves(detail.jobs)
+    }
+
+    private func meta(_ run: CIRun) -> String {
+        // The state in words: a cancelled run's hollow rings explain themselves.
+        var parts = [run.conclusion.map { $0 == .timedOut ? "timed out" : $0.rawValue } ?? run.status.rawValue,
+                     "attempt \(run.attempt)", run.event]
+        if let branch = run.headBranch { parts.append("\(branch) @ \(run.headSHA.prefix(7))") }
+        parts.append("\(detail.jobs.filter { $0.conclusion == .success }.count)/\(detail.jobs.count) jobs passed")
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder private func timer(_ run: CIRun) -> some View {
+        if let start = run.startedAt {
+            if run.status != .completed, presented {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(verbatim: PultikFormat.duration(context.date.timeIntervalSince(start)))
+                        .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ok)
+                        .contentTransition(.numericText())
+                }
+            } else {
+                Text(verbatim: PultikFormat.duration(max(0, run.updatedAt.timeIntervalSince(start))))
+                    .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink3)
+            }
+        }
+    }
+}
+
+/// Jobs | steps | log as three lists (D11). `walk` is the card's keyboard
+/// state; without one (the CI module) clicks pick.
+struct RunColumns: View {
+    let store: StatusStore
+    let ref: CIRunRef
+    let detail: CIRunDetail
+    let graph: WorkflowGraph?
+    let walk: DetailRef?
+    let router: ModuleRouter?
+    @State private var clicked: [Int: String] = [:]
+    @State private var log: LogTail?
+    @State private var logFailure: String?
+
+    private var waves: [[CIRunJob]] {
+        graph.map { $0.ordered(detail.jobs) } ?? WorkflowGraph.timingWaves(detail.jobs)
+    }
+
+    private func pick(_ column: Int) -> String? {
+        walk?.picks[column] ?? clicked[column]
+    }
+
+    /// The picked job, else the one to read first: failing, running, first.
+    private var job: CIRunJob? {
+        if let id = pick(0), let picked = detail.jobs.first(where: { "job:\($0.id)" == id }) { return picked }
+        return WorkflowGraph.firstToRead(detail, waves: waves)
+    }
+
+    private var columnIDs: [[String]] {
+        [waves.flatMap { $0 }.map { "job:\($0.id)" },
+         job?.steps.map { "step:\($0.number)" } ?? [],
+         log?.lines.map { "line:\($0.number)" } ?? []]
+    }
+
+    var body: some View {
+        let job = job
+        HStack(alignment: .top, spacing: 0) {
+            column(0, "Jobs", width: 250) { jobsList }
+            Rectangle().fill(Theme.hairline).frame(width: 1)
+            column(1, job.map { "Steps · \($0.name)" } ?? "Steps", width: 250) { stepsList(job) }
+            Rectangle().fill(Theme.hairline).frame(width: 1)
+            column(2, logTitle(job), width: nil) { logList }
+        }
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.tile, style: .continuous))
+        .task(id: LogKey(job: job?.id, status: job?.status)) { await loadLog(job) }
+        .onChange(of: columnIDs, initial: true) { _, ids in
+            guard let router, router.stack.last == walk else { return }
+            router.setCardColumns(ids)
+        }
+    }
+
+    private struct LogKey: Equatable {
+        let job: Int?
+        let status: CIStatus?
+    }
+
+    private func logTitle(_ job: CIRunJob?) -> String {
+        guard let log else { return "Log" }
+        guard let first = log.lines.first?.number, let last = log.lines.last?.number else { return "Log · empty" }
+        return "Log · \(job?.failingStep?.name ?? job?.name ?? "") · \(first)–\(last) of \(log.totalLines)"
+    }
+
+    private func column(_ index: Int, _ title: String, width: CGFloat?,
+                        @ViewBuilder _ content: @escaping () -> some View) -> some View {
+        let focused = walk?.column == index
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(title).microLabel()
+                .foregroundStyle(focused ? Theme.ink : Theme.ink3)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .overlay(alignment: .bottomLeading) {
+                    Rectangle().fill(Theme.accent).frame(width: 24, height: 2).opacity(focused ? 1 : 0)
+                        .padding(.leading, 10).offset(y: 3)
+                }
+            ScrollViewReader { scroller in
+                ScrollView { content().padding([.horizontal, .bottom], 6) }
+                    .onChange(of: pick(index)) { _, id in
+                        if let id { withAnimation(.easeOut(duration: 0.12)) { scroller.scrollTo(id) } }
+                    }
+            }
+        }
+        .frame(width: width)
+        .frame(maxWidth: width == nil ? .infinity : nil, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var jobsList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(waves.enumerated()), id: \.offset) { index, wave in
+                if index > 0 { Rectangle().fill(Theme.hairline).frame(height: 1).padding(.vertical, 3) }
+                ForEach(wave) { item in
+                    ColumnRow(id: "job:\(item.id)", picked: job?.id == item.id) {
+                        RunStateGlyph(status: item.status, conclusion: item.conclusion)
+                        Text(item.name).font(Theme.Typo.body).foregroundStyle(Theme.ink).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(verbatim: item.duration.map(PultikFormat.duration) ?? "")
+                            .font(Theme.Typo.figure).foregroundStyle(Theme.ink3)
+                    } action: { clicked[0] = "job:\(item.id)" }
+                }
+            }
+        }
+    }
+
+    private func stepsList(_ job: CIRunJob?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(job?.steps ?? []) { step in
+                ColumnRow(id: "step:\(step.number)", picked: pick(1) == "step:\(step.number)"
+                    || (pick(1) == nil && job?.failingStep?.number == step.number)) {
+                    RunStateGlyph(status: step.status, conclusion: step.conclusion)
+                    Text(step.name).font(Theme.Typo.body).foregroundStyle(Theme.ink).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(verbatim: step.duration.map(PultikFormat.duration) ?? "")
+                        .font(Theme.Typo.figure).foregroundStyle(Theme.ink3)
+                } action: { clicked[1] = "step:\(step.number)" }
+            }
+            if job?.steps.isEmpty ?? true {
+                Text(job == nil ? "No jobs yet" : "Waiting for a runner").font(Theme.Typo.meta)
+                    .foregroundStyle(Theme.ink3).padding(8)
+            }
+        }
+    }
+
+    @ViewBuilder private var logList: some View {
+        if let log {
+            LogWell(tail: log, picked: pick(2))
+            if !log.anchored {
+                Text("No error line — the log's last lines").font(Theme.Typo.meta).foregroundStyle(Theme.ink3).padding(6)
+            }
+        } else if let logFailure {
+            Text(verbatim: "Log not loaded — \(logFailure)").font(Theme.Typo.meta).foregroundStyle(Theme.ink2).padding(6)
+        } else {
+            SkeletonBars(widths: [0.9, 0.7, 0.8, 0.6, 0.85]).padding(6)
+        }
+    }
+
+    private func loadLog(_ job: CIRunJob?) async {
+        // No runner yet, no log: GitHub answers 404 for a queued job's.
+        guard let job, job.startedAt != nil, job.status == .running || job.status == .completed else {
+            log = nil
+            logFailure = nil
+            return
+        }
+        do {
+            let tail = try await store.ciLogTail(ref, job: job)
+            try Task.checkCancellation()
+            log = tail
+            logFailure = nil
+        } catch is CancellationError {
+        } catch {
+            NSLog("pultik: CI log %@ job %@ failed: %@", ref.key, String(job.id), error.localizedDescription)
+            logFailure = error.localizedDescription
+        }
+    }
+}
+
+/// One row of a column: the pick is the neutral lift with the accent edge.
+private struct ColumnRow<Label: View>: View {
+    let id: String
+    let picked: Bool
+    @ViewBuilder let label: () -> Label
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) { label() }
+                .padding(.horizontal, 6)
+                .frame(height: 24)
+                .background { RowBackground(selected: picked, hovering: hovering) }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .id(id)
+    }
+}
+
+/// A run, job or step's state as a shape: ✗ broke, a spinning dot while it
+/// runs, ✓ passed, a hollow ring for skipped or cancelled.
+struct RunStateGlyph: View {
+    let status: CIStatus
+    let conclusion: CIConclusion?
+
+    var body: some View {
+        Group {
+            if conclusion?.failing == true {
+                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.danger)
+            } else if status != .completed {
+                StatusDot(tone: status == .running ? Theme.ok : Theme.ink3, style: status == .running ? .spin : .ring)
+            } else if conclusion == .success {
+                StatusDot(tone: Theme.ok)
+            } else {
+                StatusDot(tone: Theme.ink3, style: .ring)
+            }
+        }
+        .frame(width: 14)
+    }
+}
+
+/// The waves as columns of dots (D11's mini needs graph).
+private struct MiniGraph: View {
+    let waves: [[CIRunJob]]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(waves.prefix(8).enumerated()), id: \.offset) { index, wave in
+                if index > 0 {
+                    Image(systemName: "chevron.right").font(.system(size: 6, weight: .bold)).foregroundStyle(Theme.ink3)
+                }
+                VStack(spacing: 2) {
+                    ForEach(wave.prefix(6)) { job in
+                        Circle().fill(tone(job)).frame(width: 6, height: 6)
+                    }
+                }
+            }
+        }
+        .accessibilityLabel("\(waves.count) waves")
+    }
+
+    private func tone(_ job: CIRunJob) -> Color {
+        if job.conclusion?.failing == true { return Theme.danger }
+        if job.status != .completed { return Theme.ok.opacity(0.5) }
+        return job.conclusion == .success ? Theme.ok : Theme.ink3
     }
 }
 
 /// The log tail in a `canvasDeep` well: a gutter of line numbers, the error
-/// lines on a `danger` rule and wash (DESIGN.md LogWell).
+/// lines on a `danger` rule and wash (DESIGN.md LogWell), the picked line lifted.
 private struct LogWell: View {
-    let tail: GitHubCIRun.LogTail
+    let tail: LogTail
+    var picked: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -252,48 +460,32 @@ private struct LogWell: View {
                 }
                 .padding(.vertical, 1)
                 .padding(.trailing, 8)
-                .background(line.error ? Theme.danger.opacity(0.08) : .clear)
+                .background(picked == "line:\(line.number)" ? Theme.selection
+                    : line.error ? Theme.danger.opacity(0.08) : .clear)
                 .overlay(alignment: .leading) {
                     if line.error { Rectangle().fill(Theme.danger).frame(width: 2) }
                 }
+                .id("line:\(line.number)")
             }
         }
         .padding(.vertical, 6)
         // Not selectable: a focused text view would take keys from the
         // search field (CLAUDE.md, every key through KeyboardCoordinator);
-        // ⌘↵ opens the full log on GitHub to copy from.
+        // ⌘↵ opens the full log on the host to copy from.
         .background(Theme.canvasDeep, in: RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous))
     }
 }
 
-private struct JobRow: View {
-    let job: GitHubCIRun.Job
+private struct RerunLine: View {
+    let outcome: CIRerunCenter.Outcome
 
     var body: some View {
-        HStack(spacing: 8) {
-            Group {
-                if job.failed {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.danger)
-                } else if job.status != "completed" {
-                    StatusDot(tone: Theme.ok, style: .spin)
-                } else if job.conclusion == "success" {
-                    StatusDot(tone: Theme.ok)
-                } else {
-                    StatusDot(tone: Theme.ink3, style: .ring)
-                }
-            }
-            .frame(width: 14)
-            Text(job.name).font(Theme.Typo.body).foregroundStyle(Theme.ink).lineLimit(1)
-            if let step = job.failingStep {
-                Text("failed in \(step.name)").font(Theme.Typo.meta).foregroundStyle(Theme.ink3).lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            Text(verbatim: job.duration.map(PultikFormat.duration) ?? "")
-                .font(Theme.Typo.figure).foregroundStyle(Theme.ink2)
-                .frame(width: 64, alignment: .trailing)
-            LinkGlyph(url: job.htmlUrl.flatMap(URL.init(string:)), label: "Open job \(job.name) on GitHub")
+        switch outcome {
+        case .checking: Chip("checking the run…", .neutral, symbol: "arrow.clockwise")
+        case .requested: Chip("re-run of the failed jobs requested", .ok, symbol: "arrow.clockwise")
+        case let .skipped(why): Chip("not re-run · \(why)", .dashed)
+        case let .failed(why): Chip("re-run failed", .danger).help(why)
         }
-        .frame(height: 24)
     }
 }
 

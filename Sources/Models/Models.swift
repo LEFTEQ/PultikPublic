@@ -779,13 +779,13 @@ struct ProdPointer: Codable, Equatable, Identifiable {
     /// Where the deployment's release line is read (Shipping inside Prod,
     /// copilot shell D9): GitHub environments, since Hlídač carries no
     /// release data. Absent = the shipped sources for the key; [] = none.
-    var release: [GitHubRelease.Source]?
+    var release: [ReleaseSource]?
     var id: String {
         key
     }
 
     /// The sources a pointer reads its release line from.
-    var releaseSources: [GitHubRelease.Source] {
+    var releaseSources: [ReleaseSource] {
         release ?? Self.shippedReleases[key] ?? []
     }
 
@@ -793,11 +793,11 @@ struct ProdPointer: Codable, Equatable, Identifiable {
     /// and vitrinka deploy `main` to `production`, Booking SK deploys
     /// `canary` to `sk` from both of its app repos. eve has no GitHub
     /// deployments; Booking CZ is not monitored.
-    static let shippedReleases: [String: [GitHubRelease.Source]] = [
-        "exampleapp-prod": [GitHubRelease.Source(repo: "example-org/ExampleApp", environment: "production")],
-        "vitrinka": [GitHubRelease.Source(repo: "example-org/vitrinka", environment: "production")],
-        "booking-sk": [GitHubRelease.Source(repo: "Booking/BookingBack", environment: "sk", branch: "canary"),
-                         GitHubRelease.Source(repo: "Booking/Booking", environment: "sk", branch: "canary")],
+    static let shippedReleases: [String: [ReleaseSource]] = [
+        "exampleapp-prod": [ReleaseSource(repo: "example-org/ExampleApp", environment: "production")],
+        "vitrinka": [ReleaseSource(repo: "example-org/vitrinka", environment: "production")],
+        "booking-sk": [ReleaseSource(repo: "Booking/BookingBack", environment: "sk", branch: "canary"),
+                         ReleaseSource(repo: "Booking/Booking", environment: "sk", branch: "canary")],
     ]
 }
 

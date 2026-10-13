@@ -11,30 +11,47 @@ extension EnvironmentValues {
         get { self[PanelPresentedEnvironmentKey.self] }
         set { self[PanelPresentedEnvironmentKey.self] = newValue }
     }
+
+    /// A row's click (stay in Pultík S1): the panel opens the object's detail
+    /// (or the row's own ↵ in the global results). Nil outside the panel.
+    var openRow: ((String) -> Void)? {
+        get { self[OpenRowEnvironmentKey.self] }
+        set { self[OpenRowEnvironmentKey.self] = newValue }
+    }
+}
+
+private struct OpenRowEnvironmentKey: EnvironmentKey {
+    static let defaultValue: ((String) -> Void)? = nil
 }
 
 // MARK: - Shared row chrome
 
+/// A list row's chrome (stay in Pultík S1): a click selects the row and opens
+/// its object inside Pultík through the panel's `openRow`; the page in the
+/// browser is the hover ↗ on the trailing edge, or ⌘↵.
 private struct RowChrome: ViewModifier {
+    /// The row's object id (`pr:…`, `archive:…`, `sentry:…`).
+    let id: String
     let url: String?
     /// Keyboard selection — the row ↵ would open. Outranks hover so arrowing
     /// through the list stays legible while the mouse sits somewhere else;
     /// drawn as the Kit's neutral lift, never a red fill.
     var selected = false
     @State private var hovering = false
+    @Environment(\.openRow) private var openRow
 
     func body(content: Content) -> some View {
         content
             .padding(.vertical, 4)
             .padding(.horizontal, 8)
+            .padding(.trailing, hovering ? 18 : 0)
             .background { RowBackground(selected: selected, hovering: hovering) }
+            .overlay(alignment: .trailing) {
+                if hovering { LinkGlyph(url: url.flatMap(URL.init(string:)), label: "Open the page").padding(.trailing, 4) }
+            }
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
-            .onTapGesture {
-                if let url, let parsed = URL(string: url) {
-                    NSWorkspace.shared.open(parsed)
-                }
-            }
+            .onTapGesture { openRow?(id) }
     }
 }
 
@@ -98,7 +115,7 @@ struct InboxPRRow: View {
             }
         }
         .opacity(info.isDraft ? 0.55 : 1)
-        .modifier(RowChrome(url: info.pr.htmlUrl, selected: selected))
+        .modifier(RowChrome(id: "pr:\(entry.id)", url: info.pr.htmlUrl, selected: selected))
     }
 
     @ViewBuilder
@@ -231,7 +248,7 @@ struct ArchivedPRRow: View {
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
         }
-        .modifier(RowChrome(url: pr.url, selected: selected))
+        .modifier(RowChrome(id: "archive:\(pr.id)", url: pr.url, selected: selected))
     }
 }
 
@@ -319,7 +336,7 @@ struct IssueRow: View {
                 .padding(.leading, 21)
             }
         }
-        .modifier(RowChrome(url: issue.url, selected: selected))
+        .modifier(RowChrome(id: "issue:\(issue.id)", url: issue.url, selected: selected))
     }
 }
 
@@ -329,6 +346,8 @@ struct IssueRow: View {
 struct ProdIssueRow: View {
     let prodIssue: ProdIssue
     var selected = false
+    /// The palette row's id: `prod:` in `.p`, `sentry:` among results.
+    var rowID: String?
 
     var body: some View {
         HStack(spacing: 7) {
@@ -348,6 +367,6 @@ struct ProdIssueRow: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
         }
-        .modifier(RowChrome(url: prodIssue.issue.permalink, selected: selected))
+        .modifier(RowChrome(id: rowID ?? "prod:\(prodIssue.id)", url: prodIssue.issue.permalink, selected: selected))
     }
 }

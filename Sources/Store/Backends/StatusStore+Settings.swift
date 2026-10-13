@@ -130,6 +130,33 @@ extension StatusStore {
         mutate { $0.homeStyle = style == .nowLine ? nil : style }
     }
 
+    /// Settings ▸ Modules, normalized: every module once, Home first.
+    var moduleSettings: [ModuleSetting] {
+        Preferences.normalizedModules(preferences.modules)
+    }
+
+    /// The strip's order — ⌘1–9 and ←/→ follow it (D4).
+    var moduleOrder: [PanelModule] {
+        moduleSettings.compactMap(\.module)
+    }
+
+    var keepHotModules: Set<PanelModule> {
+        Set(moduleSettings.filter(\.keepHot).compactMap(\.module))
+    }
+
+    func setModuleSettings(_ settings: [ModuleSetting]) {
+        mutate { $0.modules = Preferences.normalizedModules(settings) }
+    }
+
+    /// Hidden longer than this, a summon opens on Home (D1).
+    var homeAfter: TimeInterval {
+        TimeInterval(max(1, preferences.homeAfterMinutes ?? 15)) * 60
+    }
+
+    func setHomeAfterMinutes(_ minutes: Int) {
+        mutate { $0.homeAfterMinutes = minutes == 15 ? nil : max(1, minutes) }
+    }
+
     func setSection(_ key: String, visible: Bool) {
         mutate {
             $0.hiddenSections.removeAll { $0 == key }

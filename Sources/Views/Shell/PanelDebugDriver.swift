@@ -13,10 +13,18 @@ extension StatusPanelView {
         case "key":
             guard let name = info["key"] as? String,
                   let event = PanelDriver.keyEvent(named: name, mods: info["mods"] as? String) else { return }
-            // What the coordinator leaves alone would reach the field editor:
-            // ↵ submits. The rest are caret moves (Esc is always a layer).
-            guard driveKey(event) != nil else { return }
-            if name == "enter" { submitPalette() }
+            // `text` repeats the key at key-repeat speed (AC 12's fast walk):
+            // one shell call per key is slower than any keyboard.
+            let repeats = max(1, Int(info["text"] as? String ?? "") ?? 1)
+            Task { @MainActor in
+                for index in 0 ..< repeats {
+                    if index > 0 { try? await Task.sleep(for: .milliseconds(50)) }
+                    // What the coordinator leaves alone would reach the field editor:
+                    // ↵ submits. The rest are caret moves (Esc is always a layer).
+                    guard driveKey(event) != nil else { continue }
+                    if name == "enter" { submitPalette() }
+                }
+            }
         case "home-toggle":
             let text = info["text"] as? String ?? ""
             let key = text == "fold" ? PRDigest<StatusStore.InboxPR>.foldKey : text
@@ -46,6 +54,29 @@ extension StatusPanelView {
                 "moduleItems": keyItems,
                 "detailOpen": detailShown,
                 "inspectorOpen": router.inspectorOpen,
+                // Stay in Pultík (WP8): the dwelled place a summon returns to, the card
+                // stack and the ⇥ focus, the warm bodies and their builds.
+                "place": Self.describe(place.dwelled),
+                "stack": router.stack.map { card -> [String: Any] in
+                    ["kind": card.kind.rawValue, "id": card.id, "column": card.column,
+                     "picks": Dictionary(uniqueKeysWithValues: card.picks.map { (String($0.key), $0.value) })]
+                },
+                "focus": router.focus ?? NSNull(),
+                "focusTargets": router.focusTargets,
+                "displayedModule": warmth.displayed.rawValue,
+                "mountedModules": warmth.mounted.map(\.rawValue),
+                "moduleBuilds": warmth.totalBuilds,
+                "moduleBuildsBy": Dictionary(uniqueKeysWithValues: warmth.builds.map { ($0.key.rawValue, $0.value) }),
+                "prSections": router.module == .prs && detailShown ? PRDetailContent.drawnSections : [],
+                "ciWatch": store.ciWatchTarget.map { target -> [String: Any] in
+                    ["request": target.request.key, "runs": target.runs.map(\.key).sorted(),
+                     "live": store.ciLive.map { $0.jobs.mapValues { $0.map(\.name) }.reduce(into: [String: [String]]()) {
+                         $0[String($1.key)] = $1.value } } ?? [:],
+                     "confirms": store.ciConfirmReads]
+                } ?? NSNull(),
+                "warmSet": ["synced": store.warmUpdatedAt.count, "files": store.warmFiles.count,
+                            "candidates": store.warmCandidates().count,
+                            "at": store.warmSyncedAt.map { PultikFormat.clock($0) } ?? NSNull()] as [String: Any],
                 "strip": stripSignals,
                 "prodExpanded": prodExpandedKey ?? NSNull(),
                 "eveAskedPrompt": eveAskedPrompt ?? NSNull(),
@@ -92,6 +123,8 @@ extension StatusPanelView {
                 // WP5 AC 9: a same-head reopen adds no files request.
                 state["githubPRDetails"] = counts.details
                 state["githubPRFiles"] = counts.files
+                // Stay in Pultík AC 10: the warm set's batched reads, apart from the detail's.
+                state["githubPRBatches"] = counts.batches
                 // WP6 AC 10: a failed run's detail reads its run + jobs and one log.
                 state["githubCIRuns"] = counts.ciRuns
                 state["githubCILogs"] = counts.ciLogs
@@ -105,6 +138,11 @@ extension StatusPanelView {
         default:
             break
         }
+    }
+
+    static func describe(_ place: ModuleRouter.Place) -> [String: Any] {
+        ["module": place.module?.rawValue ?? "home", "filter": place.filter, "selection": place.selection ?? NSNull(),
+         "detailOpen": place.detailOpen, "stack": place.stack.map(\.id)]
     }
 
     /// A driver key through the same coordinator a real keystroke takes,

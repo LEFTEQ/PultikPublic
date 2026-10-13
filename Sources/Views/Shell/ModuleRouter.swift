@@ -100,6 +100,7 @@ final class ModuleRouter {
         pendingToken = ""
         selection = id ?? remembered[target]
         detailOpen = openDetail && selection != nil
+        dropStack()
     }
 
     /// Back to the global search — Home once nothing is typed.
@@ -110,35 +111,234 @@ final class ModuleRouter {
         pendingToken = ""
         selection = nil
         detailOpen = false
+        dropStack()
     }
 
     /// Moves the highlight; nil hands ↵ back to the field and closes the detail.
     func select(_ id: String?) {
+        if id != selection { dropStack() }
         selection = id
         if id == nil { detailOpen = false }
     }
 
     func openDetail(_ id: String) {
+        if id != selection { dropStack() }
         selection = id
         detailOpen = true
     }
 
     func closeDetail() {
         detailOpen = false
+        dropStack()
     }
 
     func toggleInspector() {
         inspectorOpen.toggle()
     }
 
-    /// A fresh summon opens on Home. Remembered selections and the inspector
-    /// are the operator's own state and survive.
-    func reset() {
-        leave()
-    }
-
     private func remember() {
         guard let module else { return }
         remembered[module] = selection
+    }
+
+    /// The selection `module` had when it was left — a warm body's frozen one.
+    func rememberedSelection(_ module: PanelModule) -> String? {
+        remembered[module]
+    }
+
+    // MARK: - The stack (stay in Pultík D2, D3, D11)
+
+    /// The cards over the detail, bottom first: a CI run over its PR. Esc
+    /// slides the top one away; a new selection or a closed detail drops all.
+    private(set) var stack: [DetailRef] = []
+    /// ⇥'s focus on the top layer (D3): one of `focusTargets`, ringed.
+    private(set) var focus: String?
+    /// The top layer's targets in ⇥ order, as its view draws them — run
+    /// badges, then open threads, then files (`setFocusTargets`).
+    private(set) var focusTargets: [String] = []
+    /// The focus each card was pushed from, restored when it pops.
+    private var focusBeneath: [String?] = []
+    /// The top card's columns as its view draws them (jobs, steps, log).
+    private(set) var cardColumns: [[String]] = []
+    /// A focused target ↵ activated that is not a card (a file folds open):
+    /// the layer's view acts on it and clears it.
+    private(set) var activated: String?
+
+    /// The top layer's view reports what ⇥ walks; a focus it no longer
+    /// draws is dropped.
+    func setFocusTargets(_ targets: [String]) {
+        guard targets != focusTargets else { return }
+        focusTargets = targets
+        if let focus, !targets.contains(focus) { self.focus = nil }
+    }
+
+    /// ⇥ (+1) / ⇧⇥ (−1): the next target, wrapping; from none, the first
+    /// (or the last).
+    func moveFocus(_ step: Int) {
+        guard !focusTargets.isEmpty else { return }
+        guard let focus, let index = focusTargets.firstIndex(of: focus) else {
+            self.focus = step > 0 ? focusTargets.first : focusTargets.last
+            return
+        }
+        let count = focusTargets.count
+        self.focus = focusTargets[((index + step) % count + count) % count]
+    }
+
+    func clearFocus() {
+        focus = nil
+    }
+
+    /// ↵ on the focused target: a run badge slides its card over the PR;
+    /// anything else is the layer's own (`activated`).
+    func activateFocus() {
+        guard let focus else { return }
+        if let card = DetailRef(target: focus) {
+            push(card)
+        } else {
+            activated = focus
+        }
+    }
+
+    func consumeActivation() {
+        activated = nil
+    }
+
+    func push(_ card: DetailRef) {
+        guard detailOpen, stack.last != card else { return }
+        focusBeneath.append(focus)
+        stack.append(card)
+        focus = nil
+        focusTargets = []
+        cardColumns = []
+    }
+
+    /// Esc on a card: it slides away and the target it was opened from is
+    /// focused again.
+    func pop() {
+        guard !stack.isEmpty else { return }
+        stack.removeLast()
+        cardColumns = []
+        focusTargets = []
+        focus = focusBeneath.popLast() ?? nil
+    }
+
+    /// The top card's view reports its columns; the walk stays inside them.
+    func setCardColumns(_ columns: [[String]]) {
+        guard columns != cardColumns, var top = stack.last else { return }
+        cardColumns = columns
+        top.column = min(top.column, max(columns.count - 1, 0))
+        for index in columns.indices {
+            if let picked = top.picks[index], !columns[index].contains(picked) { top.picks[index] = nil }
+        }
+        stack[stack.count - 1] = top
+    }
+
+    /// ↑/↓ in the top card's column.
+    func moveInCard(_ step: Int) {
+        guard var top = stack.last, cardColumns.indices.contains(top.column) else { return }
+        let items = cardColumns[top.column]
+        guard !items.isEmpty else { return }
+        let index = top.picks[top.column].flatMap { items.firstIndex(of: $0) }
+        let next = index.map { min(max($0 + step, 0), items.count - 1) } ?? (step > 0 ? 0 : items.count - 1)
+        top.picks[top.column] = items[next]
+        stack[stack.count - 1] = top
+    }
+
+    /// ⇥ / ⇧⇥ between the top card's columns.
+    func moveCardColumn(_ step: Int) {
+        guard var top = stack.last, !cardColumns.isEmpty else { return }
+        top.column = min(max(top.column + step, 0), cardColumns.count - 1)
+        stack[stack.count - 1] = top
+    }
+
+    /// ↵ in a column narrows the next one (D11): never a mutation.
+    func openInCard() {
+        guard var top = stack.last, top.column + 1 < max(cardColumns.count, 1) else { return }
+        guard top.picks[top.column] != nil else { return moveInCard(1) }
+        top.column += 1
+        stack[stack.count - 1] = top
+    }
+
+    // MARK: - The place (D1)
+
+    /// Where the panel is — what a summon restores.
+    struct Place: Equatable, Sendable {
+        var module: PanelModule?
+        var filter = ""
+        var selection: String?
+        var detailOpen = false
+        var inspectorOpen = false
+        var stack: [DetailRef] = []
+
+        static let home = Place()
+    }
+
+    var place: Place {
+        // The global query is no place: typing on Home is transient.
+        Place(module: module, filter: module == nil ? "" : text, selection: module == nil ? nil : selection,
+              detailOpen: module == nil ? false : detailOpen, inspectorOpen: inspectorOpen,
+              stack: module == nil ? [] : stack)
+    }
+
+    func restore(_ place: Place) {
+        if place.module == nil { leave() } else {
+            remember()
+            module = place.module
+            text = place.filter
+            pendingToken = ""
+            selection = place.selection
+            detailOpen = place.detailOpen && place.selection != nil
+            stack = detailOpen ? place.stack : []
+        }
+        inspectorOpen = place.inspectorOpen
+        focus = nil
+        focusTargets = []
+        focusBeneath = Array(repeating: nil, count: stack.count)
+        cardColumns = []
+        activated = nil
+    }
+
+    /// A different object, a closed detail or another module: no card or
+    /// focus outlives what it was over.
+    private func dropStack() {
+        stack = []
+        focusBeneath = []
+        focus = nil
+        focusTargets = []
+        cardColumns = []
+        activated = nil
+    }
+}
+
+/// One card on the detail stack (D2): today a CI run over its change
+/// request. `column` and `picks` are the run card's walk (D11): jobs, steps,
+/// log, and what each column has picked.
+struct DetailRef: Hashable, Sendable {
+    enum Kind: String, Sendable {
+        case run
+    }
+
+    let kind: Kind
+    /// The object's host-qualified key (`CIRunRef.key`).
+    let id: String
+    var column = 0
+    var picks: [Int: String] = [:]
+
+    init(kind: Kind, id: String) {
+        self.kind = kind
+        self.id = id
+    }
+
+    /// A focus target that opens as a card: `run:<CIRunRef.key>`.
+    init?(target: String) {
+        guard target.hasPrefix("run:") else { return nil }
+        self.init(kind: .run, id: String(target.dropFirst(4)))
+    }
+
+    /// Cards are the same object whatever their walk.
+    static func == (lhs: DetailRef, rhs: DetailRef) -> Bool { lhs.kind == rhs.kind && lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(id)
     }
 }

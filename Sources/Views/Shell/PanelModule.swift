@@ -35,17 +35,17 @@ enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
-    /// 1…9, the ⌘ digit.
-    var number: Int { (Self.allCases.firstIndex(of: self) ?? 0) + 1 }
+    /// 1…9, the ⌘ digit, in the strip's order (Settings ▸ Modules).
+    func number(in order: [PanelModule] = allCases) -> Int { (order.firstIndex(of: self) ?? 0) + 1 }
 
-    static func numbered(_ digit: Int) -> PanelModule? {
-        allCases.indices.contains(digit - 1) ? allCases[digit - 1] : nil
+    static func numbered(_ digit: Int, in order: [PanelModule] = allCases) -> PanelModule? {
+        order.indices.contains(digit - 1) ? order[digit - 1] : nil
     }
 
-    /// The strip's next (`step` 1) or previous (−1) module, wrapping Mac ↔
-    /// Home: ←/→ on an empty search field.
-    func neighbour(_ step: Int) -> PanelModule {
-        let all = Self.allCases
+    /// The strip's next (`step` 1) or previous (−1) module, wrapping the last
+    /// ↔ the first: ←/→ on an empty search field.
+    func neighbour(_ step: Int, in order: [PanelModule] = allCases) -> PanelModule {
+        let all = order.isEmpty ? Self.allCases : order
         let index = all.firstIndex(of: self) ?? 0
         return all[((index + step) % all.count + all.count) % all.count]
     }

@@ -2,6 +2,8 @@
 # The same Foundation contract selection locally and in CI; no native app host.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+# Stay in Pultík AC 14: only the adapters name GitHub.
+bash "$repo/tools/host-neutral-check.sh"
 harness=$(mktemp -d "${TMPDIR:-/tmp}/pultik-foundation.XXXXXX")
 trap 'rm -rf "$harness"' EXIT
 mkdir -p "$harness/Sources/Pultik" "$harness/Tests/PultikTests"
@@ -15,6 +17,10 @@ sources=(Sources/Models/Models.swift Sources/Models/OverviewGlance.swift
   Sources/Data/QuerySnapshots.swift Sources/Data/QueryRepository.swift Sources/Data/BackendSchedule.swift
   Sources/Views/Shell/PanelModule.swift Sources/Views/Shell/PaletteMode.swift Sources/Views/Shell/ModuleRouter.swift
   Sources/Views/Shell/KeyboardCoordinator.swift Sources/Models/FleetContract.swift
+  Sources/Data/GitMirror.swift Sources/Data/WarmSet.swift Sources/Models/RunBadge.swift
+  Sources/API/CIStatus/CIStatusSource.swift Sources/Views/Shell/PanelPlace.swift Sources/Views/Shell/ModuleWarmth.swift
+  Sources/API/WorkflowGraph.swift Sources/Views/Markdown/Autolink.swift
+  "$repo"/Sources/Domain/*.swift "$repo"/Sources/API/Hosts/*.swift
   "$repo"/Sources/Models/Now/*.swift "$repo"/Sources/Models/Now/Adapters/*.swift)
 tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/DevboxBoxesTests.swift
   Tests/FiringWatchTests.swift Tests/DevboxClearTests.swift Tests/DevboxClearWorktreeTests.swift
@@ -22,7 +28,10 @@ tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/Dev
   Tests/ProdGlanceTests.swift Tests/SettingsFileTests.swift Tests/ProdTransitionsTests.swift
   Tests/ProdClaimsTests.swift Tests/PRDigestTests.swift Tests/PultikFormatTests.swift Tests/QueryRepositoryTests.swift
   Tests/ModuleRouterTests.swift Tests/NowQueueTests.swift Tests/ObservationLedgerTests.swift Tests/NowAdaptersTests.swift
-  Tests/FleetContractTests.swift Tests/BackendScheduleTests.swift)
+  Tests/FleetContractTests.swift Tests/BackendScheduleTests.swift
+  Tests/HostAdapterTests.swift Tests/GitMirrorTests.swift Tests/WarmSetTests.swift
+  Tests/RunBadgeTests.swift Tests/CIWatchTests.swift Tests/WorkflowGraphTests.swift Tests/RunCardTests.swift
+  Tests/AutolinkTests.swift)
 # Golden payloads the contract tests read beside themselves (#filePath).
 cp -R "$repo/Tests/Fixtures" "$harness/Tests/PultikTests/Fixtures"
 for file in "${sources[@]}" "$repo"/Sources/API/GitHub*.swift; do

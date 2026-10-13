@@ -205,6 +205,9 @@ Each component is one SwiftUI view in `Sources/Views/Kit/`, and each has a
 | **StatusFooter** (`.footer`) | 3 pt progress line on top (`ok`→`warn`→`danger` by value), **labelled at its end** in `micro` (`ohexampleapp 5h 93% left`); the bar below never repeats that value: sync state, the live pulse (sessions running), a sparkline with its figure, waiting count, the account's weekly quota, tokens today; trailing refresh, settings and quit | `ViewThatFits` drops the sparkline first, then the tokens; `Capsule` track + fill |
 | **Tile** (`.tile`) | `surface` fill, radius 14, padding 14, micro kicker + trailing caption, a 1 pt top highlight | `.background(Theme.surface, in: .rect(cornerRadius: 14))`, `.overlay(alignment: .top)` highlight |
 | **Button** (`.btn`) | `.btn.prim` is red prominent glass; `.btn` is neutral glass; `.btn.plain` is text-only `ink2` | `.glassProminent` + `.tint(Theme.accent)`, `.glass`, `.plain` |
+| **RunBadge** (`RunBadgeView`) | one CI run on a change request: its state's shape (✗ / spinning dot / ✓ / –), the workflow, the failing job in `danger` or the passed/total count, a live timer while running, the lane and its queue in `warn`; `danger`-washed when it failed; the ⇥ focus ring is a 2 pt accent capsule | `Button` on a `Capsule` fill; `TimelineView(.periodic)` only while the panel is presented; `.contentTransition(.symbolEffect(.replace))` |
+| **StackCard** (`StackedDetail`) | a card sliding up over the detail, which stays dimmed (42 %) with its header and badges peeking 92 pt above; deeper cards 14 pt lower; a click on the dimmed layer or Esc slides the top one away | `ZStack` + `Theme.Motion.card` transition, `push`/`pop` springs |
+| **GFM** (`GFMBlockView`) | a description in Pultík's own blocks: headings, paragraphs with `ink` underlined links, `canvasDeep` code wells, tables, task boxes, quotes on a hairline rule, alerts on a tinted rule (note `data`, tip `ok`, important `eve`, warning `warn`, caution `danger`), `<details>` as a disclosure | swift-markdown AST → `GFMBlock`; `Text(AttributedString)`, `Grid`, `AsyncImage` |
 
 ## 9. Never
 
@@ -223,3 +226,19 @@ Each component is one SwiftUI view in `Sources/Views/Kit/`, and each has a
   split (err `danger`, warn `warn`).
 - A tile without data, a placeholder string, an alert for an unreachable
   backend, or prod green from a snapshot.
+
+## 10. Motion (`Theme.Motion`)
+
+Every animated change takes a token, and every token degrades to a 0.15 s
+crossfade under Reduce Motion (`accessibilityReduceMotion`).
+
+| Token | Use | Curve |
+|---|---|---|
+| `status` | a badge, chip or dot changing state; its symbol replaces with a one-shot effect | ease-in-out 0.22 s |
+| `push` | a card sliding up over its detail | spring 0.34 s, bounce 0.12 |
+| `pop` | a card sliding away — shorter, flat | spring 0.24 s, no bounce |
+| `focus` | the ⇥ ring moving | snappy 0.14 s |
+| `swap` | a module body swapping in once the strip's keys settle | snappy 0.18 s |
+
+Timers count with `.contentTransition(.numericText())` and tick only while
+the panel is presented. Never a raw curve in a view.

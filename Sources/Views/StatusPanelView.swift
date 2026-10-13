@@ -49,8 +49,19 @@ struct StatusPanelView: View {
     /// arrow (`HomeNow.swift`).
     @State var nowTombstone: NowTombstone?
 
-    /// The entered module, the field's text, the selection and the detail.
-    @State var router = ModuleRouter()
+    /// Where the panel is — module, filter, selection, detail and its card
+    /// stack — and the place a summon returns to (stay in Pultík D1).
+    /// `AppDelegate` owns it, so it outlives the 30 s hosting-tree release.
+    let place: PanelPlace
+    var router: ModuleRouter { place.router }
+    /// Which module bodies are mounted, and the switch coalescing (D4).
+    @State var warmth = ModuleWarmth()
+    /// Each module page's objects, computed once per input (D4).
+    @State var pageMemo = ModulePageMemo()
+    /// The module just left keeps its live inputs while its body is still
+    /// the one drawn (the keys have not settled yet): no flicker to frozen.
+    @State var departing: (module: PanelModule, inputs: ModuleInputs)?
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
     @FocusState var paletteFocused: Bool
     let keyToken = UUID()
 
@@ -168,18 +179,23 @@ struct StatusPanelView: View {
                                                macHealth: MacHealthStore.shared),
                    chatting: eveAskedPrompt != nil,
                    showsHints: selectedID == nil && query.isEmpty,
-                   onSelectModule: selectModule,
+                   onSelectModule: selectModule, order: store.moduleOrder,
                    topBarHeight: $topBarHeight, footerHeight: $footerHeight) {
             palette
         } content: {
-            if let module = router.module, let page = modulePage(module) {
-                // An entered module takes the whole body (D5-A: the strip is
-                // the awareness, so no side column costs it width).
-                hosted(page)
-                    .frame(height: columnBudget)
-            } else {
-                globalBody
+            // An entered module takes the whole body (D5-A: the strip is the
+            // awareness, so no side column costs it width). Warm bodies stay
+            // mounted beside it, hidden, so switching to one is a flip (D4).
+            ZStack(alignment: .top) {
+                let mounted = warmth.mounted
+                if warmth.displayed == .home || mounted.contains(.home) {
+                    warmBody(.home) { globalBody }
+                }
+                ForEach(mounted.filter { $0 != .home }) { module in
+                    warmBody(module) { mountedModule(module).frame(height: columnBudget) }
+                }
             }
+            .animation(Theme.Motion.swap(reduceMotion), value: warmth.displayed)
         } footer: {
             PanelFooter(
                 store: store,
@@ -194,6 +210,14 @@ struct StatusPanelView: View {
             )
         }
         .environment(\.panelIsPresented, session.isPresented)
+        .environment(router)
+        .environment(\.openRow) { openRow($0) }
+        // A `pultik://` reference in a description opens inside Pultík.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let link = PultikLink(url) else { return .systemAction }
+            openLink(link)
+            return .handled
+        })
         // On the root, the search field's ancestor: it lives in the top bar,
         // and Esc from it must peel one layer, never fall through to the
         // panel's cancelOperation and close everything.
@@ -239,6 +263,23 @@ struct StatusPanelView: View {
         }
         .onChange(of: NowStore.shared.queue) { old, new in nowQueueChanged(from: old, to: new) }
         .onChange(of: router.selection) { _, id in nowSelectionChanged(to: id) }
+        // D4: the strip's lift follows the router at once; the body follows
+        // once the keys settle (a warm body at once).
+        .onChange(of: router.place) { old, new in
+            guard old.module != new.module else { return }
+            departing = old.module.map { ($0, ModuleInputs(filter: old.filter, selection: old.selection,
+                                                           detailOpen: old.detailOpen,
+                                                           inspectorOpen: old.inspectorOpen, stack: old.stack)) }
+            warmth.request(new.module ?? .home)
+            store.setVisibleModule(new.module ?? .home)
+        }
+        // D1: a place rested on for 1.5 s while up is where a summon returns.
+        .task(id: router.place) {
+            let since = Date()
+            try? await Task.sleep(for: .seconds(PanelPlace.dwell))
+            guard !Task.isCancelled, session.isPresented else { return }
+            place.rested(on: router.place, since: since)
+        }
         .onDisappear { panelDidDismiss() }
     }
 
@@ -250,6 +291,14 @@ struct StatusPanelView: View {
         // An ordered-out host can coalesce dismiss + reopen before SwiftUI
         // observes the hidden state. A fresh opening must reset regardless.
         panelDidDismiss()
+        // D1: back to the last place dwelled on (Home after Settings ▸
+        // Panel's timeout); D4: the keep-hot bodies build once it settles.
+        place.homeAfter = store.homeAfter
+        place.presented()
+        warmth.keepHot = store.keepHotModules
+        warmth.request(router.module ?? .home, immediate: true)
+        warmth.presented()
+        store.setVisibleModule(router.module ?? .home)
         // The open this call belongs to. Anything asynchronous started here
         // must check it before writing state back: the view is permanently
         // mounted, so a late completion would otherwise land in a hidden
@@ -352,8 +401,10 @@ struct StatusPanelView: View {
             macHealthWatching = false
         }
         paletteFocused = false
-        // Each summon opens on Home; remembered selections survive.
-        router.reset()
+        // The place stays (D1): the next summon restores what was dwelled on.
+        place.dismissed()
+        warmth.dismissed()
+        store.setVisibleModule(nil)
         nowTombstone = nil
         commandNotice = nil
         activeProject = nil
@@ -408,12 +459,37 @@ struct StatusPanelView: View {
         router.leave()
     }
 
+    /// What a module's body draws with: the router's own while it is the
+    /// entered module; frozen otherwise (D4) — no filter, its remembered
+    /// selection, no detail — exactly what entering it would produce, so a
+    /// warm body flips in without a change.
+    struct ModuleInputs: Equatable {
+        var filter = ""
+        var selection: String?
+        var detailOpen = false
+        var inspectorOpen = false
+        var stack: [DetailRef] = []
+    }
+
+    func inputs(for module: PanelModule) -> ModuleInputs {
+        guard router.module == module else {
+            if let departing, departing.module == module, warmth.displayed == module { return departing.inputs }
+            return ModuleInputs(selection: router.rememberedSelection(module))
+        }
+        return ModuleInputs(filter: router.text, selection: router.selection, detailOpen: router.detailOpen,
+                            inspectorOpen: router.inspectorOpen, stack: router.stack)
+    }
+
     /// Each module's list — the one place a module plugs into the shell.
     /// Each page draws its selected row, lists its objects in drawn order,
     /// and opens a clicked row's detail; the scope chip is the way back.
     func modulePage(_ module: PanelModule) -> (any ModulePage)? {
-        let filter = router.text
-        let selected = router.selection
+        modulePage(module, inputs: inputs(for: module))
+    }
+
+    func modulePage(_ module: PanelModule, inputs: ModuleInputs) -> (any ModulePage)? {
+        let filter = inputs.filter
+        let selected = inputs.selection
         let open: (String) -> Void = { router.openDetail($0) }
         switch module {
         case .home:
@@ -441,13 +517,55 @@ struct StatusPanelView: View {
         }
     }
 
-    func hosted(_ page: some ModulePage) -> AnyView {
-        AnyView(ModuleHost(page: page, router: router))
+    /// A page's objects, memoised per module and input (D4): the keyboard
+    /// and the host read the same list without recomputing it.
+    func pageObjects(_ module: PanelModule, _ inputs: ModuleInputs) -> [ModuleObject] {
+        // PRs draws an object for a PR opened from a link (its selection).
+        let key = "\(inputs.filter)|\(module == .prs ? "\(hiddenResolved.count)|\(inputs.selection ?? "")" : "")"
+        return pageMemo.objects(module, inputs: key) { modulePage(module, inputs: inputs)?.objects ?? [] }
+    }
+
+    /// A mounted module's body with its inputs, live or frozen.
+    func mountedModule(_ module: PanelModule) -> AnyView {
+        let inputs = inputs(for: module)
+        guard let page = modulePage(module, inputs: inputs) else { return AnyView(EmptyView()) }
+        return hosted(page, module: module, inputs: inputs)
+    }
+
+    func hosted(_ page: some ModulePage, module: PanelModule, inputs: ModuleInputs) -> AnyView {
+        AnyView(ModuleHost(page: page, objects: pageObjects(module, inputs), selection: inputs.selection,
+                           detailOpen: inputs.detailOpen, inspectorOpen: inputs.inspectorOpen, stack: inputs.stack,
+                           onPop: { popCard() }, card: { cardView($0) }))
+    }
+
+    /// One warm body in the content stack: drawn and hit-testable only while
+    /// displayed. Its appearance is one build (`state.moduleBuilds`, AC 12).
+    func warmBody(_ module: PanelModule, @ViewBuilder _ content: () -> some View) -> some View {
+        let shown = warmth.displayed == module
+        return content()
+            .opacity(shown ? 1 : 0)
+            .allowsHitTesting(shown)
+            .accessibilityHidden(!shown)
+            .zIndex(shown ? 1 : 0)
+            .onAppear { warmth.built(module) }
+    }
+
+    /// A card on the detail stack (D2).
+    func cardView(_ ref: DetailRef) -> AnyView {
+        switch ref.kind {
+        case .run:
+            guard let run = CIRunRef(key: ref.id) else { return AnyView(EmptyView()) }
+            return AnyView(RunCard(store: store, ref: run, walk: ref, router: router))
+        }
+    }
+
+    func popCard() {
+        withAnimation(Theme.Motion.pop(reduceMotion)) { router.pop() }
     }
 
     /// The entered module's objects in drawn order; empty when global.
     var moduleObjects: [ModuleObject] {
-        router.module.flatMap(modulePage)?.objects ?? []
+        router.module.map { pageObjects($0, inputs(for: $0)) } ?? []
     }
 
     /// Is the selected object's detail on screen (not just requested)?
@@ -462,19 +580,28 @@ struct StatusPanelView: View {
         router.enter(.prs, filter: showsHome ? "" : query, select: id, openDetail: true)
     }
 
-    /// A `pultik://` link: an inbox PR opens its detail; one the inbox does
-    /// not hold (another author's, a repo not pinned) opens on GitHub.
+    /// A `pultik://` link — a notification, another app, a reference in a
+    /// description: the PR opens its detail in PRs, an inbox row by its own
+    /// id, any other by `archive:` (stay in Pultík: never the browser).
     func openLink(_ link: PultikLink) {
         switch link {
         case let .pr(repo, number):
             let entry = store.inbox.first {
                 $0.repoSlug.caseInsensitiveCompare(repo) == .orderedSame && $0.info.pr.number == number
             }
-            if let entry {
-                router.enter(.prs, filter: "", select: "pr:\(entry.id)", openDetail: true)
-            } else if let url = link.webURL {
-                OverviewURL.open(url)
-            }
+            router.enter(.prs, filter: "", select: entry.map { "pr:\($0.id)" } ?? "archive:\(repo)#\(number)",
+                         openDetail: true)
+        }
+    }
+
+    /// A row's click (stay in Pultík S1): in a module its detail, in the
+    /// global results the row's own ↵ — a PR opens its detail in PRs.
+    func openRow(_ id: String) {
+        if router.module != nil {
+            router.openDetail(id)
+        } else if !perform(.activate(id)), id.hasPrefix("pr:") || id.hasPrefix("archive:") {
+            // A PR row no palette list holds (Home's tiles, a project page).
+            openPRDetail(id)
         }
     }
 
@@ -490,22 +617,27 @@ struct StatusPanelView: View {
     /// event is addressed to the field by construction (`synthetic`).
     func keyContext(synthetic: Bool = false) -> KeyContext {
         let global = router.module == nil
+        let shown = detailShown
         return KeyContext(
             fieldFocused: synthetic || paletteFocused,
             textViewFocused: !synthetic && !paletteFocused && NSApp.keyWindow?.firstResponder is NSTextView,
             module: router.module,
+            order: store.moduleOrder,
             text: query,
             pendingToken: router.pendingToken,
             items: keyItems,
             selection: selectedID,
-            detailOpen: detailShown,
+            detailOpen: shown,
             pathCard: global && pathTarget != nil,
             completion: global && (!slashMatches.isEmpty || !modePickerMatches.isEmpty),
             notesDraft: activeMode.map { $0.mode == .notes && !$0.filter.isEmpty } ?? false,
             page: global && (showTodos || activeProject != nil),
             eve: eveAskedPrompt != nil,
             noteEditing: global && editingNoteID != nil,
-            noteExpanded: global && expandedNoteID != nil
+            noteExpanded: global && expandedNoteID != nil,
+            focusTargets: shown ? router.focusTargets : [],
+            focus: shown ? router.focus : nil,
+            card: shown ? router.stack.last?.id : nil
         )
     }
 
@@ -528,6 +660,11 @@ struct StatusPanelView: View {
             item.activate()
             if !item.keepsSelection { selectedID = nil }
         case let .openInBrowser(id):
+            // A card on the detail: ⌘↵ is the card's page.
+            if router.module != nil, let card = router.stack.last, let url = cardURL(card) {
+                OverviewURL.open(url)
+                return true
+            }
             // Browser-only: a row without a page swallows ⌘↵ and does nothing —
             // it never falls back to the row's own ↵ (a quick command, a note,
             // a layout would run).
@@ -538,6 +675,12 @@ struct StatusPanelView: View {
         case .toggleInspector:
             router.toggleInspector()
         case let .rerunFailed(id):
+            // A run card: its run, once read and while it reads failed.
+            if let ref = CIRunRef(key: String(id.dropFirst(4))) {
+                guard let shown = store.cachedCIRun(ref)?.run, shown.failed else { return false }
+                CIRerunCenter.shared.rerun(ref, shown: shown, store: store)
+                return true
+            }
             // The detail's own verb: it fires only once the run it would
             // re-run has been read.
             guard let verb = moduleObjects.first(where: { $0.id == id })?.verbs.first(where: { $0.role == .primary })
@@ -589,6 +732,16 @@ struct StatusPanelView: View {
             copyNote(note)
         case let .swallowToken(key):
             return router.swallowTokenKey(key)
+        case let .focus(step):
+            withAnimation(Theme.Motion.focus(reduceMotion)) { router.moveFocus(step) }
+        case .activateFocus:
+            withAnimation(Theme.Motion.push(reduceMotion)) { router.activateFocus() }
+        case let .cardMove(step):
+            router.moveInCard(step)
+        case let .cardColumn(step):
+            router.moveCardColumn(step)
+        case .cardOpen:
+            router.openInCard()
         case .ignore:
             break
         }
@@ -605,6 +758,10 @@ struct StatusPanelView: View {
             withAnimation(.easeOut(duration: 0.16)) { expandedNoteID = nil }
         case .dismissEve:
             dismissEve()
+        case .clearFocus:
+            withAnimation(Theme.Motion.focus(reduceMotion)) { router.clearFocus() }
+        case .popCard:
+            popCard()
         case .clearText:
             // A mode, completion or path card exits; a filter empties.
             query = ""
@@ -619,6 +776,16 @@ struct StatusPanelView: View {
             leaveModule()
         case .close:
             AppDelegate.shared?.closePanel()
+        }
+    }
+}
+
+extension StatusPanelView {
+    /// A card's page in the browser: a run's, once read.
+    func cardURL(_ card: DetailRef) -> URL? {
+        switch card.kind {
+        case .run:
+            return CIRunRef(key: card.id).flatMap { store.cachedCIRun($0) }.flatMap { URL(string: $0.run.url) }
         }
     }
 }

@@ -12,7 +12,7 @@ struct ProdDeploymentDetail: View {
     let card: ProdGlance.Card
 
     @State private var detail: Detail?
-    @State private var releases: [GitHubRelease.Source: Release] = [:]
+    @State private var releases: [ReleaseSource: Release] = [:]
 
     /// Hlídač's per-deployment answer and when it landed: a newer digest
     /// makes the issues it alone lists last known.
@@ -26,13 +26,13 @@ struct ProdDeploymentDetail: View {
     }
 
     private struct Release {
-        var line: GitHubRelease.Line?
+        var line: ReleaseLine?
         var fetchedAt: Date?
         var failure: String?
     }
 
     private var deployment: HlidacDigest.Deployment? { card.deployment }
-    private var sources: [GitHubRelease.Source] {
+    private var sources: [ReleaseSource] {
         store.preferences.prodPointers.first { $0.key == card.key }?.releaseSources
             ?? ProdPointer(key: card.key).releaseSources
     }
@@ -88,7 +88,7 @@ struct ProdDeploymentDetail: View {
         }
     }
 
-    private func load(_ source: GitHubRelease.Source) async {
+    private func load(_ source: ReleaseSource) async {
         for maxAge in [TimeInterval.infinity, StatusStore.ProdDetailResources.release.staleAfter] {
             do {
                 let (line, fetchedAt) = try await store.releaseLine(source, maxAge: maxAge)
@@ -236,7 +236,7 @@ struct ProdDeploymentDetail: View {
         }
     }
 
-    private func releaseTile(_ source: GitHubRelease.Source, release: Release?, now: Date) -> some View {
+    private func releaseTile(_ source: ReleaseSource, release: Release?, now: Date) -> some View {
         let stale = release?.fetchedAt.map { now.timeIntervalSince($0) > StatusStore.ProdDetailResources.release.staleAfter } ?? false
         let caption = [source.repo, source.environment,
                        stale ? release?.fetchedAt.map { "as of \(PultikFormat.clock($0))" } : nil]
@@ -283,7 +283,7 @@ struct ProdDeploymentDetail: View {
 /// What a GitHub environment runs against its branch: the live commit, a
 /// newer deployment in flight or failed, and the commits waiting to ship.
 struct ReleaseLineView: View {
-    let line: GitHubRelease.Line
+    let line: ReleaseLine
     let now: Date
 
     var body: some View {
@@ -293,7 +293,7 @@ struct ReleaseLineView: View {
             } else {
                 HStack(spacing: 8) {
                     Chip("no live deployment", .dashed)
-                    Text("None of the last \(GitHubRelease.deploymentLimit) deployments to \(line.source.environment) succeeded")
+                    Text("None of the last \(ReleaseLine.deploymentLimit) deployments to \(line.source.environment) succeeded")
                         .font(Theme.Typo.meta).foregroundStyle(Theme.ink2).lineLimit(1)
                 }
             }
@@ -308,7 +308,7 @@ struct ReleaseLineView: View {
         }
     }
 
-    private func deployRow(_ deploy: GitHubRelease.Deploy, tone: Color, style: StatusDot.Style, verb: String) -> some View {
+    private func deployRow(_ deploy: ReleaseDeploy, tone: Color, style: StatusDot.Style, verb: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             StatusDot(tone: tone, style: style)
             Text(verb).font(Theme.Typo.title).foregroundStyle(Theme.ink)

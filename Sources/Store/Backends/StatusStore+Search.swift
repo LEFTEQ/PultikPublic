@@ -7,11 +7,12 @@ extension StatusStore {
     #if DEBUG
     func githubRequestCounts() async
         -> (network: Int, shared: Int, lookups: Int, searches: Int, details: Int, files: Int, ciRuns: Int, ciLogs: Int,
-            releases: Int) {
+            releases: Int, batches: Int) {
         (await client.networkRequests, await client.sharedRequests,
          await client.prLookupRequests, await client.prSearchRequests,
          await client.prDetailRequests, await client.prFilesRequests,
-         await client.ciDetailRequests, await client.ciLogRequests, await client.releaseRequests)
+         await client.ciDetailRequests, await client.ciLogRequests, await client.releaseRequests,
+         await client.prBatchRequests)
     }
     #endif
 

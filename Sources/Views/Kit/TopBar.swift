@@ -137,6 +137,8 @@ struct ModuleStrip: View {
     let current: PanelModule?
     let signals: [PanelModule: ModuleSignal]
     let onSelect: (PanelModule) -> Void
+    /// Settings ▸ Modules' order (stay in Pultík D4): the strip and ⌘1–9.
+    var order: [PanelModule] = PanelModule.allCases
     @Namespace private var lift
 
     var body: some View {
@@ -153,8 +155,8 @@ struct ModuleStrip: View {
 
     private func row(named: Bool) -> some View {
         StripLayout(spacing: 6) {
-            ForEach(PanelModule.allCases) { module in
-                ModuleChip(module: module, signal: signals[module] ?? .none,
+            ForEach(order) { module in
+                ModuleChip(module: module, number: module.number(in: order), signal: signals[module] ?? .none,
                            isCurrent: module == current, showsTitle: named || module == current, lift: lift) {
                     onSelect(module)
                 }
@@ -165,6 +167,7 @@ struct ModuleStrip: View {
 
 private struct ModuleChip: View {
     let module: PanelModule
+    let number: Int
     let signal: ModuleSignal
     let isCurrent: Bool
     let showsTitle: Bool
@@ -219,7 +222,7 @@ private struct ModuleChip: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(signal.help ?? "\(module.title) — ⌘\(module.number)")
+        .help(signal.help ?? "\(module.title) — ⌘\(number)")
         .accessibilityLabel(module.title)
         .accessibilityAddTraits(isCurrent ? .isSelected : [])
     }

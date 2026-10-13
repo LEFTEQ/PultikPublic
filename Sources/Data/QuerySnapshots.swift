@@ -125,6 +125,10 @@ actor QuerySnapshotStore {
         }
     }
 
+    func exists(_ key: QueryKey) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(key).path)
+    }
+
     /// Marks the key's snapshot used now, when there is one.
     func touch(_ key: QueryKey) {
         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: fileURL(key).path)
