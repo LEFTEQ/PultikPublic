@@ -24,8 +24,10 @@ enum ModuleSignals {
 
         signals[.prod] = prodSignal(store.prodGlance, dots: store.prodDots)
 
-        if let summary = store.devboxSummary {
-            let stale = DevboxGlance(summary: summary, workspaces: store.devboxWorkspaces).stale
+        // Every box's stale rows — the table's, which the trash reaps — not
+        // only the strip's box.
+        if store.devboxSummary != nil {
+            let stale = DevboxGlance.staleCount(store.devboxWorkspaces)
             if stale > 0 {
                 signals[.devbox] = ModuleSignal(kind: .text("\(stale) stale", symbol: nil), tone: Theme.warn)
             }

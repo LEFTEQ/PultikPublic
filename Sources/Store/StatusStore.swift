@@ -87,10 +87,11 @@ final class StatusStore {
     /// the last good copy (or defaults), so nothing may act on its absences.
     var settingsWritable = true
     var settingsReload: Task<Void, Never>?
-    /// Semafor's `/overview`, refreshed at most every `throughputInterval`
-    /// inside the pool's breaker; nil whenever Semafor is not answering.
-    var ciThroughput: CIThroughput?
-    var throughputFetchedAt: Date?
+    /// Each host's Semafor `/overview` by the host's `ref`, refreshed at
+    /// most every `throughputInterval` inside that Semafor's breaker; a host
+    /// whose Semafor is not answering has none.
+    var ciThroughputs: [String: CIThroughput] = [:]
+    var throughputFetchedAt: [String: Date] = [:]
     static let throughputInterval: TimeInterval = 60
     var vitrinkaListening: [VitrinkaListening] { selectedVitrinkaWorkspace?.tray.listeners ?? [] }
     var vitrinkaBoards: [VitrinkaBoard] { selectedVitrinkaWorkspace?.tray.boards ?? [] }

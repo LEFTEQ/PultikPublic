@@ -2,7 +2,8 @@ import Foundation
 
 /// Instant PromQL queries against the central Prometheus on the WireGuard
 /// mesh (192.0.2.10:9090 — BuildServer; holds node/cadvisor/blackbox series for
-/// BOTH VPSes). No auth; off-mesh every call fails fast and the rails hide.
+/// every host, the remote-written ones labelled `cluster`). No auth; off-mesh
+/// every call fails fast and the rails hide.
 actor MetricsClient {
     static let shared = MetricsClient()
     /// The mesh host the estate's rules are read from — Now's identity for them.
@@ -63,32 +64,20 @@ actor MetricsClient {
         return components?.url
     }
 
-    /// instance label → value, for a query returning one sample per instance.
-    private func instantByInstance(_ query: String) async throws -> [String: Double] {
-        var components = URLComponents(
-            url: base.appending(path: "api/v1/query"), resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [URLQueryItem(name: "query", value: query)]
-        let (data, response) = try await session.data(from: components.url!)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let dataField = body["data"] as? [String: Any],
-              let results = dataField["result"] as? [[String: Any]]
-        else { throw URLError(.badServerResponse) }
-
-        var values: [String: Double] = [:]
-        for result in results {
-            guard let metric = result["metric"] as? [String: Any],
-                  let instance = metric["instance"] as? String,
-                  let value = result["value"] as? [Any],
-                  let raw = value.last as? String,
-                  let number = Double(raw)
-            else { continue }
-            values[instance] = number
-        }
-        return values
+    /// A host or one of its guests: `instance`, plus `vm_host` for a guest —
+    /// both BuildServers run a guest named `firefly-vm`.
+    struct Machine: Hashable {
+        let instance: String
+        let vmHost: String?
     }
 
+    /// machine → value, for a query returning one sample per instance.
+    private func instantByMachine(_ query: String) async throws -> [Machine: Double] {
+        Dictionary(try await instantSeries(query).compactMap { sample in
+            guard let instance = sample.labels["instance"] else { return nil }
+            return (Machine(instance: instance, vmHost: sample.labels["vm_host"]), sample.value)
+        }, uniquingKeysWith: { _, last in last })
+    }
 
     /// Full label sets for an instant query — for series whose identity spans
     /// several labels (`ci_runner_job_info` carries lane/repo/workflow/job).
@@ -140,14 +129,15 @@ actor MetricsClient {
         return (jobs, queued)
     }
 
-    /// The BuildServer JIT fleet, lane by lane. Runners are per-job and
-    /// nameless since 2026-08-30, so the stable unit is the controller
-    /// instance (`ci_kvm_controller_up`), its occupancy the collector's
-    /// per-job series (`ci_runner_job_info`, link included) and its backlog
-    /// `ci_jobs_queued`. `ci_lane_info` carries each lane's repo tier and job
-    /// kind; lanes have no ceilings since 2026-09-26 — the shared pool comes
-    /// from Semafor (`SemaforClient`). Jobs on lanes that are not ours
-    /// (`github-hosted`, `unknown`) are kept aside as `elsewhere`.
+    /// Every host's JIT fleet, lane by lane, each lane tagged with the host
+    /// whose Firefly runs it. Runners are per-job and nameless since
+    /// 2026-08-30, so the stable unit is the controller instance
+    /// (`ci_kvm_controller_up`), its occupancy the collector's per-job series
+    /// (`ci_runner_job_info`, link included) and its backlog
+    /// `ci_jobs_queued`. `ci_lane_info` carries each lane's repo, tier and job
+    /// kind; lanes have no ceilings since 2026-09-26 — each host's pool comes
+    /// from its own Semafor (`SemaforClient`). Jobs on lanes that are not
+    /// ours (`github-hosted`, `unknown`) are kept aside as `elsewhere`.
     func laneBoard() async -> CILaneBoard {
         async let controllersQuery = try? instantSeries("ci_kvm_controller_up")
         async let infoQuery = try? instantSeries("ci_lane_info")
@@ -159,7 +149,7 @@ actor MetricsClient {
         let (runnerCPU, runnerMemory) = await (runnerCPUQuery, runnerMemoryQuery)
         guard let controllers, !controllers.isEmpty else { return CILaneBoard() }
 
-        var laneInfo: [String: (tier: Int?, kind: String?)] = [:]
+        var laneInfo: [String: (tier: Int?, kind: String?, repo: String?)] = [:]
         func byRunner(_ samples: [(labels: [String: String], value: Double)]?) -> [String: Double] {
             Dictionary((samples ?? []).compactMap { sample in
                 guard let runner = sample.labels["runner"], sample.value.isFinite, sample.value >= 0 else { return nil }
@@ -170,7 +160,7 @@ actor MetricsClient {
         let memoryByRunner = byRunner(runnerMemory)
         for series in info ?? [] {
             if let lane = series.labels["lane"] {
-                laneInfo[lane] = (series.labels["tier"].flatMap(Int.init), series.labels["kind"])
+                laneInfo[lane] = (series.labels["tier"].flatMap(Int.init), series.labels["kind"], series.labels["repo"])
             }
         }
         var queuedByLane: [String: Int] = [:]
@@ -199,15 +189,20 @@ actor MetricsClient {
         var known = Set<String>()
         for series in controllers {
             // The exporter labels the lane `instance`; Prometheus keeps the
-            // scrape target's own `instance` and moves the lane to
-            // `exported_instance` on the way in.
-            guard let name = series.labels["exported_instance"] ?? series.labels["instance"] else { continue }
+            // scrape target's own `instance` — the host whose Firefly runs
+            // the lane — and moves the lane to `exported_instance` on the
+            // way in. Never the hostname: the live box reports
+            // build-server-next's.
+            let exported = series.labels["exported_instance"]
+            guard let name = exported ?? series.labels["instance"] else { continue }
             known.insert(name)
             board.lanes.append(CILane(
                 name: name,
                 backend: series.labels["backend"] ?? "",
                 trustGroup: series.labels["trust_group"] ?? "",
                 up: series.value > 0,
+                host: exported == nil ? series.labels["cluster"] : series.labels["instance"],
+                repo: laneInfo[name]?.repo,
                 tier: laneInfo[name]?.tier,
                 kind: laneInfo[name]?.kind,
                 queued: queuedByLane[name] ?? 0,
@@ -226,48 +221,91 @@ actor MetricsClient {
         return board
     }
 
+    /// Every configured server, each followed by the VM guests whose
+    /// `vm_host` is its instance (devbox-c and firefly-vm under
+    /// build-server-next) — found in the same queries' answers, at no extra
+    /// query. Guests are split per host, never merged across hosts.
     func serverMetrics(servers: [(name: String, instance: String)]) async -> [ServerMetrics] {
-        async let cores = try? instantByInstance(#"count by (instance) (node_cpu_seconds_total{mode="idle"})"#)
-        async let cpu = try? instantByInstance(
-            #"100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))"#
+        async let cores = try? instantByMachine(#"count by (instance, vm_host) (node_cpu_seconds_total{mode="idle"})"#)
+        async let cpu = try? instantByMachine(
+            #"100 * (1 - avg by (instance, vm_host) (rate(node_cpu_seconds_total{mode="idle"}[5m])))"#
         )
-        async let ram = try? instantByInstance(
+        async let ram = try? instantByMachine(
             #"100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"#
         )
-        async let disk = try? instantByInstance(
+        async let disk = try? instantByMachine(
             #"100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"})"#
         )
         // Absolute bytes as well as the percentage: the footer reads "18/32 GB",
         // which a ratio alone can't answer.
-        async let ramUsed = try? instantByInstance(
+        async let ramUsed = try? instantByMachine(
             #"node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes"#
         )
-        async let ramTotal = try? instantByInstance(#"node_memory_MemTotal_bytes"#)
-        async let diskUsed = try? instantByInstance(
+        async let ramTotal = try? instantByMachine(#"node_memory_MemTotal_bytes"#)
+        async let diskUsed = try? instantByMachine(
             #"node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}"#
         )
-        async let diskTotal = try? instantByInstance(
+        async let diskTotal = try? instantByMachine(
             #"node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}"#
         )
+        // build-server-next's ZFS observer (build-server-infra decisions row 33):
+        // pool fill and the quota'd datasets; absent on every other host.
+        async let poolUsed = try? instantSeries("zfs_pool_allocated_bytes")
+        async let poolSize = try? instantSeries("zfs_pool_size_bytes")
+        async let datasetUsed = try? instantSeries("zfs_dataset_used_bytes")
+        async let datasetQuota = try? instantSeries("zfs_dataset_quota_bytes > 0")
         let (cpuMap, ramMap, diskMap) = await (cpu, ram, disk)
         let coreMap = await cores
         let (ramUsedMap, ramTotalMap, diskUsedMap, diskTotalMap) =
             await (ramUsed, ramTotal, diskUsed, diskTotal)
+        let pools = await Self.zfs(used: poolUsed, total: poolSize, name: "pool")
+        let datasets = await Self.zfs(used: datasetUsed, total: datasetQuota, name: "dataset")
         guard cpuMap != nil || ramMap != nil || diskMap != nil else { return [] }
-        return servers.map { server in
+
+        func metrics(_ name: String, _ machine: Machine) -> ServerMetrics {
             ServerMetrics(
-                name: server.name,
-                instance: server.instance,
-                cpu: cpuMap?[server.instance],
-                ram: ramMap?[server.instance],
-                disk: diskMap?[server.instance],
-                ramUsedBytes: ramUsedMap?[server.instance],
-                ramTotalBytes: ramTotalMap?[server.instance],
-                diskUsedBytes: diskUsedMap?[server.instance],
-                diskTotalBytes: diskTotalMap?[server.instance],
-                cpuCount: coreMap?[server.instance].map(Int.init)
+                name: name,
+                instance: machine.instance,
+                vmHost: machine.vmHost,
+                cpu: cpuMap?[machine],
+                ram: ramMap?[machine],
+                disk: diskMap?[machine],
+                ramUsedBytes: ramUsedMap?[machine],
+                ramTotalBytes: ramTotalMap?[machine],
+                diskUsedBytes: diskUsedMap?[machine],
+                diskTotalBytes: diskTotalMap?[machine],
+                cpuCount: coreMap?[machine].map(Int.init),
+                pools: machine.vmHost == nil ? pools[machine.instance] ?? [] : [],
+                datasets: machine.vmHost == nil ? datasets[machine.instance] ?? [] : []
             )
         }
+        let hosts = Set(servers.map(\.instance))
+        let guests = Set([coreMap, ramMap].compactMap { $0 }.flatMap(\.keys))
+            .filter { $0.vmHost.map(hosts.contains) ?? false }
+        return servers.flatMap { server in
+            [metrics(server.name, Machine(instance: server.instance, vmHost: nil))]
+                + guests.filter { $0.vmHost == server.instance }
+                .sorted { $0.instance < $1.instance }
+                .map { metrics($0.instance, $0) }
+        }
+    }
+
+    /// instance → its pools or datasets, largest first; a guest has none.
+    private static func zfs(used: [(labels: [String: String], value: Double)]?,
+                            total: [(labels: [String: String], value: Double)]?,
+                            name label: String) -> [String: [ZFSUsage]] {
+        var totals: [String: Double] = [:]
+        for sample in total ?? [] {
+            guard let instance = sample.labels["instance"], let name = sample.labels[label] else { continue }
+            totals["\(instance)\u{0}\(name)"] = sample.value
+        }
+        var byInstance: [String: [ZFSUsage]] = [:]
+        for sample in used ?? [] where sample.labels["vm_host"] == nil {
+            guard let instance = sample.labels["instance"], let name = sample.labels[label],
+                  let total = totals["\(instance)\u{0}\(name)"], total > 0 else { continue }
+            byInstance[instance, default: []].append(ZFSUsage(name: name, usedBytes: sample.value, totalBytes: total))
+        }
+        return byInstance.mapValues { $0.sorted { $0.totalBytes > $1.totalBytes } }
     }
 
     func serviceStatuses(services: [(name: String, probe: String, host: String?, job: String?)]) async -> [ServiceStatus] {

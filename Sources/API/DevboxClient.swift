@@ -339,7 +339,11 @@ actor DevboxClient {
     /// keeps its last good list. The payload is the verdict, not the exit
     /// status: an unreachable box still leaves `ok: true` with a warning.
     nonisolated func discoverBoxes() async -> [DevboxEndpoint]? {
-        let result = localDevbox(["boxes", "--json"], timeout: 30)
+        // From home, never a devbox checkout: the CLI reads the registry of
+        // any checkout above its working directory, and a stale one carries
+        // no `primary` row (a terminal-launched Debug build inherits its cwd).
+        let result = localDevbox(["boxes", "--json"], timeout: 30,
+                                 currentDirectory: FileManager.default.homeDirectoryForCurrentUser)
         guard let candidates = DevboxDiscovery.candidates(fromBoxesJSON: Data(result.stdout.utf8)) else {
             NSLog("pultik: devbox box discovery gave no usable answer: %@",
                   result.stderr.isEmpty ? String(result.stdout.prefix(200)) : result.stderr)

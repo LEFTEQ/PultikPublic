@@ -270,7 +270,14 @@ struct Preferences: Codable {
         /// blackbox-ssl; an eve gateway's `/ready` is both "logged in" and
         /// "usable"). Nil = any non-ssl job, worst value wins.
         var job: String?
+        /// Servers only: the base URL of the Semafor that counts THIS host's
+        /// CI lanes — one per host since 2026-10-14. Nil or "" = none.
+        var semafor: String?
         var id: String { ref }
+
+        var semaforURL: URL? {
+            semafor.flatMap { $0.isEmpty ? nil : URL(string: $0) }
+        }
     }
 
     /// `ref` is the prometheus instance label; `ssh` is the shell target, which
@@ -280,8 +287,15 @@ struct Preferences: Codable {
     /// WireGuard mesh has to be up — sshd listens nowhere else. AppServer's
     /// label is still `example-vps`: the estate rename (2026-08-18) deliberately
     /// left Prometheus labels alone, so the label and the name disagree forever.
+    /// BuildServer-next (Scaleway, 2026-10-14) leads: the devbox (box c) and
+    /// most CI lanes run there, and the estate is moving onto it. Its ref is
+    /// its own `instance` label (`cluster` too) — the live BuildServer's
+    /// hostname is ALSO build-server-next, so nothing keys on a hostname.
     static let defaultServers = [
-        NamedRef(name: "BuildServer", ref: "build-vps", ssh: "build-server-admin"),
+        NamedRef(name: "BuildServer-next", ref: "build-server-next", ssh: "build-server-next",
+                 semafor: "https://semafor.byhenderson.com"),
+        NamedRef(name: "BuildServer", ref: "build-vps", ssh: "build-server-admin",
+                 semafor: "https://semafor.ops.example.invalid"),
         NamedRef(name: "AppServer", ref: "example-vps", ssh: "app-server"),
         NamedRef(name: "WebServer", ref: "web-server", ssh: "web-server"),
     ]
@@ -569,13 +583,14 @@ struct Preferences: Codable {
         // Deliberately not short-circuited: every migration must run.
         let retired = retireDeadSSHAliases()
         let servers = migrateServerEstate()
+        let next = migrateBuildServerNext()
         let services = migrateServiceEstate()
         let presets = migrateDisplayPresets()
         let repos = migrateRepoSlugs()
         let probes = migrateRetiredServiceRefs()
         let prod = seedProdPointers()
         let modules = seedModules()
-        return retired || servers || services || presets || repos || probes || prod || modules
+        return retired || servers || next || services || presets || repos || probes || prod || modules
     }
 
     /// Stay in Pultík (D4, N1): an absent `modules` becomes the defaults —
@@ -836,6 +851,28 @@ struct Preferences: Codable {
             )
             changed = true
             NSLog("pultik: server 'WebServer' added to the saved estate")
+        }
+        return changed
+    }
+
+    /// The 2026-10-14 estate: build-server-next joins ahead of the live
+    /// BuildServer (keyed on its ref, so a renamed entry is not re-added), and
+    /// a server without a Semafor gets its shipped one by ref — "" keeps
+    /// none.
+    mutating func migrateBuildServerNext() -> Bool {
+        var changed = false
+        if !servers.contains(where: { $0.ref == "build-server-next" }),
+           let template = Self.defaultServers.first(where: { $0.ref == "build-server-next" }) {
+            let anchor = servers.firstIndex { $0.ref == "build-vps" } ?? 0
+            servers.insert(template, at: anchor)
+            changed = true
+            NSLog("pultik: server 'BuildServer-next' added to the saved estate")
+        }
+        let shipped = Dictionary(Self.defaultServers.map { ($0.ref, $0.semafor) }, uniquingKeysWith: { first, _ in first })
+        for index in servers.indices where servers[index].semafor == nil {
+            guard let semafor = shipped[servers[index].ref] ?? nil else { continue }
+            servers[index].semafor = semafor
+            changed = true
         }
         return changed
     }

@@ -49,9 +49,15 @@ struct DevboxGlance {
     let slotsUsed: Int?
     let slotsTotal: Int?
     let alerts: [DevboxAlert]
-    /// The per-box breakdown under the combined gauges — empty with a
-    /// single box, so the one-box widget is exactly what it was.
+    /// The box the gauges are, when there are several: the primary's own
+    /// figures, never a sum. nil with a single box.
+    let box: DevboxBoxShare?
+    /// Every other box, one line each — empty with a single box, so the
+    /// one-box widget is exactly what it was.
     let boxes: [DevboxBoxShare]
+    /// Workspaces (hot and parked) per box name — a draining box's count is
+    /// how far its move has got.
+    let workspacesByBox: [String: Int]
 
     /// Counts come from the workspace list, not the summary's totals, so
     /// the widget and the `.devbox` page never disagree about the pile.
@@ -64,15 +70,13 @@ struct DevboxGlance {
         headroomBytes = summary.memoryAvailableBytes - floorBytes
         diskUsedBytes = summary.diskUsedBytes
         diskTotalBytes = summary.diskTotalBytes
-        running = workspaces.filter(\.isHot).sorted { $0.memoryBytes > $1.memoryBytes }
-        let parkedSpaces = workspaces.filter(\.isParked)
-        parked = parkedSpaces.count
-        // Held workspaces are exempt: `gc --retire-stale` never clears them.
-        stale = parkedSpaces.filter { workspace in
-            guard !workspace.hold, let parkedAt = workspace.parkedAt else { return false }
-            return now.timeIntervalSince(parkedAt) > Self.staleAfter
-        }.count
-        held = workspaces.filter(\.hold).count
+        // With several boxes every figure is `summary.box`'s own, the pile
+        // included; the other boxes' counts are their lines'.
+        let own = summary.box.map { box in workspaces.filter { $0.box?.name == box } } ?? workspaces
+        running = own.filter(\.isHot).sorted { $0.memoryBytes > $1.memoryBytes }
+        parked = own.filter(\.isParked).count
+        stale = Self.staleCount(own, now: now)
+        held = own.filter(\.hold).count
         pressurePercent = summary.pressureSome
         swapUsedBytes = max(0, summary.swapTotalBytes - summary.swapFreeBytes)
         swapTotalBytes = summary.swapTotalBytes
@@ -88,7 +92,12 @@ struct DevboxGlance {
             slotsUsed = nil
             slotsTotal = nil
         }
-        boxes = summary.boxes.count > 1 ? summary.boxes : []
+        let shares = summary.boxes.count > 1 ? summary.boxes : []
+        box = shares.first { $0.name == summary.box }
+        boxes = shares.filter { $0.name != summary.box }
+        workspacesByBox = workspaces.reduce(into: [:]) { counts, workspace in
+            if let name = workspace.box?.name { counts[name, default: 0] += 1 }
+        }
 
         var alerts: [DevboxAlert] = []
         if pressurePercent > Self.pressureAlertPercent { alerts.append(.pressure(percent: pressurePercent)) }
@@ -99,6 +108,21 @@ struct DevboxGlance {
             alerts.append(.slots(used: slotsUsed, total: slotsTotal))
         }
         self.alerts = alerts
+    }
+
+    /// Where a drain moves to: the registry's primary box — not the strip's
+    /// box, which is another one while the primary is silent.
+    var primaryBox: String? {
+        ([box].compactMap { $0 } + boxes).first { $0.primary == true }?.name
+    }
+
+    /// Parked past `staleAfter`. Held workspaces are exempt: `gc
+    /// --retire-stale` never clears them.
+    static func staleCount(_ workspaces: [DevboxWorkspace], now: Date = Date()) -> Int {
+        workspaces.filter { workspace in
+            guard workspace.isParked, !workspace.hold, let parkedAt = workspace.parkedAt else { return false }
+            return now.timeIntervalSince(parkedAt) > staleAfter
+        }.count
     }
 
     /// The widget's orange line: every alert its gauges do not already draw.

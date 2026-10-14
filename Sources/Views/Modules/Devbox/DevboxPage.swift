@@ -94,6 +94,12 @@ struct DevboxPage: View {
     private func metricStrip(_ glance: DevboxGlance) -> some View {
         let alerting = Set(glance.alerts.map(\.metric))
         return VStack(alignment: .leading, spacing: 10) {
+            if let box = glance.box {
+                Text(box.title)
+                    .font(RailRowMetrics.metaFont)
+                    .foregroundStyle(.tertiary)
+                    .help("Every figure on this strip is box \(box.name)'s own — the other boxes are the lines below it")
+            }
             HStack(alignment: .top, spacing: 18) {
                 MeterBar(label: "CPU · \(glance.cores) cores", value: glance.cpuText,
                          fraction: glance.cpuFraction ?? 0)
@@ -117,16 +123,15 @@ struct DevboxPage: View {
                 stripCell("stale", "\(glance.stale)", alert: glance.stale > 0,
                           help: "Parked for more than 7 days")
             }
-            // One devbox over several guests (spec 2026-09-25): the figures
-            // above are every box combined; each box's own free memory, and
-            // a silent one, only when there is more than one.
+            // Never a sum (2026-10-14): the figures above are one box's own,
+            // and every other box — draining, silent, the portal guest — is
+            // a line of its own.
             if !glance.boxes.isEmpty {
                 HStack(spacing: 22) {
                     ForEach(glance.boxes, id: \.name) { share in
-                        stripCell("box \(share.name)", share.freeText, alert: share.isSilent,
-                                  help: share.isSilent
-                                      ? "Box \(share.name) did not answer its last poll — its workspaces are missing until it does"
-                                      : "Free memory above box \(share.name)'s floor")
+                        let count = glance.workspacesByBox[share.name] ?? 0
+                        stripCell(share.title, share.figure(workspaces: count), alert: share.isAlerting,
+                                  help: share.help(workspaces: count, primary: glance.primaryBox))
                     }
                 }
             }

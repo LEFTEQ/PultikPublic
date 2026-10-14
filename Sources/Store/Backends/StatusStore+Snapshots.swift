@@ -18,7 +18,8 @@ extension StatusStore {
         var services: [ServiceStatus]
         var firing: [FiringAlert]
         var lanes: CILaneBoard
-        var throughput: CIThroughput?
+        /// Each host's Semafor day, by the host's `ref`.
+        var throughputs: [String: CIThroughput]
     }
 
     struct VitrinkaState: Codable, Sendable {
@@ -47,7 +48,7 @@ extension StatusStore {
         static let prod = QueryResource<HlidacDigest>(name: "hlidac.digest", staleAfter: 45)
         static let github = QueryResource<[RepoStatus]>(name: "github.repos", staleAfter: 180)
         static let eve = QueryResource<EveState>(name: "eve.ledger", schema: 2, staleAfter: 180)
-        static let infra = QueryResource<InfraState>(name: "infra.metrics", staleAfter: 180)
+        static let infra = QueryResource<InfraState>(name: "infra.metrics", schema: 2, staleAfter: 180)
         static let vitrinka = QueryResource<VitrinkaState>(name: "vitrinka.daily", staleAfter: 180)
         static let devbox = QueryResource<DevboxState>(name: "devbox.estate", schema: 2, staleAfter: 180)
     }
@@ -73,7 +74,7 @@ extension StatusStore {
     /// a probe's blackbox `job` decides its verdict — so a changed setting
     /// never restores the previous configuration's answer.
     var infraSnapshotKey: QueryKey {
-        let servers = preferences.servers.map { "s|\($0.name)|\($0.ref)" }
+        let servers = preferences.servers.map { "s|\($0.name)|\($0.ref)|\($0.semafor ?? "")" }
         let services = preferences.services.map { "p|\($0.name)|\($0.ref)|\($0.host ?? "")|\($0.job ?? "")" }
         return QueryKey(resource: Snapshots.infra.name, identity: "mesh",
                         scope: QueryKey.digest((servers + services).joined(separator: "\n")))
@@ -144,7 +145,7 @@ extension StatusStore {
             // live answer stays a silent baseline.
             firingAlerts = isSectionVisible("firing") ? state.firing : []
             laneBoard = isSectionVisible("runners") ? state.lanes : CILaneBoard()
-            ciThroughput = state.throughput
+            ciThroughputs = state.throughputs
         }
     }
 
@@ -195,7 +196,7 @@ extension StatusStore {
         QueryRepository.shared.record(Snapshots.infra, key: key,
                                       value: InfraState(servers: serverMetrics, services: serviceStatuses,
                                                         firing: firingAlerts, lanes: laneBoard,
-                                                        throughput: ciThroughput))
+                                                        throughputs: ciThroughputs))
     }
 
     func recordVitrinkaSnapshot(key: QueryKey?) {

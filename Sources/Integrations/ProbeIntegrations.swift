@@ -116,9 +116,9 @@ extension ProbeIntegration {
     static func devbox() -> ProbeIntegration {
         ProbeIntegration(
             id: "devbox", title: "devbox (ssh)", symbol: "terminal",
-            blurb: "Remote ws-v2 workspaces on BuildServer, over ssh. Failures here back off hard — sshd sits behind fail2ban.",
-            // Box a's breaker — the one every Mac has; other boxes back off
-            // on their own breakers and show in the footer's pause list.
+            blurb: "Remote ws-v2 workspaces on the devbox, over ssh. Failures here back off hard — sshd sits behind fail2ban.",
+            // The primary box's breaker (box c); other boxes back off on
+            // their own breakers and show in the footer's pause list.
             target: .devbox(box: DevboxEndpoint.fallback.name)
         ) {
             if case .failed(let failure) = await DevboxClient.shared.status(.fallback) {

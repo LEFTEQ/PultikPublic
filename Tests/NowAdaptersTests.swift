@@ -145,7 +145,7 @@ final class NowAdaptersTests: XCTestCase {
             workspace("pultik-copilot-shell", state: "running", parkedDaysAgo: 9),
         ], complete: false, now: now)
         XCTAssertEqual(read.coverage, .partial)
-        XCTAssertEqual(read.needs.map(\.incidentKey), ["devbox:a:workspace:example-backtest:stale"])
+        XCTAssertEqual(read.needs.map(\.incidentKey), ["devbox:c:workspace:example-backtest:stale"])
         XCTAssertEqual(read.needs.first?.onset, .exact(now.addingTimeInterval(-7 * day)))
         XCTAssertEqual(read.needs.first?.verb.destructive, true)
     }

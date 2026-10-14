@@ -25,8 +25,24 @@ struct EstatePage: View {
         text.isEmpty || fields.contains { $0?.localizedCaseInsensitiveContains(text) == true }
     }
 
+    /// Hosts in Settings order, each followed by its guests — split per
+    /// host, never merged (2026-10-14).
     private var servers: [ServerMetrics] {
-        store.serverMetrics.filter { matches($0.name, $0.instance) }
+        store.serverMetrics.filter { matches($0.name, $0.instance, $0.vmHost) }
+    }
+
+    /// Some server draws a ZFS meter, so every row keeps its column.
+    private var reserveZFS: Bool {
+        store.serverMetrics.contains { !$0.pools.isEmpty }
+    }
+
+    private var hostCount: Int {
+        store.serverMetrics.filter { !$0.isGuest }.count
+    }
+
+    /// The firing alerts about `server` (its instance, guest or cluster).
+    private func alerts(on server: ServerMetrics) -> [FiringAlert] {
+        firing.filter { $0.serverID(among: store.serverMetrics) == server.id }
     }
 
     private var services: [ServiceStatus] {
@@ -57,7 +73,7 @@ struct EstatePage: View {
         SelectionScrollView(selection: selectedID) {
             VStack(alignment: .leading, spacing: 2) {
                 header(glance)
-                Kicker(text: "Servers", count: servers.count)
+                Kicker(text: "Servers", count: hostCount)
                     .padding(.horizontal, 8)
                     .padding(.top, 10)
                 if servers.isEmpty {
@@ -65,7 +81,8 @@ struct EstatePage: View {
                 }
                 ForEach(servers) { server in
                     let id = Self.objectID(server)
-                    EstateServerRow(server: server, selected: selectedID == id, onOpen: { onOpen(id) })
+                    EstateServerRow(server: server, alerts: alerts(on: server), reserveZFS: reserveZFS,
+                                    selected: selectedID == id, onOpen: { onOpen(id) })
                         .id(id)
                 }
                 firingSection(now: now)
@@ -142,7 +159,7 @@ struct EstatePage: View {
     }
 
     private func summary(_ glance: EstateGlance) -> String {
-        var parts = ["\(store.serverMetrics.count) servers", "services \(glance.up)/\(glance.total)"]
+        var parts = ["\(hostCount) servers", "services \(glance.up)/\(glance.total)"]
         if !glance.down.isEmpty { parts.append("\(glance.down.count) down") }
         if let median = glance.medianLatencySeconds { parts.append("p50 \(Self.latencyText(median))") }
         return parts.joined(separator: " · ")
@@ -186,13 +203,18 @@ struct EstatePage: View {
 /// `ServiceRail`'s host order, as drawn. A firing alert is its `FiringAlert`
 /// id and a renewal its radar item id: the ids Now's estate rows target.
 extension EstatePage: ModulePage {
-    static func objectID(_ server: ServerMetrics) -> String { "server:\(server.name)" }
+    /// By `ServerMetrics.id`: a guest's name repeats across hosts.
+    static func objectID(_ server: ServerMetrics) -> String { "server:\(server.id)" }
     static func objectID(_ alert: FiringAlert) -> String { alert.id }
 
     var objects: [ModuleObject] {
         let now = Date()
         let boxes = servers.map { server in
             var facts = [ModuleObject.Fact(label: "instance", value: server.instance)]
+            if let vmHost = server.vmHost {
+                let host = store.serverMetrics.first { !$0.isGuest && $0.instance == vmHost }?.name ?? vmHost
+                facts.append(.init(label: "guest of", value: host))
+            }
             if let cores = server.cpuCount { facts.append(.init(label: "cores", value: "\(cores)")) }
             if let cpu = server.cpu { facts.append(.init(label: "cpu", value: "\(Int(cpu.rounded()))%")) }
             if let used = server.ramUsedBytes, let total = server.ramTotalBytes, total > 0 {
@@ -201,9 +223,21 @@ extension EstatePage: ModulePage {
             if let used = server.diskUsedBytes, let total = server.diskTotalBytes, total > 0 {
                 facts.append(.init(label: "disk", value: PultikFormat.sizeRatio(used: used, total: total)))
             }
+            for usage in server.pools {
+                facts.append(.init(label: "zfs \(usage.name)", value: PultikFormat.sizeRatio(used: usage.usedBytes,
+                                                                                         total: usage.totalBytes)))
+            }
+            for usage in server.datasets {
+                facts.append(.init(label: usage.name, value: PultikFormat.sizeRatio(used: usage.usedBytes,
+                                                                                  total: usage.totalBytes) + " quota"))
+            }
+            let firing = alerts(on: server)
+            let status: Chip? = firing.isEmpty ? nil
+                : Chip("\(firing.count) firing", firing.contains { $0.severity == "critical" } ? .danger : .warn)
             return ModuleObject(id: Self.objectID(server), title: server.name, label: server.instance,
-                                meta: server.cpuCount.map { "\($0) cores" }, symbol: "server.rack",
-                                project: server.name, facts: facts)
+                                status: status, meta: server.cpuCount.map { "\($0) cores" },
+                                symbol: server.isGuest ? "shippingbox" : "server.rack",
+                                project: server.isGuest ? nil : server.name, facts: facts)
         }
         let probes = ServiceRail.ordered(services, hostOrder: store.serverNames).map { service in
             var facts = [ModuleObject.Fact(label: "probe", value: service.probe)]
@@ -265,14 +299,32 @@ extension EstatePage: ModulePage {
             Tile(kicker: "Load") {
                 EstateMeters(server: server)
             }
+            let firing = alerts(on: server)
+            if !firing.isEmpty {
+                Tile(kicker: "Firing") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(firing) { alert in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                StatusDot(tone: Self.tone(alert))
+                                Text(alert.summary ?? alert.name)
+                                    .font(Theme.Typo.body).foregroundStyle(Theme.ink2).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-/// One box across the page: name and cores, then cpu, ram and disk as
-/// meters with their absolute numbers. A click selects it.
+/// One box across the page: name and cores, then cpu, ram, disk (and a ZFS
+/// pool's fill) as meters with their absolute numbers. A guest sits indented
+/// under its host. A click selects it.
 private struct EstateServerRow: View {
     let server: ServerMetrics
+    /// The firing alerts about this box: their count, critical red.
+    var alerts: [FiringAlert] = []
+    var reserveZFS = false
     var selected = false
     let onOpen: () -> Void
     @State private var hovering = false
@@ -281,13 +333,21 @@ private struct EstateServerRow: View {
         HStack(alignment: .top, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
-                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .font(.system(size: server.isGuest ? 10 : 10.5, weight: server.isGuest ? .regular : .semibold,
+                                  design: .monospaced))
                 Text(server.cpuCount.map { "\($0) cores" } ?? server.instance)
                     .font(RailRowMetrics.metaFont)
                     .foregroundStyle(.tertiary)
+                if !alerts.isEmpty {
+                    let critical = alerts.contains { $0.severity == "critical" }
+                    Text("\(alerts.count) firing")
+                        .font(RailRowMetrics.metaFont)
+                        .foregroundStyle(critical ? Theme.danger : Theme.warn)
+                }
             }
+            .padding(.leading, server.isGuest ? 14 : 0)
             .frame(width: 110, alignment: .leading)
-            EstateMeters(server: server)
+            EstateMeters(server: server, reserveZFS: reserveZFS)
         }
         .padding(.horizontal, RailRowMetrics.inset)
         .padding(.vertical, 6)
@@ -302,6 +362,8 @@ private struct EstateServerRow: View {
 /// A box's cpu, ram and disk as Kit meters, sizes in `PultikFormat`.
 private struct EstateMeters: View {
     let server: ServerMetrics
+    /// Another row draws a ZFS meter: keep its column so the meters align.
+    var reserveZFS = false
 
     private var memoryPercent: Double? {
         if let used = server.ramUsedBytes, let total = server.ramTotalBytes, total > 0 {
@@ -324,6 +386,13 @@ private struct EstateMeters: View {
                   text: size(server.ramUsedBytes, server.ramTotalBytes) ?? percentText(memoryPercent))
             meter("Disk", percent: diskPercent,
                   text: size(server.diskUsedBytes, server.diskTotalBytes) ?? percentText(diskPercent))
+            // build-server-next keeps its guests and data on ZFS pool `vy`, not
+            // on `/`: its fill is the disk that matters there.
+            if let pool = server.pools.first {
+                meter("ZFS \(pool.name)", percent: pool.percent, text: size(pool.usedBytes, pool.totalBytes) ?? "—")
+            } else if reserveZFS {
+                Color.clear.frame(maxWidth: .infinity)
+            }
         }
     }
 

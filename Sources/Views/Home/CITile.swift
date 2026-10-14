@@ -3,16 +3,16 @@ import SwiftUI
 /// Home's CI/CD tile (panel Home D7, 2026-10-07): today's jobs, the queue's
 /// p95 wait and GitHub's failed runs as heroes over today's hour bars, then
 /// what is running and which repos failed. The pools and refusals stay on the
-/// CI glance and `.ci`. It formats `ciThroughput`, `laneBoard` and the repos'
-/// workflow runs — never a poll of its own — and hides when neither Semafor
-/// nor GitHub has anything true to say.
+/// CI glance and `.ci`. It formats `ciDay` (one host's, named), `laneBoard`
+/// and the repos' workflow runs — never a poll of its own — and hides when
+/// neither Semafor nor GitHub has anything true to say.
 struct CITile: View {
     let store: StatusStore
     /// `.ci` narrowed by the filter ("" for all, "failed").
     let onOpen: (String) -> Void
 
     static func isShown(store: StatusStore) -> Bool {
-        let lanes = store.isSectionVisible("runners") && (!store.laneBoard.isEmpty || store.ciThroughput != nil)
+        let lanes = store.isSectionVisible("runners") && (!store.laneBoard.isEmpty || store.ciDay != nil)
         let runs = store.isSectionVisible("ci") && !store.repos.isEmpty
             && !store.repos.allSatisfy { $0.error != nil }
         return lanes || runs
@@ -26,11 +26,11 @@ struct CITile: View {
             TileHeader(title: "CI/CD", caption: caption(glance),
                        action: { onOpen("") }, actionHelp: "Every CI job and run — .ci")
             heroes(glance)
-            if let throughput = store.ciThroughput {
-                let day = CIThroughputGlance(throughput)
+            if let ci = store.ciDay {
+                let day = CIThroughputGlance(ci.throughput)
                 VStack(alignment: .leading, spacing: 3) {
                     HourBars(values: day.hours, height: 36, barWidth: 8, tint: Self.sky.opacity(0.85))
-                    Text("00 → now · \(day.jobs)")
+                    Text("00 → now · \(day.jobs) · \(ci.host)")
                         .font(RailRowMetrics.metaFont)
                         .foregroundStyle(.tertiary)
                 }
@@ -77,7 +77,7 @@ struct CITile: View {
     @ViewBuilder
     private func heroes(_ glance: CIGlance) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 18) {
-            if let throughput = store.ciThroughput {
+            if let throughput = store.ciDay?.throughput {
                 let day = CIThroughputGlance(throughput)
                 hero("\(throughput.jobs)", unit: "jobs today", detail: day.delta,
                      detailTone: (day.delta?.hasPrefix("+") ?? false) ? .green : .secondary)

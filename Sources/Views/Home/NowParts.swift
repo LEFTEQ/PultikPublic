@@ -558,6 +558,7 @@ struct NowHero: View {
     let queue: NowQueue
     let now: Date
     var ci: CIThroughput?
+    var ciHost: String?
     var asOf: Date?
     var compact = false
 
@@ -619,7 +620,7 @@ struct NowHero: View {
 
     private func ciCell(_ glance: CIThroughputGlance, jobs: Int) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("CI today").microLabel()
+            Text(ciHost.map { "CI today · \($0)" } ?? "CI today").microLabel()
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Text("\(jobs)").font(Theme.Typo.stat).foregroundStyle(Theme.ink)
                 Text("jobs").font(Theme.Typo.meta).foregroundStyle(Theme.ink2)

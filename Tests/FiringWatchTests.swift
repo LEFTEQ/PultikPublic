@@ -97,4 +97,25 @@ final class FiringWatchTests: XCTestCase {
         XCTAssertEqual(watch.update([alert("ApiDown")], answered: both, now: t0.addingTimeInterval(31 * 60)).map(\.title),
                        ["🔴 ApiDown"])
     }
+
+    /// Estate's server rows (2026-10-14): a guest by `vm_host` + `instance`
+    /// (both hosts run a firefly-vm), a host by `instance`, and build-server-next's
+    /// sender deadman by `cluster` alone; an unlabelled rule is estate-wide.
+    func testAnAlertBelongsToTheMostSpecificServer() {
+        let servers = [ServerMetrics(name: "BuildServer-next", instance: "build-server-next"),
+                       ServerMetrics(name: "firefly-vm", instance: "firefly-vm", vmHost: "build-server-next"),
+                       ServerMetrics(name: "BuildServer", instance: "build-vps"),
+                       ServerMetrics(name: "firefly-vm", instance: "firefly-vm", vmHost: "build-vps")]
+        func owner(_ labels: [String: String]) -> String? {
+            FiringAlert(name: "A", state: "firing", severity: "warning", summary: nil, description: nil,
+                        labels: labels, activeAt: t0, source: .prometheus).serverID(among: servers)
+        }
+        XCTAssertEqual(owner(["instance": "firefly-vm", "vm_host": "build-vps"]), "build-vps/firefly-vm")
+        XCTAssertEqual(owner(["instance": "firefly-vm", "vm_host": "build-server-next", "cluster": "build-server-next"]),
+                       "build-server-next/firefly-vm")
+        XCTAssertEqual(owner(["instance": "build-server-next", "cluster": "build-server-next", "pool": "vy"]), "build-server-next")
+        XCTAssertEqual(owner(["job": "node-exporter", "cluster": "build-server-next"]), "build-server-next")
+        XCTAssertEqual(owner(["instance": "build-vps"]), "build-vps")
+        XCTAssertNil(owner(["app": "exampleapp", "environment": "production"]))
+    }
 }
