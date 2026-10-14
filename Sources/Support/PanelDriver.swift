@@ -43,7 +43,7 @@ enum PanelDriver {
         guard let app = AppDelegate.shared else { return }
         switch info["cmd"] {
         case "open":
-            app.debugShowPanel()
+            app.debugShowPanel(on: info["text"])
         case "close":
             app.closePanel()
         case "size":

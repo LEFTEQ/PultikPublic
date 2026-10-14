@@ -3,7 +3,7 @@
 # focus. Talks to Sources/Support/PanelDriver.swift over a distributed
 # notification; the Release app has no listener.
 #
-#   tools/panel-drive.sh open                      # prefer connected Studio Display; never takes the keyboard
+#   tools/panel-drive.sh open [screen]             # the named screen, else Toolkit's qa display (or the menu-bar one, with its warning); never takes the keyboard
 #   tools/panel-drive.sh close
 #   tools/panel-drive.sh size 1240x720             # pin the frame (AC 13's 1240/1600 pt captures); '' resets
 #   tools/panel-drive.sh query '<text>'            # set the palette text
@@ -32,7 +32,17 @@ set -euo pipefail
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  open|close|github-pause|github-resume) ;;
+  open)
+    # A preference, never a gate: the named screen, else the one Toolkit's qa
+    # role resolves to — its first connected screen, else the menu-bar one,
+    # whose DISPLAY_FALLBACK warning stays on stderr for the session to see.
+    # A failed call sends no name: the app uses the focused screen when the
+    # name is empty or not connected.
+    PD_TEXT="${1-}"
+    if [[ -z "$PD_TEXT" ]] && command -v toolkit >/dev/null; then
+      if out="$(toolkit displays resolve --role qa --app pultik)"; then PD_TEXT="$out"; else printf '%s\n' "$out" >&2; fi
+    fi ;;
+  close|github-pause|github-resume) ;;
   query|size|clear-preview|clear-action|mac-stop|home-toggle|home-style|mark) PD_TEXT="${1-}" ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}"; PD_TEXT="${3-}" ;;

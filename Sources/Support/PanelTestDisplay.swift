@@ -1,15 +1,23 @@
 #if DEBUG
 import Foundation
 
-/// Screen-name policy shared by the native test driver and delayed test launch.
-/// A missing Studio Display leaves the ordinary focused-screen fallback intact.
-/// `PULTIK_TEST_DISPLAY=<screen name>` picks another screen — a landscape
-/// panel on a desk whose Studio Display stands portrait.
+/// Where a test summon draws: the screen Toolkit's `qa` display role resolves
+/// to (`toolkit displays resolve --role qa --app pultik`; the preference lives
+/// in `displays.roles.qa` / `displays.apps.pultik` of
+/// `~/.config/toolkit/config.json`; Toolkit itself falls back to the menu-bar
+/// display). `panel-drive.sh open` passes it per call; a launch takes it as
+/// `-ToolkitScreen <name>`. A preference, never a gate: a name that is not
+/// connected, or none, leaves the focused-screen fallback.
 enum PanelTestDisplay {
-    static func preferredIndex(in names: [String],
-                               override: String? = ProcessInfo.processInfo.environment["PULTIK_TEST_DISPLAY"]) -> Int? {
-        if let override, let index = names.firstIndex(of: override) { return index }
-        return names.firstIndex { $0 == "Studio Display" || $0 == "Apple Studio Display" }
+    /// The launch's `-ToolkitScreen <name>`, from the argument domain only —
+    /// Pultík keeps nothing in `UserDefaults`.
+    static var launchScreen: String? {
+        UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)["ToolkitScreen"] as? String
+    }
+
+    static func preferredIndex(in names: [String], wanted: String?) -> Int? {
+        guard let wanted, !wanted.isEmpty else { return nil }
+        return names.firstIndex(of: wanted)
     }
 }
 #endif
