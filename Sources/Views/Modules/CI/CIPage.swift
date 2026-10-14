@@ -1,9 +1,11 @@
 import SwiftUI
 
 /// `.ci` (spec 2026-09-23, D10): everything the right rail's CI section summarises —
-/// running jobs with their runner cost, queues per lane, and GitHub's failed
-/// runs. `running` / `queued` / `failed` as the filter narrow to that group;
-/// any other text matches repo, workflow, job or lane.
+/// one section per host (2026-10-14: its own pool from its own Semafor, its
+/// running jobs with their runner cost, its waiting lanes — never a merged
+/// fleet), jobs on lanes that are not ours, and GitHub's failed runs.
+/// `running` / `queued` / `failed` as the filter narrow to that group; any
+/// other text matches repo, workflow, job or lane.
 struct CIPage: View {
     let store: StatusStore
     let filter: String
@@ -34,15 +36,37 @@ struct CIPage: View {
         text.isEmpty || fields.contains { $0.localizedCaseInsensitiveContains(text) }
     }
 
-    private var jobs: [CIJob] {
-        (store.laneBoard.lanes.flatMap(\.jobs) + store.laneBoard.elsewhere)
-            .filter { matches($0.repo, $0.workflow, $0.jobName, $0.lane) }
+    /// Every host with lanes, in Settings order — one section each, never a
+    /// merged fleet (2026-10-14).
+    private var hosts: [String] {
+        store.laneBoard.hosts(in: store.servers.map(\.ref))
+    }
+
+    private func hostName(_ host: String) -> String {
+        store.servers.first { $0.ref == host }?.name ?? (host.isEmpty ? "Unplaced lanes" : host)
+    }
+
+    private func lanes(on host: String) -> [CILane] {
+        store.laneBoard.lanes.filter { ($0.host ?? "") == host }
+    }
+
+    private func sorted(_ jobs: [CIJob]) -> [CIJob] {
+        jobs.filter { matches($0.repo, $0.workflow, $0.jobName, $0.lane) }
             .sorted { ($0.since ?? .distantFuture) < ($1.since ?? .distantFuture) }
     }
 
+    private func jobs(on host: String) -> [CIJob] {
+        sorted(lanes(on: host).flatMap(\.jobs))
+    }
+
+    /// Jobs on lanes that are not ours (GitHub-hosted, unmapped).
+    private var elsewhere: [CIJob] {
+        sorted(store.laneBoard.elsewhere)
+    }
+
     /// Lanes with a queue or a dead controller — the two things worth a row.
-    private var waiting: [CILane] {
-        store.laneBoard.lanes.filter { ($0.queued > 0 || !$0.up) && matches($0.name) }
+    private func waiting(on host: String) -> [CILane] {
+        lanes(on: host).filter { ($0.queued > 0 || !$0.up) && matches($0.name) }
     }
 
     private var failures: [FailedRun] {
@@ -68,52 +92,14 @@ struct CIPage: View {
         SelectionScrollView(selection: selectedID) {
             VStack(alignment: .leading, spacing: 2) {
                 header(glance)
-                if shows(.running) {
-                    Kicker(text: "Running", count: jobs.count)
-                        .padding(.horizontal, 8)
-                        .padding(.top, 10)
-                    if jobs.isEmpty {
-                        RailNote(text.isEmpty ? "Nothing running" : "No match")
-                    } else {
-                        // One tick for every row's elapsed clock.
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            VStack(alignment: .leading, spacing: 1) {
-                                ForEach(jobs) { job in
-                                    CIJobPageRow(job: job, now: context.date, selected: selectedID == Self.jobID(job))
-                                        .id(Self.jobID(job))
-                                }
-                            }
-                        }
+                if shows(.running) || shows(.queued) {
+                    if hosts.isEmpty {
+                        RailNote("No CI lanes reported — off the mesh?")
                     }
-                }
-                if shows(.queued) {
-                    Kicker(text: "Queued", count: glance.queued, tone: glance.queued > 0 ? .orange : .secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.top, 10)
-                    if let pool = store.laneBoard.pool {
-                        PoolRow(pool: pool)
-                            .padding(.horizontal, 8)
-                            .padding(.bottom, 2)
+                    ForEach(hosts, id: \.self) { host in
+                        hostSection(host)
                     }
-                    ForEach(waiting) { lane in
-                        RailRow(dot: .filled(lane.up ? Color.orange : Color.red),
-                                title: lane.name,
-                                meta: lane.up ? "\(lane.queued) queued" : "controller down",
-                                help: (["\(lane.backend) lane · \(lane.trustGroup)", lane.tier.map { "tier \($0)" }, lane.kind]
-                                    .compactMap { $0 }).joined(separator: " · "),
-                                selected: selectedID == "lane:\(lane.name)",
-                                action: {})
-                            .id("lane:\(lane.name)")
-                    }
-                    if store.laneBoard.elsewhereQueued > 0 && text.isEmpty {
-                        RailRow(dot: .hollow, title: "elsewhere",
-                                meta: "\(store.laneBoard.elsewhereQueued) queued",
-                                help: "GitHub-hosted or unmapped lanes", selected: selectedID == Self.elsewhereID, action: {})
-                            .id(Self.elsewhereID)
-                    }
-                    if waiting.isEmpty && (store.laneBoard.elsewhereQueued == 0 || !text.isEmpty) {
-                        RailNote(text.isEmpty ? "Nothing waiting for a runner" : "No match")
-                    }
+                    elsewhereSection
                 }
                 if shows(.failed) {
                     Kicker(text: "Failed runs", count: failures.count, tone: failures.isEmpty ? .secondary : .red)
@@ -139,6 +125,73 @@ struct CIPage: View {
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 12)
+        }
+    }
+
+    /// One host's Firefly: its own pool (its own Semafor), its running jobs,
+    /// then its lanes with a queue or a dead controller.
+    @ViewBuilder
+    private func hostSection(_ host: String) -> some View {
+        let running = jobs(on: host)
+        let waiting = waiting(on: host)
+        let queued = lanes(on: host).reduce(0) { $0 + $1.queued }
+        let down = lanes(on: host).contains { !$0.up }
+        Kicker(text: hostName(host), count: running.count,
+               tone: down ? .red : queued > 0 ? .orange : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.top, 10)
+        if shows(.queued), let pool = store.laneBoard.pools[host] {
+            PoolRow(pool: pool)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 2)
+        }
+        if shows(.running), !running.isEmpty {
+            jobRows(running)
+        }
+        if shows(.queued) {
+            ForEach(waiting) { lane in
+                RailRow(dot: .filled(lane.up ? Color.orange : Color.red),
+                        title: lane.name,
+                        meta: lane.up ? "\(lane.queued) queued" : "controller down",
+                        help: (["\(lane.backend) lane · \(lane.trustGroup)", lane.tier.map { "tier \($0)" }, lane.kind]
+                            .compactMap { $0 }).joined(separator: " · "),
+                        selected: selectedID == "lane:\(lane.name)",
+                        action: {})
+                    .id("lane:\(lane.name)")
+            }
+        }
+        if (shows(.running) ? running.isEmpty : true), (shows(.queued) ? waiting.isEmpty : true) {
+            RailNote(text.isEmpty ? (slice == .queued ? "Nothing waiting for a runner" : "Idle") : "No match")
+        }
+    }
+
+    /// Jobs on lanes that are not ours, and their backlog — no host's pool.
+    @ViewBuilder
+    private var elsewhereSection: some View {
+        let jobs = shows(.running) ? elsewhere : []
+        let queued = shows(.queued) && text.isEmpty ? store.laneBoard.elsewhereQueued : 0
+        if !jobs.isEmpty || queued > 0 {
+            Kicker(text: "Elsewhere", count: jobs.count)
+                .padding(.horizontal, 8)
+                .padding(.top, 10)
+            if !jobs.isEmpty { jobRows(jobs) }
+            if queued > 0 {
+                RailRow(dot: .hollow, title: "elsewhere", meta: "\(queued) queued",
+                        help: "GitHub-hosted or unmapped lanes", selected: selectedID == Self.elsewhereID, action: {})
+                    .id(Self.elsewhereID)
+            }
+        }
+    }
+
+    /// One tick for every row's elapsed clock.
+    private func jobRows(_ jobs: [CIJob]) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(jobs) { job in
+                    CIJobPageRow(job: job, now: context.date, selected: selectedID == Self.jobID(job))
+                        .id(Self.jobID(job))
+                }
+            }
         }
     }
 
@@ -170,8 +223,9 @@ struct CIPage: View {
     }
 }
 
-/// The CI module's list until its own slice lands (WP6): running jobs,
-/// waiting lanes, then failed runs — in the order the page draws them.
+/// The CI module's list until its own slice lands (WP6): each host's
+/// running jobs and waiting lanes, then elsewhere, then failed runs — in the
+/// order the page draws them.
 extension CIPage: ModulePage {
     static func jobID(_ job: CIJob) -> String { "job:\(job.id)" }
     static let elsewhereID = "lane:elsewhere"
@@ -183,38 +237,15 @@ extension CIPage: ModulePage {
     var objects: [ModuleObject] {
         let now = Date()
         var objects: [ModuleObject] = []
-        if shows(.running) {
-            objects += jobs.map { job in
-                var facts = [ModuleObject.Fact(label: "repo", value: "\(job.org)/\(job.repo)"),
-                             .init(label: "workflow", value: job.workflow),
-                             .init(label: "job", value: job.jobName),
-                             .init(label: "lane", value: job.lane)]
-                if let since = job.since { facts.append(.init(label: "running", value: PultikFormat.ago(since, now: now))) }
-                if let cpu = job.cpuPercent { facts.append(.init(label: "runner cpu", value: "\(Int(cpu.rounded()))% of a core")) }
-                if let memory = job.memoryBytes { facts.append(.init(label: "runner memory", value: PultikFormat.size(memory))) }
-                return ModuleObject(id: Self.jobID(job), title: job.workflow, label: job.repo,
-                                    status: Chip("running", .ok), meta: job.jobName, symbol: "gearshape.2",
-                                    project: job.repo, url: job.runURL,
-                                    context: [Chip(job.lane, .neutral, symbol: "rectangle.stack")], facts: facts)
-            }
+        for host in hosts {
+            if shows(.running) { objects += jobObjects(jobs(on: host), now: now) }
+            if shows(.queued) { objects += waiting(on: host).map { laneObject($0) } }
         }
-        if shows(.queued) {
-            objects += waiting.map { lane in
-                var facts = [ModuleObject.Fact(label: "backend", value: lane.backend),
-                             .init(label: "trust group", value: lane.trustGroup),
-                             .init(label: "queued", value: "\(lane.queued)"),
-                             .init(label: "running", value: "\(lane.running)")]
-                if let tier = lane.tier { facts.append(.init(label: "tier", value: "\(tier)")) }
-                if let kind = lane.kind { facts.append(.init(label: "kind", value: kind)) }
-                return ModuleObject(id: "lane:\(lane.name)", title: lane.name,
-                                    status: lane.up ? Chip("\(lane.queued) queued", .warn) : Chip("controller down", .danger),
-                                    meta: "\(lane.backend) lane", symbol: "rectangle.stack", facts: facts)
-            }
-            if store.laneBoard.elsewhereQueued > 0, text.isEmpty {
-                objects.append(ModuleObject(id: Self.elsewhereID, title: "elsewhere",
-                                            status: Chip("\(store.laneBoard.elsewhereQueued) queued", .warn),
-                                            meta: "GitHub-hosted or unmapped lanes", symbol: "rectangle.stack"))
-            }
+        if shows(.running) { objects += jobObjects(elsewhere, now: now) }
+        if shows(.queued), store.laneBoard.elsewhereQueued > 0, text.isEmpty {
+            objects.append(ModuleObject(id: Self.elsewhereID, title: "elsewhere",
+                                        status: Chip("\(store.laneBoard.elsewhereQueued) queued", .warn),
+                                        meta: "GitHub-hosted or unmapped lanes", symbol: "rectangle.stack"))
         }
         if shows(.failed) {
             objects += failures.map { run in
@@ -230,6 +261,38 @@ extension CIPage: ModulePage {
             }
         }
         return objects
+    }
+
+    private func jobObjects(_ jobs: [CIJob], now: Date) -> [ModuleObject] {
+        let hostOfLane = Dictionary(store.laneBoard.lanes.map { ($0.name, $0.host ?? "") },
+                                    uniquingKeysWith: { first, _ in first })
+        return jobs.map { job in
+            var facts = [ModuleObject.Fact(label: "repo", value: "\(job.org)/\(job.repo)"),
+                         .init(label: "workflow", value: job.workflow),
+                         .init(label: "job", value: job.jobName),
+                         .init(label: "lane", value: job.lane)]
+            if let host = hostOfLane[job.lane] { facts.append(.init(label: "host", value: hostName(host))) }
+            if let since = job.since { facts.append(.init(label: "running", value: PultikFormat.ago(since, now: now))) }
+            if let cpu = job.cpuPercent { facts.append(.init(label: "runner cpu", value: "\(Int(cpu.rounded()))% of a core")) }
+            if let memory = job.memoryBytes { facts.append(.init(label: "runner memory", value: PultikFormat.size(memory))) }
+            return ModuleObject(id: Self.jobID(job), title: job.workflow, label: job.repo,
+                                status: Chip("running", .ok), meta: job.jobName, symbol: "gearshape.2",
+                                project: job.repo, url: job.runURL,
+                                context: [Chip(job.lane, .neutral, symbol: "rectangle.stack")], facts: facts)
+        }
+    }
+
+    private func laneObject(_ lane: CILane) -> ModuleObject {
+        var facts = [ModuleObject.Fact(label: "backend", value: lane.backend),
+                     .init(label: "trust group", value: lane.trustGroup),
+                     .init(label: "host", value: hostName(lane.host ?? "")),
+                     .init(label: "queued", value: "\(lane.queued)"),
+                     .init(label: "running", value: "\(lane.running)")]
+        if let tier = lane.tier { facts.append(.init(label: "tier", value: "\(tier)")) }
+        if let kind = lane.kind { facts.append(.init(label: "kind", value: kind)) }
+        return ModuleObject(id: "lane:\(lane.name)", title: lane.name,
+                            status: lane.up ? Chip("\(lane.queued) queued", .warn) : Chip("controller down", .danger),
+                            meta: "\(lane.backend) lane", symbol: "rectangle.stack", facts: facts)
     }
 
     /// The failed run behind an object id (`run:<id>`) — deploys have none.

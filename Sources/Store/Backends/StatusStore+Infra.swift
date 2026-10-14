@@ -126,37 +126,67 @@ extension StatusStore {
             recordInfraSnapshot(key: snapshotKey)
             return nil
         }
-        // The shared pool line is Semafor's, another host: its failures back
-        // off on their own breaker instead of riding Prometheus's success, and
-        // while it holds the line stays hidden. Only a board this pass fetched
-        // is labelled — a board kept through a Prometheus pause keeps its
-        // last pool rather than pairing a new head with old lanes.
+        // Each host's pool line is its own Semafor's, another host: its
+        // failures back off on its own breaker instead of riding
+        // Prometheus's success, and while it holds that host's line stays
+        // hidden. Only a board this pass fetched is labelled — a board kept
+        // through a Prometheus pause keeps its last pools rather than pairing
+        // a new head with old lanes.
         guard lanesRefreshed, !laneBoard.isEmpty else { return }
         let lanes = laneBoard.lanes
-        laneBoard.pool = nil
-        var semaforAnswered = false
-        await gated(.semafor) {
-            let (pool, failure) = await SemaforClient.shared.pool(lanes: lanes)
-            laneBoard.pool = pool
+        let semafors = preferences.servers.compactMap { server in server.semaforURL.map { (server.ref, $0) } }
+        await withTaskGroup(of: Void.self) { group in
+            for (host, base) in semafors {
+                group.addTask { await self.refreshSemafor(host: host, base: base,
+                                                          lanes: lanes.filter { $0.host == host }) }
+            }
+        }
+        let configured = Set(semafors.map(\.0))
+        laneBoard.pools = laneBoard.pools.filter { configured.contains($0.key) }
+        ciThroughputs = ciThroughputs.filter { configured.contains($0.key) }
+        recordInfraSnapshot(key: snapshotKey)
+    }
+
+    /// One host's Semafor behind its own breaker: the pool, and once a
+    /// minute the day.
+    private func refreshSemafor(host: String, base: URL, lanes: [CILane]) async {
+        laneBoard.pools[host] = nil
+        var answered = false
+        await gated(.semafor(host: base.host() ?? base.absoluteString)) {
+            let (pool, failure) = await SemaforClient.shared.pool(at: base, lanes: lanes)
+            laneBoard.pools[host] = pool
             guard failure == nil else { return failure }
-            semaforAnswered = true
+            answered = true
             // The overview is a day-scale read: once a minute, like Semafor's
             // own SPA. A failed overview hides its lines but is no reason to
             // back off the pool that just answered.
-            if Date().timeIntervalSince(throughputFetchedAt ?? .distantPast) >= Self.throughputInterval {
-                let (throughput, overviewFailure) = await SemaforClient.shared.overview()
-                ciThroughput = throughput
-                throughputFetchedAt = throughput == nil ? nil : Date()
+            if Date().timeIntervalSince(throughputFetchedAt[host] ?? .distantPast) >= Self.throughputInterval {
+                let (throughput, overviewFailure) = await SemaforClient.shared.overview(at: base)
+                ciThroughputs[host] = throughput
+                throughputFetchedAt[host] = throughput == nil ? nil : Date()
                 if let overviewFailure {
-                    NSLog("pultik: semafor overview — %@", String(describing: overviewFailure))
+                    NSLog("pultik: semafor %@ overview — %@", host, String(describing: overviewFailure))
                 }
             }
             return nil
         }
-        if !semaforAnswered {
-            ciThroughput = nil
-            throughputFetchedAt = nil
+        if !answered {
+            ciThroughputs[host] = nil
+            throughputFetchedAt[host] = nil
         }
-        recordInfraSnapshot(key: snapshotKey)
+    }
+
+    /// The CI day Home and Now show: ONE host's own (never a sum), the first
+    /// server in Settings order whose Semafor answered, named.
+    var ciDay: (host: String, throughput: CIThroughput)? {
+        for server in preferences.servers {
+            if let throughput = ciThroughputs[server.ref] { return (server.name, throughput) }
+        }
+        return nil
+    }
+
+    /// The Semafor that counts `host`'s lanes; nil for a host without one.
+    func semaforBase(forHost host: String) -> URL? {
+        preferences.servers.first { $0.ref == host }?.semaforURL
     }
 }

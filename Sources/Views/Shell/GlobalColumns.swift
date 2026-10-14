@@ -377,7 +377,8 @@ extension StatusPanelView {
     var nowHomeModel: NowHomeModel {
         let now = NowStore.shared
         return NowHomeModel(queue: now.queue, rows: homeNowRows, handled: now.handled, selectedID: selectedID,
-                            expanded: nowExpanded, ci: store.ciThroughput, asOf: now.restoredAsOf,
+                            expanded: nowExpanded, ci: store.ciDay?.throughput, ciHost: store.ciDay?.host,
+                            asOf: now.restoredAsOf,
                             awaiting: now.awaitingFirstRead)
     }
 

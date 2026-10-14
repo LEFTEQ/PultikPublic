@@ -38,9 +38,10 @@ struct CIRunDetailContent: View {
                     .frame(height: 420)
                 context(detail.run)
             }
+            // Semafor is context: it never holds back the run. The run's
+            // runners name its host, whose Semafor alone saw its jobs.
+            .task(id: ref) { health = (try? await store.semaforRepoHealth(of: detail)) ?? nil }
         }
-        // Semafor is context: it never holds back the run.
-        .task(id: ref) { health = (try? await store.semaforRepoHealth())?.first { $0.repo == ref.repo } }
     }
 
     private func context(_ run: CIRun) -> some View {

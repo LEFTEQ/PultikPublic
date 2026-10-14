@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// The shared Docker pool above the lanes (Semafor's admission board): slots
-/// and reserved memory against the budget, then the queue's head — the lane
-/// that places next — with its repo tier and kind. Hidden when Semafor did
-/// not answer; dimmed when its numbers are older than `CIPoolGlance.staleAfter`.
+/// One host's Docker pool above its lanes (that host's Semafor admission
+/// board): slots and reserved memory against the budget, then the queue's
+/// head — the lane that places next — with its repo tier and kind. Hidden
+/// when that Semafor did not answer; dimmed when its numbers are older than
+/// `CIPoolGlance.staleAfter`.
 struct PoolRow: View {
     let pool: CIPool
 
@@ -22,8 +23,8 @@ struct PoolRow: View {
                 Spacer(minLength: 0)
             }
             .help(glance.stale
-                ? "Shared CI pool — Semafor's newest controller reading is over \(Int(CIPoolGlance.staleAfter / 60)) min old"
-                : "Shared CI pool: live jobs / \(pool.slotsMax) slots and reserved / budgeted memory; no lane has a ceiling of its own")
+                ? "This host's CI pool — its Semafor's newest controller reading is over \(Int(CIPoolGlance.staleAfter / 60)) min old"
+                : "This host's CI pool (its own Semafor): live jobs / \(pool.slotsMax) slots and reserved / budgeted memory; no lane has a ceiling of its own")
             if let head = glance.head {
                 HStack(spacing: 6) {
                     Text("next").foregroundStyle(.tertiary)

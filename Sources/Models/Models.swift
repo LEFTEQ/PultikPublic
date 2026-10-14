@@ -335,10 +335,17 @@ struct ProdIssue: Identifiable {
 
 // MARK: - Infra metrics (mesh Prometheus)
 
-/// One VPS's node-exporter snapshot, percentages 0–100.
+/// One VPS's node-exporter snapshot, percentages 0–100 — or one of its VM
+/// guests (`vmHost` set), drawn under it.
+///
+/// Identity is the `instance` label plus, for a guest, `vm_host`: two hosts
+/// each run a `firefly-vm`. Never the hostname — the live BuildServer still
+/// reports `build-server-next` as its own (build-server-infra decisions row 26).
 struct ServerMetrics: Identifiable, Codable {
     let name: String // "BuildServer"
     let instance: String // prometheus instance label, e.g. "build-vps"
+    /// A guest's host: its `vm_host` label, the host's own `instance`.
+    var vmHost: String?
     var cpu: Double?
     var ram: Double?
     var disk: Double?
@@ -348,12 +355,47 @@ struct ServerMetrics: Identifiable, Codable {
     var diskUsedBytes: Double?
     var diskTotalBytes: Double?
     var cpuCount: Int?
+    /// ZFS pools and dataset quotas (build-server-next's `vy`); empty elsewhere.
+    var pools: [ZFSUsage] = []
+    var datasets: [ZFSUsage] = []
     var id: String {
-        instance
+        vmHost.map { "\($0)/\(instance)" } ?? instance
+    }
+
+    var isGuest: Bool {
+        vmHost != nil
     }
 
     var worst: Double {
         max(cpu ?? 0, ram ?? 0, disk ?? 0)
+    }
+}
+
+/// One ZFS pool's allocation or one dataset's use against its quota.
+struct ZFSUsage: Codable, Equatable {
+    let name: String
+    let usedBytes: Double
+    let totalBytes: Double
+
+    var percent: Double {
+        totalBytes > 0 ? usedBytes / totalBytes * 100 : 0
+    }
+}
+
+extension FiringAlert {
+    /// The `ServerMetrics.id` this alert is about, most specific first: a
+    /// guest by `vm_host` + `instance`, a host by `instance`, else by
+    /// `cluster` — build-server-next's sender deadman carries only that, and a
+    /// remote-written host's cluster is its instance. nil = estate-wide.
+    func serverID(among servers: [ServerMetrics]) -> String? {
+        let instance = labels["instance"]
+        if let vmHost = labels["vm_host"] {
+            return (servers.first { $0.vmHost == vmHost && $0.instance == instance }
+                ?? servers.first { !$0.isGuest && $0.instance == vmHost })?.id
+        }
+        if let host = servers.first(where: { !$0.isGuest && $0.instance == instance }) { return host.id }
+        guard let cluster = labels["cluster"] else { return nil }
+        return servers.first { !$0.isGuest && $0.instance == cluster }?.id
     }
 }
 
@@ -416,6 +458,12 @@ struct CILane: Identifiable, Codable {
     let backend: String // "docker" | "kvm"
     let trustGroup: String // "firefly" (CI) | "bastion" (deploys)
     let up: Bool // controller unit active
+    /// The host whose Firefly runs the lane: its controller's `instance`
+    /// label, a server's `ref` ("build-vps", "build-server-next"). Each lane
+    /// runs on exactly one host (build-server-infra registry `host`).
+    var host: String?
+    /// The repo `ci_lane_info` serves ("example-org/ExampleApp").
+    var repo: String?
     /// Repo priority tier (0 places first) and job kind (ci/build/e2e, deploy
     /// on bastion lanes) from `ci_lane_info`. No lane has a runner ceiling
     /// since 2026-09-26: capacity is the shared pool (`CILaneBoard.pool`).
@@ -455,16 +503,41 @@ struct CILaneBoard: Codable {
     var lanes: [CILane] = []
     var elsewhere: [CIJob] = []
     var elsewhereQueued: Int = 0
-    /// The shared Docker pool from Semafor; nil when Semafor did not answer.
-    var pool: CIPool?
+    /// Each host's Docker pool from its own Semafor, by the host's `ref`
+    /// (`CILane.host`); a host whose Semafor did not answer has none.
+    var pools: [String: CIPool] = [:]
 
     var isEmpty: Bool { lanes.isEmpty }
     var running: Int { lanes.reduce(0) { $0 + $1.running } }
+
+    /// The hosts with lanes, in `order` (the servers' refs), unknown hosts
+    /// last and an unlabelled lane's "" after them — one CI section each,
+    /// never one merged fleet.
+    func hosts(in order: [String]) -> [String] {
+        let present = Set(lanes.map { $0.host ?? "" })
+        return order.filter(present.contains)
+            + present.subtracting(order).sorted { ($0.isEmpty ? 1 : 0, $0) < ($1.isEmpty ? 1 : 0, $1) }
+    }
+
+    /// The host a run ran on, for its host's Semafor (which saw only its own
+    /// jobs): from its jobs' JIT runners (`ci-jit-<lane>-<id>`, the longest
+    /// lane name winning, so `vitrinka-e2e-batch` is never `vitrinka-e2e`),
+    /// else the one host every lane of `repo` runs on. nil when neither
+    /// settles it — a repo can have lanes on both hosts.
+    func host(ofRunners runners: [String], repo: String) -> String? {
+        let ran = Set(runners.compactMap { runner in
+            lanes.filter { runner.hasPrefix("ci-jit-\($0.name)-") }.max { $0.name.count < $1.name.count }?.host
+        })
+        if !ran.isEmpty { return ran.count == 1 ? ran.first : nil }
+        let serving = Set(lanes.filter { $0.repo?.caseInsensitiveCompare(repo) == .orderedSame }.compactMap(\.host))
+        return serving.count == 1 ? serving.first : nil
+    }
 }
 
-/// The one Docker JIT pool every CI lane draws on (build-server-infra priority
-/// decisions 4-6, 2026-09-26): slots and reservation budget, and the head of
-/// its priority queue — the waiter that places next.
+/// One host's Docker JIT pool its CI lanes draw on (build-server-infra priority
+/// decisions 4-6, 2026-09-26; one Semafor per host since 2026-10-14): slots
+/// and reservation budget, and the head of its priority queue — the waiter
+/// that places next.
 struct CIPool: Equatable, Codable {
     var slotsUsed: Int
     var slotsMax: Int
@@ -1503,8 +1576,11 @@ struct DevboxOverviewSummary: Codable {
     let memoryAvailableBytes: Double
     let swapTotalBytes: Double
     let swapFreeBytes: Double
+    /// The box these figures are when there is more than one; nil for a
+    /// single box. Never a sum of several (`DevboxEstate`).
+    var box: String? = nil
     /// Every discovered box when there is more than one (silent ones
-    /// included); empty for a single box, whose summary is its own.
+    /// included, `box` among them); empty for a single box.
     var boxes: [DevboxBoxShare] = []
 
     /// Mirrors the sweep's own thresholds so the rail turns colour when the
@@ -1520,18 +1596,11 @@ struct DevboxOverviewSummary: Codable {
         memoryAvailableBytes / 1_073_741_824
     }
 
-    /// Merged totals could hide one box below its floor behind another's
-    /// headroom, so a multi-box estate is as strained as its worst box.
+    /// This box's own tier; another box's strain is its own line's.
     var pressure: Pressure {
-        let own: Pressure
-        if pressureSome >= 10 || availableGB < Double(floorGB) {
-            own = .critical
-        } else if pressureSome >= 5 || availableGB - Double(floorGB) < 8 {
-            own = .elevated
-        } else {
-            own = .normal
-        }
-        return boxes.compactMap(\.pressure).reduce(own, max)
+        if pressureSome >= 10 || availableGB < Double(floorGB) { return .critical }
+        if pressureSome >= 5 || availableGB - Double(floorGB) < 8 { return .elevated }
+        return .normal
     }
 
     private var usesMemoryAdmission: Bool {

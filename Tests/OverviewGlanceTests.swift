@@ -268,6 +268,27 @@ final class OverviewGlanceTests: XCTestCase {
         )
     }
 
+    /// A run's host Semafor (2026-10-14): from its JIT runners, the longest
+    /// lane winning; else the one host serving the repo; never a guess when
+    /// the repo has lanes on both hosts.
+    func testARunsHostComesFromItsRunnersElseItsRepoIfThatSettlesIt() {
+        func lane(_ name: String, _ host: String, _ repo: String) -> CILane {
+            CILane(name: name, backend: "docker", trustGroup: "firefly", up: true, host: host, repo: repo,
+                   queued: 0, jobs: [])
+        }
+        let board = CILaneBoard(lanes: [lane("vitrinka-e2e", "build-server-next", "example-org/vitrinka"),
+                                        lane("vitrinka-e2e-batch", "build-vps", "example-org/vitrinka"),
+                                        lane("pultik-ci", "build-server-next", "example-org/pultik")])
+        XCTAssertEqual(board.host(ofRunners: ["ci-jit-vitrinka-e2e-batch-d500412e"], repo: "example-org/vitrinka"),
+                       "build-vps")
+        XCTAssertEqual(board.host(ofRunners: ["ci-jit-vitrinka-e2e-0a1b2c3d"], repo: "example-org/vitrinka"),
+                       "build-server-next")
+        XCTAssertNil(board.host(ofRunners: [], repo: "example-org/vitrinka"))
+        XCTAssertEqual(board.host(ofRunners: ["GitHub Actions 12"], repo: "Henderson-Tech/Pultik"), "build-server-next")
+        XCTAssertNil(board.host(ofRunners: ["ci-jit-vitrinka-e2e-0a1b2c3d", "ci-jit-vitrinka-e2e-batch-d500412e"],
+                                repo: "example-org/vitrinka"))
+    }
+
     private func run(status: String, conclusion: String?) -> WorkflowRun {
         WorkflowRun(id: 1, name: nil, headBranch: nil, status: status, conclusion: conclusion,
                     htmlUrl: "https://github.com", createdAt: Date(), updatedAt: Date())

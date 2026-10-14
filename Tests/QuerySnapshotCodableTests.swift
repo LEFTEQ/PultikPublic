@@ -101,31 +101,39 @@ final class QuerySnapshotCodableTests: XCTestCase {
     }
 
     func testInfraMetricsLanesAndAlertsRoundTrip() throws {
-        let servers = [ServerMetrics(name: "BuildServer", instance: "build-vps", cpu: 12.5, ram: 61, disk: 48.25,
-                                     ramUsedBytes: 19.5e9, ramTotalBytes: 32e9, diskUsedBytes: 1.7e12, diskTotalBytes: 3.5e12, cpuCount: 16)]
+        let servers = [ServerMetrics(name: "BuildServer-next", instance: "build-server-next", cpu: 12.5, ram: 61, disk: 48.25,
+                                     ramUsedBytes: 19.5e9, ramTotalBytes: 32e9, diskUsedBytes: 1.7e12, diskTotalBytes: 3.5e12, cpuCount: 16,
+                                     pools: [ZFSUsage(name: "vy", usedBytes: 93e9, totalBytes: 3.4e12)],
+                                     datasets: [ZFSUsage(name: "vy/libvirt", usedBytes: 87e9, totalBytes: 1.7e12)]),
+                       ServerMetrics(name: "firefly-vm", instance: "firefly-vm", vmHost: "build-server-next", cpu: 3)]
         let services = [ServiceStatus(name: "exampleapp-prod", probe: "https://api.example.invalid/health", host: "AppServer", up: true,
                                       latencySeconds: 0.182)]
         let job = CIJob(org: "example-org", repo: "ExampleApp", lane: "exampleapp-ci", workflow: "CI", jobName: "test",
                         runURL: URL(string: "https://github.com/example-org/ExampleApp/actions/runs/1"), since: at,
                         cpuPercent: 230, memoryBytes: 2.1e9)
         let board = CILaneBoard(
-            lanes: [CILane(name: "exampleapp-ci", backend: "docker", trustGroup: "firefly", up: true, tier: 0, kind: "ci",
-                           queued: 2, jobs: [job])],
+            lanes: [CILane(name: "exampleapp-ci", backend: "docker", trustGroup: "firefly", up: true, host: "build-server-next",
+                           repo: "example-org/ExampleApp", tier: 0, kind: "ci", queued: 2, jobs: [job])],
             elsewhere: [job], elsewhereQueued: 1,
-            pool: CIPool(slotsUsed: 3, slotsMax: 6, reservedMiB: 12288, budgetMiB: 24576,
+            pools: ["build-server-next": CIPool(slotsUsed: 3, slotsMax: 6, reservedMiB: 12288, budgetMiB: 24576,
                          head: CIPoolHead(lane: "exampleapp-ci", tier: 0, kind: "ci", waiting: 2), observedAt: at,
                          bastion: CIPartitionLoad(slotsUsed: 1, slotsMax: 2, reservedMiB: 4096, budgetMiB: 8192),
-                         refusals: [CIRefusal(reason: "memory", count: 4)])
+                         refusals: [CIRefusal(reason: "memory", count: 4)])]
         )
         let throughput = CIThroughput(at: "2026-10-10T09:00:00Z", tz: "Europe/Prague", jobs: 120, yesterdaySameTime: 98,
                                       queue: .init(p50: 4.5, p95: 61), over300sShare: 0.05, hours: [.init(hour: 9, jobs: 14)])
         let firing = [FiringAlert(name: "HighErrorRate", state: "firing", severity: "critical", summary: "5xx over 2%",
                                   description: nil, labels: ["alertname": "HighErrorRate", "app": "exampleapp", "environment": "prod"],
                                   activeAt: at, source: .loki)]
-        XCTAssertEqual(try roundTrip(servers).first?.worst, 61)
+        let decodedServers = try roundTrip(servers)
+        XCTAssertEqual(decodedServers.first?.worst, 61)
+        XCTAssertEqual(decodedServers.first?.pools, servers.first?.pools)
+        XCTAssertEqual(decodedServers.first?.datasets, servers.first?.datasets)
+        XCTAssertEqual(decodedServers.map(\.id), ["build-server-next", "build-server-next/firefly-vm"])
         XCTAssertEqual(try roundTrip(services).first?.latencySeconds, 0.182)
         let decodedBoard = try roundTrip(board)
-        XCTAssertEqual(decodedBoard.pool, board.pool)
+        XCTAssertEqual(decodedBoard.pools, board.pools)
+        XCTAssertEqual(decodedBoard.lanes.first?.host, "build-server-next")
         XCTAssertEqual(decodedBoard.lanes.first?.jobs.map(\.id), [job.id])
         XCTAssertEqual(try roundTrip(throughput), throughput)
         XCTAssertEqual(try roundTrip(firing), firing)
@@ -167,15 +175,16 @@ final class QuerySnapshotCodableTests: XCTestCase {
     }
 
     func testDevboxSnapshotRoundTrips() throws {
-        let box = DevboxEndpoint(name: "a", sshAlias: "devops", host: "192.0.2.11", port: 2222)
+        let box = DevboxEndpoint(name: "a", sshAlias: "devops", host: "192.0.2.11", port: 2222, state: "drain", primary: false)
         let summary = DevboxOverviewSummary(
             identitySlots: 0, targetHot: 4, hotCeiling: 0, claimed: 3, running: 2,
             identities: DevboxOverviewIdentities(saved: 5, runtimeLeases: 2, portsUsed: 40, portCapacity: 400),
-            parked: 1, floorGB: 6, pressureSome: 1.25, pressureFull: 0, cpus: 16, load1: 3.5, cpuUsagePercent: 22.5,
+            parked: 1, floorGB: 6, pressureSome: 5.25, pressureFull: 0, cpus: 16, load1: 3.5, cpuUsagePercent: 22.5,
             diskTotalBytes: 1e12, diskUsedBytes: 4e11, memoryTotalBytes: 64 * 1_073_741_824,
             memoryAvailableBytes: 30 * 1_073_741_824, swapTotalBytes: 8e9, swapFreeBytes: 7e9,
-            boxes: [DevboxBoxShare(name: "a", headroomBytes: 24e9, pressure: .elevated),
-                    DevboxBoxShare(name: "b", headroomBytes: nil, pressure: nil)]
+            box: "a",
+            boxes: [DevboxBoxShare(name: "a", headroomBytes: 24e9, pressure: .elevated, state: "drain"),
+                    DevboxBoxShare(name: "c", headroomBytes: nil, pressure: nil, state: "active", primary: true)]
         )
         let workspace = DevboxWorkspace(
             name: "example-studio", project: "example-studio", branch: "main", portBase: 7100, portCount: 10, created: at,
@@ -191,6 +200,7 @@ final class QuerySnapshotCodableTests: XCTestCase {
         let decoded = try roundTrip(DevboxSnapshot(endpoint: box, generated: at, workspaces: [workspace], summary: summary))
         XCTAssertEqual(decoded.endpoint, box)
         XCTAssertEqual(decoded.summary.boxes, summary.boxes)
+        XCTAssertEqual(decoded.summary.box, "a")
         XCTAssertEqual(decoded.summary.pressure, .elevated)
         XCTAssertEqual(decoded.workspaces.map(\.id), ["a/example-studio"])
         XCTAssertEqual(decoded.workspaces.first?.footprintHelp, workspace.footprintHelp)

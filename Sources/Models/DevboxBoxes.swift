@@ -46,10 +46,22 @@ struct DevboxEndpoint: Hashable, Sendable, Codable {
     let sshAlias: String
     let host: String
     let port: Int
+    /// The registry's intent: `active` and `manual` take workspaces, `drain`
+    /// takes no new ones while its own run until they move. `off` boxes are
+    /// never polled. nil in a snapshot written before 2026-10-14.
+    var state: String? = nil
+    /// The registry's `primary: true` row — THE devbox (box c on
+    /// build-server-next since 2026-10-14); every other box is on its way out.
+    var primary: Bool? = nil
 
-    /// Today's single guest — what Pultík polls when discovery has never
-    /// answered (an older CLI without `devbox boxes`, or none on this Mac).
-    static let fallback = DevboxEndpoint(name: "a", sshAlias: "devops", host: "192.0.2.11", port: 2222)
+    var isPrimary: Bool {
+        primary == true
+    }
+
+    /// The one devbox — what Pultík polls when discovery has never answered
+    /// (an older CLI without `devbox boxes`, or none on this Mac).
+    static let fallback = DevboxEndpoint(name: "c", sshAlias: "devops-c", host: "192.0.2.11", port: 2225,
+                                         state: "active", primary: true)
 
     /// The forced-command key is authorized for the unprivileged `devbox`
     /// user on every guest; the login never comes from the user's config.
@@ -74,6 +86,8 @@ enum DevboxDiscovery {
     struct Candidate: Equatable {
         let name: String
         let sshAlias: String
+        var state = "active"
+        var primary = false
     }
 
     private struct Envelope: Decodable {
@@ -90,11 +104,14 @@ enum DevboxDiscovery {
         let name: String
         let ssh: String
         let state: String
+        let primary: Bool?
     }
 
     /// nil = no usable answer (older CLI's `CLI_UNKNOWN_VERB`, a failed
     /// envelope, unreadable output, or no box left to poll) — the caller keeps
     /// what it had. An invalid name or alias drops that row, never the list.
+    /// The primary box leads, the rest keep registry order: the Devbox strip
+    /// draws the first answering box's own figures.
     static func candidates(fromBoxesJSON data: Data) -> [Candidate]? {
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
               envelope.ok, envelope.verb == "boxes",
@@ -107,12 +124,13 @@ enum DevboxDiscovery {
                 NSLog("pultik: devbox discovery refused box row with an unsafe name or alias")
                 return nil
             }
-            return Candidate(name: row.name, sshAlias: row.ssh)
+            return Candidate(name: row.name, sshAlias: row.ssh, state: row.state, primary: row.primary == true)
         }
         if candidates.count > boxLimit {
             NSLog("pultik: devbox discovery keeps the first %d of %d boxes", boxLimit, candidates.count)
         }
-        return candidates.isEmpty ? nil : Array(candidates.prefix(boxLimit))
+        let ordered = candidates.filter(\.primary) + candidates.filter { !$0.primary }
+        return ordered.isEmpty ? nil : Array(ordered.prefix(boxLimit))
     }
 
     /// `ssh -G <alias>` prints the resolved config; only `hostname` and `port`
@@ -135,7 +153,10 @@ enum DevboxDiscovery {
                   candidate.name)
             return nil
         }
-        return DevboxEndpoint(name: candidate.name, sshAlias: candidate.sshAlias, host: host, port: port)
+        // Only `true` is stored: a non-primary box compares equal to one
+        // written before the registry had the field.
+        return DevboxEndpoint(name: candidate.name, sshAlias: candidate.sshAlias, host: host, port: port,
+                              state: candidate.state, primary: candidate.primary ? true : nil)
     }
 
     /// Discovered wins; a failed discovery keeps the last good list; with
@@ -176,9 +197,28 @@ struct DevboxBoxShare: Equatable, Codable {
     /// MemAvailable above the floor; negative below it; nil while silent.
     let headroomBytes: Double?
     let pressure: DevboxOverviewSummary.Pressure?
+    /// The registry's state and primary flag (`DevboxEndpoint`).
+    var state: String? = nil
+    var primary: Bool? = nil
 
     var isSilent: Bool {
         headroomBytes == nil
+    }
+
+    /// "primary" · "draining" · "manual" — what the registry says of the
+    /// box; nil for a plain active one.
+    var role: String? {
+        if primary == true { return "primary" }
+        switch state {
+        case "drain": return "draining"
+        case "manual": return "manual"
+        default: return nil
+        }
+    }
+
+    /// Silent, or below its floor: its line turns orange.
+    var isAlerting: Bool {
+        isSilent || pressure == .critical
     }
 
     /// "24G free" · "−2G free" · "silent".
@@ -190,17 +230,33 @@ struct DevboxBoxShare: Equatable, Codable {
         return "\(free)G free"
     }
 
-    /// "a 24G free" · "b silent".
-    var label: String {
-        "\(name) \(freeText)"
+    /// "box c · primary" · "box b · draining" · "box a".
+    var title: String {
+        (["box \(name)"] + [role].compactMap { $0 }).joined(separator: " · ")
+    }
+
+    /// "24G free · 116 ws" · "silent" — a silent box's count is unknown.
+    func figure(workspaces: Int) -> String {
+        isSilent ? freeText : "\(freeText) · \(workspaces) ws"
+    }
+
+    /// The line's tooltip: why it is silent, what a drain asks of you, or
+    /// what its figures are.
+    func help(workspaces: Int, primary: String?) -> String {
+        if isSilent { return "Box \(name) did not answer its last poll — its workspaces are missing until it does" }
+        guard state == "drain" else { return "Free memory above box \(name)'s floor; \(workspaces) workspaces on it" }
+        if workspaces == 0 { return "Box \(name) is drained — its registry row can go off" }
+        let move = primary.map { "devbox move <ws> --to \($0)" } ?? "devbox move <ws> --to <box>"
+        return "Box \(name) drains: no new workspaces land here; \(workspaces) still to move (\(move))"
     }
 }
 
 /// What the Devbox surfaces show: every answering box's rows, tagged with
-/// their box, and one summary. With one discovered box that box's own
-/// summary passes through untouched — the single-box panel is exactly
-/// today's. With several, totals are summed and `boxes` carries the
-/// breakdown, silent boxes included.
+/// their box, and ONE box's own summary — never a sum (owner 2026-10-14:
+/// the estate is converging on one host, so no view merges two). The
+/// summary is the primary box's, else the first box that answered; with
+/// several boxes, `boxes` lists each one (silent ones included) and
+/// `summary.box` names the one the figures are.
 struct DevboxEstate {
     let workspaces: [DevboxWorkspace]
     let summary: DevboxOverviewSummary?
@@ -218,65 +274,24 @@ struct DevboxEstate {
             }
         }
         generated = answered.compactMap(\.generated).min()
-        if boxes.count <= 1 {
-            summary = answered.first?.summary
-        } else if answered.isEmpty {
+        guard let lead = answered.first(where: { $0.endpoint.isPrimary }) ?? answered.first else {
             summary = nil
-        } else {
-            let shares = boxes.map { box in
+            return
+        }
+        var own = lead.summary
+        if boxes.count > 1 {
+            own.box = lead.endpoint.name
+            own.boxes = boxes.map { box in
                 let summary = answered.first { $0.endpoint.name == box.name }?.summary
                 return DevboxBoxShare(
                     name: box.name,
                     headroomBytes: summary.map { $0.memoryAvailableBytes - Double($0.floorGB) * DevboxGlance.gib },
-                    pressure: summary?.pressure
+                    pressure: summary?.pressure,
+                    state: box.state,
+                    primary: box.primary
                 )
             }
-            summary = DevboxOverviewSummary(merging: answered.map(\.summary), boxes: shares)
         }
-    }
-}
-
-extension DevboxOverviewSummary {
-    /// Counts, cores, memory, swap, disk and floors add up; pressure is the
-    /// worst box's; CPU % is core-weighted. A figure no box reported stays
-    /// absent rather than becoming zero.
-    init(merging parts: [DevboxOverviewSummary], boxes: [DevboxBoxShare]) {
-        func sum(_ value: (DevboxOverviewSummary) -> Int?) -> Int? {
-            let present = parts.compactMap(value)
-            return present.isEmpty ? nil : present.reduce(0, +)
-        }
-        let identities = parts.compactMap(\.identities)
-        let cpuParts = parts.filter { $0.cpuUsagePercent != nil && $0.cpus > 0 }
-        let cpuCores = cpuParts.reduce(0) { $0 + $1.cpus }
-        let diskParts = parts.filter { $0.diskUsedBytes != nil && $0.diskTotalBytes != nil }
-        self.init(
-            identitySlots: parts.reduce(0) { $0 + $1.identitySlots },
-            targetHot: parts.reduce(0) { $0 + $1.targetHot },
-            hotCeiling: parts.reduce(0) { $0 + $1.hotCeiling },
-            claimed: parts.reduce(0) { $0 + $1.claimed },
-            running: parts.reduce(0) { $0 + $1.running },
-            identities: identities.isEmpty ? nil : DevboxOverviewIdentities(
-                saved: sum { $0.identities?.saved },
-                runtimeLeases: sum { $0.identities?.runtimeLeases },
-                portsUsed: sum { $0.identities?.portsUsed },
-                portCapacity: sum { $0.identities?.portCapacity }
-            ),
-            parked: parts.reduce(0) { $0 + $1.parked },
-            floorGB: parts.reduce(0) { $0 + $1.floorGB },
-            pressureSome: parts.map(\.pressureSome).max() ?? 0,
-            pressureFull: parts.map(\.pressureFull).max() ?? 0,
-            cpus: parts.reduce(0) { $0 + $1.cpus },
-            load1: parts.reduce(0) { $0 + $1.load1 },
-            cpuUsagePercent: cpuCores > 0
-                ? cpuParts.reduce(0) { $0 + ($1.cpuUsagePercent ?? 0) * Double($1.cpus) } / Double(cpuCores)
-                : nil,
-            diskTotalBytes: diskParts.isEmpty ? nil : diskParts.reduce(0) { $0 + ($1.diskTotalBytes ?? 0) },
-            diskUsedBytes: diskParts.isEmpty ? nil : diskParts.reduce(0) { $0 + ($1.diskUsedBytes ?? 0) },
-            memoryTotalBytes: parts.reduce(0) { $0 + $1.memoryTotalBytes },
-            memoryAvailableBytes: parts.reduce(0) { $0 + $1.memoryAvailableBytes },
-            swapTotalBytes: parts.reduce(0) { $0 + $1.swapTotalBytes },
-            swapFreeBytes: parts.reduce(0) { $0 + $1.swapFreeBytes },
-            boxes: boxes
-        )
+        summary = own
     }
 }

@@ -1,16 +1,15 @@
 import Foundation
 
-/// Semafor — the CI admission board on BuildServer (example-org/semafor),
-/// reached over the WireGuard mesh like Prometheus but on its own host, so it
-/// has its own breaker (`ProbeTarget.semafor`). Its admission view (both
-/// pools, the queue head, refusal reasons) and its overview (today's jobs
-/// and queue wait) are read. No auth on the query API; off-mesh the call fails
-/// fast and the pool line hides.
+/// Semafor — the CI admission board (example-org/semafor), one per host
+/// since 2026-10-14: each counts only its own host's lanes, and each server
+/// names its own (`NamedRef.semafor`). Every instance is its own host, so
+/// each has its own breaker (`ProbeTarget.semafor(host:)`). Its admission
+/// view (the pools, the queue head, refusal reasons) and its overview
+/// (today's jobs and queue wait) are read. No auth on the query API;
+/// off-mesh the call fails fast and that host's pool line hides.
 actor SemaforClient {
     static let shared = SemaforClient()
 
-    /// Also the web app the CI widget links to.
-    static let base = URL(string: "https://semafor.ops.example.invalid")!
     private let session: URLSession
 
     init() {
@@ -20,11 +19,11 @@ actor SemaforClient {
     /// The pool, its head labelled from the lanes' `ci_lane_info` tiers. A
     /// failure is what the breaker backs off on; an answer without a Docker
     /// pool (no controller exported yet) is a nil pool, not a failure.
-    func pool(lanes: [CILane]) async -> (pool: CIPool?, failure: ProbeFailure?) {
+    func pool(at base: URL, lanes: [CILane]) async -> (pool: CIPool?, failure: ProbeFailure?) {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(from: Self.base.appending(path: "api/v1/admission"))
+            (data, response) = try await session.data(from: base.appending(path: "api/v1/admission"))
         } catch {
             return (nil, .classify(error))
         }
@@ -41,11 +40,11 @@ actor SemaforClient {
 
     /// Today's throughput and queue wait — `/api/v1/overview`. Semafor's own
     /// SPA reads it once a minute; the store keeps to the same cadence.
-    func overview() async -> (throughput: CIThroughput?, failure: ProbeFailure?) {
+    func overview(at base: URL) async -> (throughput: CIThroughput?, failure: ProbeFailure?) {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(from: Self.base.appending(path: "api/v1/overview"))
+            (data, response) = try await session.data(from: base.appending(path: "api/v1/overview"))
         } catch {
             return (nil, .classify(error))
         }
@@ -62,8 +61,8 @@ actor SemaforClient {
 
     /// Each repo's job outcomes over Semafor's window (7 d) — `/api/v1/repos/health`.
     /// Read on a CI run's explicit selection (WP6), never polled; nil off-mesh.
-    func repoHealth() async throws -> [SemaforRepoHealth] {
-        let (data, response) = try await session.data(from: Self.base.appending(path: "api/v1/repos/health"))
+    func repoHealth(at base: URL) async throws -> [SemaforRepoHealth] {
+        let (data, response) = try await session.data(from: base.appending(path: "api/v1/repos/health"))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw URLError(.badServerResponse) }
         return try SemaforRepoHealth.decode(data)

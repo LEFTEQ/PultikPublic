@@ -17,7 +17,12 @@ enum ProbeTarget: Hashable, Sendable {
     case eve
     case sentry
     case vitrinka
-    case semafor
+    /// One per host's Semafor (2026-10-14), by its URL's host: a silent
+    /// build-server-next Semafor never pauses the live one's pool.
+    case semafor(host: String)
+
+    /// The live BuildServer's Semafor keeps the bare `semafor` key and label.
+    static let liveSemaforHost = "semafor.ops.example.invalid"
     /// Hlídač, the prod digest API — another BuildServer host, so a Semafor or
     /// Prometheus outage never pauses the prod board, nor the reverse.
     case hlidac
@@ -32,7 +37,7 @@ enum ProbeTarget: Hashable, Sendable {
         case .eve: return "eve"
         case .sentry: return "sentry"
         case .vitrinka: return "vitrinka"
-        case .semafor: return "semafor"
+        case let .semafor(host): return host == Self.liveSemaforHost ? "semafor" : "semafor-\(host)"
         case .hlidac: return "hlidac"
         case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox" : "devbox-\(box)"
         }
@@ -45,7 +50,7 @@ enum ProbeTarget: Hashable, Sendable {
         case .eve: return "eve"
         case .sentry: return "sentry"
         case .vitrinka: return "vitrinka"
-        case .semafor: return "CI pool (semafor)"
+        case let .semafor(host): return host == Self.liveSemaforHost ? "CI pool (semafor)" : "CI pool (\(host))"
         case .hlidac: return "prod watch (hlídač)"
         case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox (ssh)" : "devbox \(box) (ssh)"
         }

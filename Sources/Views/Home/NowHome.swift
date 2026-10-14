@@ -10,6 +10,8 @@ struct NowHomeModel {
     let selectedID: String?
     let expanded: Set<String>
     var ci: CIThroughput?
+    /// The host whose CI day `ci` is — one host's own, never a sum.
+    var ciHost: String?
     /// Restored needs still show: their oldest observation.
     var asOf: Date?
     /// Nothing has answered and nothing was restored.
@@ -34,7 +36,7 @@ struct NowLineView: View {
             GeometryReader { geo in
                 let trackWidth = min(640, max(360, (geo.size.width - Self.laneColumn) * 0.44))
                 VStack(spacing: TileMetrics.gap) {
-                    NowHero(queue: model.queue, now: now, ci: model.ci, asOf: model.asOf,
+                    NowHero(queue: model.queue, now: now, ci: model.ci, ciHost: model.ciHost, asOf: model.asOf,
                             compact: geo.size.width < 1100)
                     VStack(spacing: 0) {
                         header(now: now)

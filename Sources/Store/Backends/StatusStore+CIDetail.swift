@@ -14,9 +14,10 @@ extension StatusStore {
         /// A run's job graph (stay in Pultík D11): its workflow file at the run's
         /// head never changes, so it is kept across relaunches.
         static let graph = QueryResource<WorkflowGraph>(name: "ci.graph", staleAfter: .infinity, keep: 60)
-        /// Semafor's 7 d repo health; no credential, the mesh is the identity.
+        /// A host Semafor's 7 d repo health; no credential, the Semafor is
+        /// the identity (one per host).
         static let health = QueryResource<[SemaforRepoHealth]>(
-            name: "semafor.repos.health", staleAfter: 300, persists: false, keep: 1)
+            name: "semafor.repos.health", staleAfter: 300, persists: false, keep: 4)
     }
 
     /// The pinned repo whose polled runs hold `runID`.
@@ -78,12 +79,20 @@ extension StatusStore {
         }
     }
 
-    func semaforRepoHealth() async throws -> [SemaforRepoHealth] {
-        try await QueryRepository.shared.load(CIDetailResources.health,
-                                              key: QueryKey(resource: CIDetailResources.health.name, identity: "mesh"),
-                                              maxAge: CIDetailResources.health.staleAfter) {
-            try await SemaforClient.shared.repoHealth()
+    /// The repo's job outcomes from the Semafor of the host `run` ran on —
+    /// that Semafor alone saw its jobs. nil when the host is not settled.
+    func semaforRepoHealth(of run: CIRunDetail) async throws -> SemaforRepoHealth? {
+        let repo = run.run.ref.repo
+        guard let host = laneBoard.host(ofRunners: run.jobs.compactMap(\.runnerName), repo: repo),
+              let base = semaforBase(forHost: host) else { return nil }
+        let rows = try await QueryRepository.shared.load(
+            CIDetailResources.health,
+            key: QueryKey(resource: CIDetailResources.health.name, identity: base.absoluteString),
+            maxAge: CIDetailResources.health.staleAfter
+        ) {
+            try await SemaforClient.shared.repoHealth(at: base)
         }
+        return rows.first { $0.repo == repo }
     }
 
     /// After a re-run: the run's detail refetches, and the repo's runs poll on
