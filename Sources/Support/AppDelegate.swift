@@ -306,6 +306,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     #if DEBUG
     private var debugLastSummonMilliseconds: Double = 0
+    /// The screen the last `open` named: a re-summon without one (`size`)
+    /// stays on it instead of jumping to the focused screen.
+    private var debugTestScreen: String?
 
     /// Available even when the panel is hidden; includes compressed pages.
     func debugWriteMetrics(to path: String) {
@@ -335,14 +338,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ], to: path)
     }
 
-    /// Test summons prefer Studio Display, including an already-visible panel.
-    /// Ordinary hotkey and status-item summons still follow the user's screen.
-    func debugShowPanel() {
+    /// Test summons go to `screen` (`panel-drive.sh open` resolves Toolkit's
+    /// `qa` role), else the last one `open` named, else the launch's
+    /// `-ToolkitScreen`, when it is connected — an already-visible panel
+    /// included; else the focused screen. Ordinary hotkey and status-item
+    /// summons still follow the user's screen.
+    func debugShowPanel(on screen: String? = nil) {
         let started = ProcessInfo.processInfo.systemUptime
         let panel = warmPanel()
         if !panel.isVisible { panelSession.markPresented() }
         let screens = NSScreen.screens
-        let preferredScreen = PanelTestDisplay.preferredIndex(in: screens.map(\.localizedName))
+        if let screen, !screen.isEmpty { debugTestScreen = screen }
+        let wanted = debugTestScreen ?? PanelTestDisplay.launchScreen
+        let preferredScreen = PanelTestDisplay.preferredIndex(in: screens.map(\.localizedName), wanted: wanted)
             .map { screens[$0] }
         panel.showCentered(on: preferredScreen, takeKey: false)
         debugLastSummonMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000
