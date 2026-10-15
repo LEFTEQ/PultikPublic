@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drive a running DEBUG Pultík panel without touching the mouse, keyboard or
-# focus. Talks to Sources/Support/PanelDriver.swift over a distributed
+# focus. Talks to Apps/Pultik/Sources/Support/PanelDriver.swift over a distributed
 # notification; the Release app has no listener.
 #
 #   tools/panel-drive.sh open [screen]             # the named screen, else Toolkit's qa display (or the menu-bar one, with its warning); never takes the keyboard
@@ -8,10 +8,15 @@
 #   tools/panel-drive.sh size 1240x720             # pin the frame (AC 13's 1240/1600 pt captures); '' resets
 #   tools/panel-drive.sh query '<text>'            # set the palette text
 #   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V; makes the panel key)
-#   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|1-9|i|r|a (key 3 cmd = CI)
+#   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|space|1-9|a|b|c|e|f|i|k|l|m|r|z (key 3 cmd = CI)
 #   tools/panel-drive.sh key left "" 5            # the same key 5× at key-repeat speed (50 ms apart, in the app)
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window (+ any open popover) as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette + shell state as JSON (module, selection, detailOpen, strip…)
+#   tools/panel-drive.sh diff-fixture /tmp/big.diff # show a `git diff --full-index` file in the open PR's Files tab ('' clears)
+#   tools/panel-drive.sh scroll-bench [pt/s]       # the shown code canvas, top to bottom on the display link: frame p50/p99/max (AC 4)
+#   tools/panel-drive.sh gutter 2:14[+]            # a gutter click on file 2's line 14 (+ = ⇧, extends): a review comment starts
+#   tools/panel-drive.sh pr-verb 'comment:Hi'      # a verb on the open PR through performPRVerb — THROWAWAY PRs ONLY
+#                                                  #   (inline:<path>:<line>:<text>, review:<event>:<text>, resolve, merge:<method>, close, reopen)
 #   tools/panel-drive.sh metrics [/tmp/mem.json]   # footprint + summon time, also hidden
 #   tools/panel-drive.sh github-pause             # simulate a GitHub breaker pause (Debug only)
 #   tools/panel-drive.sh github-resume            # clear that Debug pause
@@ -43,7 +48,9 @@ case "$cmd" in
       if out="$(toolkit displays resolve --role qa --app pultik)"; then PD_TEXT="$out"; else printf '%s\n' "$out" >&2; fi
     fi ;;
   close|github-pause|github-resume) ;;
-  query|size|clear-preview|clear-action|mac-stop|home-toggle|home-style|mark) PD_TEXT="${1-}" ;;
+  query|size|clear-preview|clear-action|mac-stop|home-toggle|home-style|mark|diff-fixture|gutter) PD_TEXT="${1-}" ;;
+  scroll-bench) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-scroll-bench.json ;;
+  pr-verb) PD_TEXT="${1:?verb}"; PD_PATH=/tmp/pultik-pr-verb.json ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}"; PD_TEXT="${3-}" ;;
   capture) PD_PATH="${1:?png path}" ;;
@@ -51,7 +58,7 @@ case "$cmd" in
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
   frame) ;;
   firing) PD_TEXT="${1-}" ;;
-  *) sed -n '2,26p' "$0"; exit 2 ;;
+  *) sed -n '2,28p' "$0"; exit 2 ;;
 esac
 
 post() {
@@ -68,6 +75,14 @@ post() {
 }
 
 case "$cmd" in
+  scroll-bench|pr-verb)
+    # The bench runs for seconds: a 5,000-line diff at 5,000 pt/s takes ~20.
+    rm -f "$PD_PATH"
+    post
+    for _ in $(seq 1 1200); do [ -s "$PD_PATH" ] && break; sleep 0.1; done
+    [ -s "$PD_PATH" ] || { echo "panel-drive: no bench result at $PD_PATH" >&2; exit 1; }
+    cat "$PD_PATH"
+    ;;
   capture|state|metrics)
     rm -f "$PD_PATH"
     post

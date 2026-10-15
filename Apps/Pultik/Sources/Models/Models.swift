@@ -1,0 +1,1724 @@
+import Foundation
+
+// MARK: - GitHub API payloads (decoded with .convertFromSnakeCase + .iso8601)
+
+struct WorkflowRunsResponse: Decodable {
+    let workflowRuns: [WorkflowRun]
+}
+
+struct WorkflowRun: Codable, Identifiable {
+    let id: Int
+    let name: String?
+    let headBranch: String?
+    let status: String // queued | in_progress | completed | waiting | pending
+    let conclusion: String? // success | failure | cancelled | timed_out | ...
+    let htmlUrl: String
+    let createdAt: Date
+    let updatedAt: Date
+
+    var isRunning: Bool {
+        status != "completed"
+    }
+
+    var failed: Bool {
+        ["failure", "timed_out", "startup_failure"].contains(conclusion ?? "")
+    }
+}
+
+struct Deployment: Codable, Identifiable {
+    let id: Int
+    let environment: String
+    let ref: String
+    let createdAt: Date
+}
+
+struct PullRequest: Codable, Identifiable {
+    let id: Int
+    let number: Int
+    let title: String
+    let htmlUrl: String
+    let draft: Bool?
+    let head: Head
+    let updatedAt: Date?
+
+    struct Head: Codable {
+        let sha: String
+        let ref: String
+    }
+}
+
+struct DiscoveredRepo: Decodable {
+    let fullName: String
+}
+
+// MARK: - PR search (the archive: closed & merged, on demand)
+
+struct PRSearchResponse: Decodable {
+    let items: [PRSearchItem]
+    let incompleteResults: Bool?
+}
+
+/// One /search/issues hit, restricted to `is:pr`.
+struct PRSearchItem: Decodable {
+    let number: Int
+    let title: String
+    let htmlUrl: String
+    let state: String // open | closed
+    let draft: Bool?
+    let repositoryUrl: String // https://api.github.com/repos/example-org/ExampleApp
+    let updatedAt: Date
+    let pullRequest: Ref?
+
+    struct Ref: Decodable {
+        let mergedAt: Date?
+    }
+}
+
+/// /repos/{repo}/pulls/{number} — the exact-number path, because full-text
+/// search cannot answer "the PR whose number is 520".
+struct PRLookup: Decodable {
+    let number: Int
+    let title: String
+    let htmlUrl: String
+    let state: String
+    let draft: Bool?
+    let mergedAt: Date?
+    let updatedAt: Date
+    let head: PullRequest.Head?
+}
+
+enum PROutcome: String, Codable, Sendable {
+    case merged, closed, open, draft
+}
+
+/// A PR found by searching GitHub — any state, any active repo, pinned or not.
+/// Deliberately thinner than `PRInfo`: history needs no checks or reviews.
+struct ArchivedPR: Identifiable, Codable, Sendable {
+    let repoSlug: String
+    let number: Int
+    let title: String
+    let url: String
+    let outcome: PROutcome
+    let updatedAt: Date
+    var branch: String?
+    let sourceRepoSlug: String?
+
+    var id: String {
+        "\(repoSlug)#\(number)"
+    }
+
+    /// "example-org/ExampleApp" → "ExampleApp"
+    var repoName: String {
+        repoSlug.split(separator: "/").last.map(String.init) ?? repoSlug
+    }
+
+    init(item: PRSearchItem) {
+        repoSlug = ArchivedPR.slug(fromApiUrl: item.repositoryUrl)
+        number = item.number
+        title = item.title
+        url = item.htmlUrl
+        outcome = ArchivedPR.outcome(
+            state: item.state, mergedAt: item.pullRequest?.mergedAt, draft: item.draft
+        )
+        updatedAt = item.updatedAt
+        branch = nil
+        sourceRepoSlug = nil
+    }
+
+    init(lookup: PRLookup, repoSlug: String) {
+        // A renamed repo answers under its old slug via a 301, so trust the
+        // URL we came back with over the one we asked for.
+        self.repoSlug = ArchivedPR.slug(fromHtmlUrl: lookup.htmlUrl) ?? repoSlug
+        number = lookup.number
+        title = lookup.title
+        url = lookup.htmlUrl
+        outcome = ArchivedPR.outcome(
+            state: lookup.state, mergedAt: lookup.mergedAt, draft: lookup.draft
+        )
+        updatedAt = lookup.updatedAt
+        branch = lookup.head?.ref
+        sourceRepoSlug = self.repoSlug.lowercased() == repoSlug.lowercased() ? nil : repoSlug
+    }
+
+    init(pr: PullRequest, repoSlug: String, fetchedAt: Date) {
+        self.repoSlug = repoSlug
+        number = pr.number
+        title = pr.title
+        url = pr.htmlUrl
+        outcome = pr.draft == true ? .draft : .open
+        updatedAt = pr.updatedAt ?? fetchedAt
+        branch = pr.head.ref
+        sourceRepoSlug = nil
+    }
+
+    /// A merged PR is `state: "closed"` too — merged_at is the only tell.
+    private static func outcome(state: String, mergedAt: Date?, draft: Bool?) -> PROutcome {
+        if mergedAt != nil { return .merged }
+        if state == "closed" { return .closed }
+        return draft == true ? .draft : .open
+    }
+
+    /// "https://api.github.com/repos/example-org/ExampleApp" → "example-org/ExampleApp"
+    private static func slug(fromApiUrl url: String) -> String {
+        let parts = url.split(separator: "/")
+        guard parts.count >= 2 else { return url }
+        return parts.suffix(2).joined(separator: "/")
+    }
+
+    /// "https://github.com/example-org/ExampleApp/pull/520" → "example-org/ExampleApp"
+    private static func slug(fromHtmlUrl url: String) -> String? {
+        let parts = url.split(separator: "/")
+        guard let pull = parts.firstIndex(of: "pull"), pull >= 2 else { return nil }
+        return parts[(pull - 2) ..< pull].joined(separator: "/")
+    }
+}
+
+// MARK: - Issue search (the .issues mode)
+
+/// Present on an issues-endpoint payload ONLY when the hit is really a pull
+/// request. Issues and PRs share one number sequence and one endpoint family,
+/// so this key is the single reliable tell.
+struct PullRequestMarker: Decodable {}
+
+struct IssueSearchResponse: Decodable {
+    let items: [IssueSearchItem]
+}
+
+/// One /search/issues hit under `is:issue`, carrying the fields a PR row never
+/// needed: labels, comment count, and why it was closed.
+struct IssueSearchItem: Decodable {
+    let number: Int
+    let title: String
+    let htmlUrl: String
+    let state: String // open | closed
+    let stateReason: String? // completed | not_planned | reopened
+    let repositoryUrl: String // https://api.github.com/repos/example-org/ExampleApp
+    let comments: Int
+    let labels: [IssueLabel]
+    let updatedAt: Date
+    let pullRequest: PullRequestMarker?
+}
+
+/// /repos/{repo}/issues/{number} — the exact-number path. It answers for PRs
+/// too, which is why `pullRequest` is decoded here as well.
+struct IssueLookup: Decodable {
+    let number: Int
+    let title: String
+    let htmlUrl: String
+    let state: String
+    let stateReason: String?
+    let comments: Int
+    let labels: [IssueLabel]
+    let updatedAt: Date
+    let pullRequest: PullRequestMarker?
+}
+
+struct IssueLabel: Decodable {
+    let name: String
+}
+
+enum IssueOutcome {
+    case open, closed, notPlanned
+}
+
+/// An issue found by searching GitHub — any state, any active repo. Sibling to
+/// `ArchivedPR` rather than a variant of it: the PR path has no use for labels
+/// or comment counts, and this one has no use for merge state.
+struct ArchivedIssue: Identifiable {
+    let repoSlug: String
+    let number: Int
+    let title: String
+    let url: String
+    let outcome: IssueOutcome
+    let labels: [String]
+    let comments: Int
+    let updatedAt: Date
+
+    var id: String {
+        "\(repoSlug)#\(number)"
+    }
+
+    /// "example-org/ExampleApp" → "ExampleApp"
+    var repoName: String {
+        repoSlug.split(separator: "/").last.map(String.init) ?? repoSlug
+    }
+
+    /// Search hits that are really PRs are dropped — `is:issue` should have
+    /// excluded them, but the endpoint is shared and the key is cheap to check.
+    init?(item: IssueSearchItem) {
+        guard item.pullRequest == nil else { return nil }
+        repoSlug = ArchivedIssue.slug(fromApiUrl: item.repositoryUrl)
+        number = item.number
+        title = item.title
+        url = item.htmlUrl
+        outcome = ArchivedIssue.outcome(state: item.state, reason: item.stateReason)
+        labels = item.labels.map(\.name)
+        comments = item.comments
+        updatedAt = item.updatedAt
+    }
+
+    init?(lookup: IssueLookup, repoSlug: String) {
+        guard lookup.pullRequest == nil else { return nil } // #812 is a PR here
+        // A renamed repo answers under its old slug via a 301, so trust the
+        // URL we came back with over the one we asked for.
+        self.repoSlug = ArchivedIssue.slug(fromHtmlUrl: lookup.htmlUrl) ?? repoSlug
+        number = lookup.number
+        title = lookup.title
+        url = lookup.htmlUrl
+        outcome = ArchivedIssue.outcome(state: lookup.state, reason: lookup.stateReason)
+        labels = lookup.labels.map(\.name)
+        comments = lookup.comments
+        updatedAt = lookup.updatedAt
+    }
+
+    /// "not_planned" is worth its own tone — it closed because it was never
+    /// real, which reads differently from closed-because-fixed.
+    private static func outcome(state: String, reason: String?) -> IssueOutcome {
+        guard state == "closed" else { return .open }
+        return reason == "not_planned" ? .notPlanned : .closed
+    }
+
+    /// "https://api.github.com/repos/example-org/ExampleApp" → "example-org/ExampleApp"
+    private static func slug(fromApiUrl url: String) -> String {
+        let parts = url.split(separator: "/")
+        guard parts.count >= 2 else { return url }
+        return parts.suffix(2).joined(separator: "/")
+    }
+
+    /// "https://github.com/example-org/ExampleApp/issues/812" → "example-org/ExampleApp"
+    private static func slug(fromHtmlUrl url: String) -> String? {
+        let parts = url.split(separator: "/")
+        guard let issues = parts.firstIndex(of: "issues"), issues >= 2 else { return nil }
+        return parts[(issues - 2) ..< issues].joined(separator: "/")
+    }
+}
+
+// MARK: - Sentry (self-hosted, mesh)
+
+struct SentryIssue: Decodable, Identifiable {
+    let id: String
+    let shortId: String
+    let title: String
+    let culprit: String?
+    let count: String // Sentry serializes event counts as strings
+    let userCount: Int
+    let level: String // error | fatal | warning | ...
+    let permalink: String
+    let lastSeen: Date
+    /// The owning project — org-level search hits span projects, and the
+    /// palette needs the slug to label them ("ExampleApp"). Optional because it is
+    /// irrelevant on project-scoped fetches, where the request already knows.
+    let project: ProjectRef?
+
+    struct ProjectRef: Decodable {
+        let slug: String
+    }
+
+    var eventCount: Int {
+        Int(count) ?? 0
+    }
+}
+
+/// A Sentry issue tagged with the project it came from.
+struct ProdIssue: Identifiable {
+    let project: String // "exampleapp-api"
+    let issue: SentryIssue
+    var id: String {
+        issue.id
+    }
+
+    /// "exampleapp-api" → "ExampleApp", "booking-back" → "Booking"
+    var productLabel: String {
+        project.hasPrefix("exampleapp") ? "ExampleApp" : project.hasPrefix("booking") ? "Booking" : project
+    }
+}
+
+// MARK: - Infra metrics (mesh Prometheus)
+
+/// One VPS's node-exporter snapshot, percentages 0–100 — or one of its VM
+/// guests (`vmHost` set), drawn under it.
+///
+/// Identity is the `instance` label plus, for a guest, `vm_host`: two hosts
+/// each run a `firefly-vm`. Never the hostname — the live BuildServer still
+/// reports `build-server-next` as its own (build-server-infra decisions row 26).
+struct ServerMetrics: Identifiable, Codable {
+    let name: String // "BuildServer"
+    let instance: String // prometheus instance label, e.g. "build-vps"
+    /// A guest's host: its `vm_host` label, the host's own `instance`.
+    var vmHost: String?
+    var cpu: Double?
+    var ram: Double?
+    var disk: Double?
+    /// Absolute sizes behind the percentages — the footer says "18/32 GB".
+    var ramUsedBytes: Double?
+    var ramTotalBytes: Double?
+    var diskUsedBytes: Double?
+    var diskTotalBytes: Double?
+    var cpuCount: Int?
+    /// ZFS pools and dataset quotas (build-server-next's `vy`); empty elsewhere.
+    var pools: [ZFSUsage] = []
+    var datasets: [ZFSUsage] = []
+    var id: String {
+        vmHost.map { "\($0)/\(instance)" } ?? instance
+    }
+
+    var isGuest: Bool {
+        vmHost != nil
+    }
+
+    var worst: Double {
+        max(cpu ?? 0, ram ?? 0, disk ?? 0)
+    }
+}
+
+/// One ZFS pool's allocation or one dataset's use against its quota.
+struct ZFSUsage: Codable, Equatable {
+    let name: String
+    let usedBytes: Double
+    let totalBytes: Double
+
+    var percent: Double {
+        totalBytes > 0 ? usedBytes / totalBytes * 100 : 0
+    }
+}
+
+extension FiringAlert {
+    /// The `ServerMetrics.id` this alert is about, most specific first: a
+    /// guest by `vm_host` + `instance`, a host by `instance`, else by
+    /// `cluster` — build-server-next's sender deadman carries only that, and a
+    /// remote-written host's cluster is its instance. nil = estate-wide.
+    func serverID(among servers: [ServerMetrics]) -> String? {
+        let instance = labels["instance"]
+        if let vmHost = labels["vm_host"] {
+            return (servers.first { $0.vmHost == vmHost && $0.instance == instance }
+                ?? servers.first { !$0.isGuest && $0.instance == vmHost })?.id
+        }
+        if let host = servers.first(where: { !$0.isGuest && $0.instance == instance }) { return host.id }
+        guard let cluster = labels["cluster"] else { return nil }
+        return servers.first { !$0.isGuest && $0.instance == cluster }?.id
+    }
+}
+
+/// Load pressure, the only thing the footer meters need to decide a colour.
+/// Thresholds are the operator's: fine until three quarters, loud past nine
+/// tenths — the point where a box stops absorbing a surprise.
+enum LoadTier {
+    case calm, warm, hot
+
+    init(percent: Double) {
+        switch percent {
+        case ..<75: self = .calm
+        case ..<90: self = .warm
+        default: self = .hot
+        }
+    }
+}
+
+/// "18/32 GB", "1.8/3.5 TB" — the pair is scaled by the TOTAL so both halves
+/// share a unit, and BuildServer's 3.5 TB disk doesn't render as 3576 GB.
+/// `String(format:)` like every other panel number: a decimal point whatever
+/// the system locale (a Czech Mac printed "1,4/1,7 TB" beside "5.5G").
+func formatSize(used: Double, total: Double) -> String {
+    let gb = 1_073_741_824.0
+    let terabytes = total >= 1000 * gb
+    let divisor = terabytes ? gb * 1024 : gb
+    let unit = terabytes ? "TB" : "GB"
+    let scaledTotal = total / divisor
+    let format = scaledTotal < 10 ? "%.1f" : "%.0f"
+    return "\(String(format: format, used / divisor))/\(String(format: format, scaledTotal)) \(unit)"
+}
+
+/// One service's blackbox probe snapshot.
+struct ServiceStatus: Identifiable, Codable {
+    let name: String // "exampleapp-prod"
+    let probe: String // probe instance label (URL)
+    /// The `servers[].name` of the box this service runs on — the rail's group
+    /// key. Nil means unfiled, not unknown-host: the rail shows those last
+    /// under their own heading rather than dropping them.
+    var host: String?
+    var up: Bool?
+    var latencySeconds: Double?
+    var id: String {
+        probe
+    }
+
+    var latencyLabel: String {
+        guard let latencySeconds else { return "—" }
+        return latencySeconds < 1 ? "\(Int(latencySeconds * 1000))ms"
+            : String(format: "%.1fs", latencySeconds)
+    }
+}
+
+/// One JIT lane in the BuildServer fleet — a `ci-kvm-controller@<lane>`
+/// instance (`ci_kvm_controller_up`). Runners are per-job, ephemeral and
+/// nameless since 2026-08-30, so the lane is the stable unit and its running
+/// jobs are the occupancy (spec 2026-09-09).
+struct CILane: Identifiable, Codable {
+    let name: String // "exampleapp-ci"
+    let backend: String // "docker" | "kvm"
+    let trustGroup: String // "firefly" (CI) | "bastion" (deploys)
+    let up: Bool // controller unit active
+    /// The host whose Firefly runs the lane: its controller's `instance`
+    /// label, a server's `ref` ("build-vps", "build-server-next"). Each lane
+    /// runs on exactly one host (build-server-infra registry `host`).
+    var host: String?
+    /// The repo `ci_lane_info` serves ("example-org/ExampleApp").
+    var repo: String?
+    /// Repo priority tier (0 places first) and job kind (ci/build/e2e, deploy
+    /// on bastion lanes) from `ci_lane_info`. No lane has a runner ceiling
+    /// since 2026-09-26: capacity is the shared pool (`CILaneBoard.pool`).
+    var tier: Int?
+    var kind: String?
+    let queued: Int
+    let jobs: [CIJob]
+
+    var id: String { name }
+    var running: Int { jobs.count }
+    /// Worth a row of its own: busy, backed up, or broken. Everything else
+    /// folds into the section's "N idle" line.
+    var isActive: Bool { !jobs.isEmpty || queued > 0 || !up }
+}
+
+/// A job executing on the fleet right now (`ci_runner_job_info`, one series
+/// per running job, link included — no GitHub lookup needed).
+struct CIJob: Identifiable, Codable {
+    let org: String
+    let repo: String // "ExampleApp"
+    let lane: String
+    let workflow: String
+    let jobName: String
+    let runURL: URL?
+    let since: Date?
+    var cpuPercent: Double?
+    var memoryBytes: Double?
+
+    var id: String {
+        "\(runURL?.absoluteString ?? "\(org)/\(repo)")/\(workflow)/\(jobName)/\(since?.timeIntervalSince1970 ?? 0)"
+    }
+}
+
+/// The whole CI picture for one poll: every enabled lane plus the jobs the
+/// collector saw on lanes that are not ours (`github-hosted`, `unknown`).
+struct CILaneBoard: Codable {
+    var lanes: [CILane] = []
+    var elsewhere: [CIJob] = []
+    var elsewhereQueued: Int = 0
+    /// Each host's Docker pool from its own Semafor, by the host's `ref`
+    /// (`CILane.host`); a host whose Semafor did not answer has none.
+    var pools: [String: CIPool] = [:]
+
+    var isEmpty: Bool { lanes.isEmpty }
+    var running: Int { lanes.reduce(0) { $0 + $1.running } }
+
+    /// The hosts with lanes, in `order` (the servers' refs), unknown hosts
+    /// last and an unlabelled lane's "" after them — one CI section each,
+    /// never one merged fleet.
+    func hosts(in order: [String]) -> [String] {
+        let present = Set(lanes.map { $0.host ?? "" })
+        return order.filter(present.contains)
+            + present.subtracting(order).sorted { ($0.isEmpty ? 1 : 0, $0) < ($1.isEmpty ? 1 : 0, $1) }
+    }
+
+    /// The host a run ran on, for its host's Semafor (which saw only its own
+    /// jobs): from its jobs' JIT runners (`ci-jit-<lane>-<id>`, the longest
+    /// lane name winning, so `vitrinka-e2e-batch` is never `vitrinka-e2e`),
+    /// else the one host every lane of `repo` runs on. nil when neither
+    /// settles it — a repo can have lanes on both hosts.
+    func host(ofRunners runners: [String], repo: String) -> String? {
+        let ran = Set(runners.compactMap { runner in
+            lanes.filter { runner.hasPrefix("ci-jit-\($0.name)-") }.max { $0.name.count < $1.name.count }?.host
+        })
+        if !ran.isEmpty { return ran.count == 1 ? ran.first : nil }
+        let serving = Set(lanes.filter { $0.repo?.caseInsensitiveCompare(repo) == .orderedSame }.compactMap(\.host))
+        return serving.count == 1 ? serving.first : nil
+    }
+}
+
+/// One host's Docker JIT pool its CI lanes draw on (build-server-infra priority
+/// decisions 4-6, 2026-09-26; one Semafor per host since 2026-10-14): slots
+/// and reservation budget, and the head of its priority queue — the waiter
+/// that places next.
+struct CIPool: Equatable, Codable {
+    var slotsUsed: Int
+    var slotsMax: Int
+    var reservedMiB: Int
+    var budgetMiB: Int
+    var head: CIPoolHead?
+    /// The newest controller render behind these numbers.
+    var observedAt: Date?
+    /// The KVM bastion guests' pool (partition `kvm`) — deploy lanes, gated
+    /// by the host's real free memory; nil when Semafor reports none.
+    var bastion: CIPartitionLoad?
+    /// Why waiting lanes were refused over the last 15 minutes, summed
+    /// across both pools, most frequent first. Empty while nobody waits.
+    var refusals: [CIRefusal] = []
+}
+
+struct CIPartitionLoad: Equatable, Codable {
+    let slotsUsed: Int
+    let slotsMax: Int
+    let reservedMiB: Int
+    let budgetMiB: Int
+}
+
+struct CIRefusal: Equatable, Codable {
+    let reason: String
+    let count: Int
+}
+
+struct CIPoolHead: Equatable, Codable {
+    let lane: String
+    let tier: Int?
+    let kind: String?
+    let waiting: Int
+}
+
+/// Semafor's `GET /api/v1/admission` (semafor `internal/query`), only the
+/// fields the pool reads. Partition "" is the Docker ordinary pool; the
+/// bastion guests report as "kvm".
+struct SemaforAdmission: Decodable {
+    struct Partition: Decodable {
+        let name: String
+        let budgetMib: Int
+        let reservedMib: Int
+        let slotsUsed: Int
+        let slotsMax: Int
+    }
+
+    struct Lane: Decodable {
+        struct Refusal: Decodable {
+            let reason: String
+            let count: Int
+        }
+
+        let lane: String
+        let partition: String
+        let waiting: Int
+        let head: Bool
+        // `refusals_15m`; optional so an older Semafor still decodes.
+        let refusals15m: [Refusal]?
+
+        private enum CodingKeys: String, CodingKey {
+            case lane, partition, waiting, head
+            // convertFromSnakeCase capitalises after a digit: `refusals_15m`
+            // reaches the container as `refusals15M`.
+            case refusals15m = "refusals15M"
+        }
+    }
+
+    let observedAt: String? // RFC 3339, null before any controller exported
+    let partitions: [Partition]
+    let lanes: [Lane]
+
+    static func decode(_ data: Data) -> SemaforAdmission? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(SemaforAdmission.self, from: data)
+    }
+
+    private var observedDate: Date? {
+        guard let observedAt else { return nil }
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: observedAt) { return date }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: observedAt)
+    }
+
+    /// The Docker pool, its head resolved against the lanes' tiers: every
+    /// controller flags itself head at its own last attempt, so between two
+    /// attempts more than one lane can say so — the best tier wins, then the
+    /// name, so the line does not flicker between polls.
+    func pool(lanes board: [CILane]) -> CIPool? {
+        guard let docker = partitions.first(where: { $0.name.isEmpty }) else { return nil }
+        let byName = Dictionary(board.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let head = lanes
+            .filter { $0.partition.isEmpty && $0.head && $0.waiting > 0 }
+            .map { CIPoolHead(lane: $0.lane, tier: byName[$0.lane]?.tier, kind: byName[$0.lane]?.kind, waiting: $0.waiting) }
+            .min { ($0.tier ?? Int.max, $0.lane) < ($1.tier ?? Int.max, $1.lane) }
+        let bastion = partitions.first(where: { $0.name == "kvm" }).map {
+            CIPartitionLoad(slotsUsed: $0.slotsUsed, slotsMax: $0.slotsMax,
+                            reservedMiB: $0.reservedMib, budgetMiB: $0.budgetMib)
+        }
+        // A refusal on a lane nobody waits on any more is history, not a
+        // reason the queue is stuck now.
+        var refused: [String: Int] = [:]
+        for lane in lanes where lane.waiting > 0 {
+            for refusal in lane.refusals15m ?? [] {
+                refused[refusal.reason, default: 0] += refusal.count
+            }
+        }
+        let refusals = refused.map { CIRefusal(reason: $0.key, count: $0.value) }
+            .sorted { ($0.count, $1.reason) > ($1.count, $0.reason) }
+        return CIPool(slotsUsed: docker.slotsUsed, slotsMax: docker.slotsMax,
+                      reservedMiB: docker.reservedMib, budgetMiB: docker.budgetMib,
+                      head: head, observedAt: observedDate,
+                      bastion: bastion, refusals: refusals)
+    }
+}
+
+/// Semafor's `GET /api/v1/overview` (added 2026-09-27), only what the CI
+/// widget reads: today's throughput against yesterday at the same time,
+/// today's queue wait, and the 24 local hours. "Today" is Semafor's
+/// Europe/Prague day, so `hour` is the current bucket in `tz`.
+struct CIThroughput: Equatable, Codable {
+    struct Queue: Equatable, Codable {
+        let p50: Double
+        let p95: Double
+    }
+
+    struct Hour: Equatable, Codable {
+        let hour: Int
+        let jobs: Int
+    }
+
+    let at: String
+    let tz: String
+    let jobs: Int
+    let yesterdaySameTime: Int
+    /// nil until a job completed today.
+    let queue: Queue?
+    let over300sShare: Double?
+    let hours: [Hour]
+
+    private enum CodingKeys: String, CodingKey {
+        case at, tz, jobs, yesterdaySameTime, queue, hours
+        // convertFromSnakeCase capitalises after a digit: `over_300s_share`
+        // reaches the container as `over300SShare`.
+        case over300sShare = "over300SShare"
+    }
+
+    static func decode(_ data: Data) -> CIThroughput? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(CIThroughput.self, from: data)
+    }
+
+    /// The hour `at` falls in, in Semafor's zone; nil when either is unreadable.
+    var currentHour: Int? {
+        guard let zone = TimeZone(identifier: tz) else { return nil }
+        let formatter = ISO8601DateFormatter()
+        var date = formatter.date(from: at)
+        if date == nil {
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            date = formatter.date(from: at)
+        }
+        guard let date else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        return calendar.component(.hour, from: date)
+    }
+}
+
+// MARK: - Firing alerts (Prometheus + Loki rules)
+
+/// One alert a rule evaluator reports, from Prometheus's `/api/v1/alerts` or
+/// the Loki ruler's `/prometheus/api/v1/alerts` (same shape). Alertmanager
+/// itself is loopback-only on build-server, so these are the rules' own view:
+/// every firing rule, before routing — manual silences are not applied.
+struct FiringAlert: Equatable, Identifiable, Codable {
+    enum Source: String, Equatable, Codable {
+        case prometheus, loki
+    }
+
+    let name: String
+    let state: String
+    let severity: String?
+    let summary: String?
+    let description: String?
+    let labels: [String: String]
+    let activeAt: Date?
+    let source: Source
+
+    var id: String {
+        ([source.rawValue, name] + labels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" })
+            .joined(separator: "|")
+    }
+
+    /// The always-firing dead man's switch: it firing is the healthy state,
+    /// so no rail, badge, notification or Now need ever shows it.
+    var isHeartbeat: Bool { name == "Watchdog" }
+
+    /// `app · environment`, when labelled — the rail row's and the
+    /// notification's context.
+    var context: String? {
+        let parts = [labels["app"], labels["environment"]].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The rules API's `{status, data: {alerts: [...]}}`; nil when unreadable.
+    static func decode(_ data: Data, source: Source) -> [FiringAlert]? {
+        struct Envelope: Decodable {
+            struct Payload: Decodable { let alerts: [Raw] }
+            struct Raw: Decodable {
+                let labels: [String: String]
+                let annotations: [String: String]?
+                let state: String
+                let activeAt: String?
+            }
+
+            let status: String
+            let data: Payload?
+        }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+              envelope.status == "success", let alerts = envelope.data?.alerts
+        else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        return alerts.map { raw in
+            FiringAlert(name: raw.labels["alertname"] ?? "alert", state: raw.state,
+                        severity: raw.labels["severity"],
+                        summary: raw.annotations?["summary"], description: raw.annotations?["description"],
+                        labels: raw.labels,
+                        activeAt: raw.activeAt.flatMap { formatter.date(from: $0) ?? plain.date(from: $0) },
+                        source: source)
+        }
+    }
+}
+
+// MARK: - Project registry (the on-call layer)
+
+struct ProjectSpec: Codable, Identifiable {
+    var key: String // palette match: "exampleapp"
+    var title: String // "ExampleApp"
+    var repos: [String] = [] // "example-org/ExampleApp" — matches pinned slugs
+    var sentryProjects: [String] = []
+    var services: [String] = [] // ServiceStatus.name references
+    var links: [Link] = []
+    /// Prod watch pointers (docs/specs/2026-10-03-prod-watch-contracts.md §6):
+    /// which Hlídač deployments this project shows, and how. Nil = never set,
+    /// so `applyMigrations()` seeds it once; [] = deliberately none.
+    var prod: [ProdPointer]?
+    var id: String {
+        key
+    }
+
+    struct Link: Codable, Identifiable {
+        var title: String
+        var url: String
+        var id: String {
+            url
+        }
+    }
+}
+
+/// Lenient on purpose: an AI or a hand edit that omits `links` (or any list)
+/// must never fail the whole settings file. Only `key` is load-bearing; a
+/// project without one is skipped by `LossyArray` and listed as an issue.
+/// In an extension so the memberwise init `defaultProjects` uses survives.
+extension ProjectSpec {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? key
+        repos = try c.decodeIfPresent([String].self, forKey: .repos) ?? []
+        sentryProjects = try c.decodeIfPresent([String].self, forKey: .sentryProjects) ?? []
+        services = try c.decodeIfPresent([String].self, forKey: .services) ?? []
+        let sink = decoder.userInfo[ConfigIssueSink.key] as? ConfigIssueSink
+        let skippedBefore = sink?.skipped.count ?? 0
+        links = try c.decodeIfPresent(LossyArray<Link>.self, forKey: .links)?.elements ?? []
+        prod = try c.decodeIfPresent(LossyArray<ProdPointer>.self, forKey: .prod)?.elements
+        // Nested skips belong to this project, so the restore can find them.
+        sink?.claim(from: skippedBefore, owner: key)
+    }
+}
+
+extension [ProjectSpec] {
+    /// Puts back, from the last good copy, every project, link and prod
+    /// pointer a lossy decode skipped — matched by key / url, so one bad
+    /// entry never removes what was working (brief AC13).
+    mutating func restoreSkipped(_ skipped: [SkippedEntry], from lastGood: [ProjectSpec]) {
+        restore(skipped, list: "projects", from: lastGood, id: \.key)
+        for index in indices {
+            let key = self[index].key
+            guard let previous = lastGood.first(where: { $0.key == key }) else { continue }
+            self[index].links.restore(skipped, list: "links", owner: key, from: previous.links, id: \.url)
+            guard let previousProd = previous.prod else { continue }
+            var prod = self[index].prod ?? []
+            prod.restore(skipped, list: "prod", owner: key, from: previousProd, id: \.key)
+            if prod != (self[index].prod ?? []) { self[index].prod = prod }
+        }
+    }
+}
+
+/// One deployment a project shows on the prod board — a pointer into
+/// Hlídač's digest plus presentation; the checks themselves live server-side
+/// (decision D14). Absent title/tier/order fall back to Hlídač's.
+struct ProdPointer: Codable, Equatable, Identifiable {
+    var key: String // "booking-sk" — Hlídač's deployment key
+    var title: String?
+    var tier: String? // critical | important | watch
+    var order: Int?
+    /// Where the deployment's release line is read (Shipping inside Prod,
+    /// copilot shell D9): GitHub environments, since Hlídač carries no
+    /// release data. Absent = the shipped sources for the key; [] = none.
+    var release: [ReleaseSource]?
+    var id: String {
+        key
+    }
+
+    /// The sources a pointer reads its release line from.
+    var releaseSources: [ReleaseSource] {
+        release ?? Self.shippedReleases[key] ?? []
+    }
+
+    /// The estate's deployments as GitHub records them (2026-10-11): ExampleApp
+    /// and vitrinka deploy `main` to `production`, Booking SK deploys
+    /// `canary` to `sk` from both of its app repos. eve has no GitHub
+    /// deployments; Booking CZ is not monitored.
+    static let shippedReleases: [String: [ReleaseSource]] = [
+        "exampleapp-prod": [ReleaseSource(repo: "example-org/ExampleApp", environment: "production")],
+        "vitrinka": [ReleaseSource(repo: "example-org/vitrinka", environment: "production")],
+        "booking-sk": [ReleaseSource(repo: "Booking/BookingBack", environment: "sk", branch: "canary"),
+                         ReleaseSource(repo: "Booking/Booking", environment: "sk", branch: "canary")],
+    ]
+}
+
+/// Where decode problems in settings.json are collected instead of failing
+/// the whole file: `LossyArray` appends one line per skipped entry.
+final class ConfigIssueSink {
+    var issues: [String] = []
+    /// What was skipped, with the identity the restore matches on.
+    var skipped: [SkippedEntry] = []
+
+    static let key = CodingUserInfoKey(rawValue: "pultik.configIssues")!
+
+    /// Marks every skip recorded since `start` as belonging to `owner`.
+    func claim(from start: Int, owner: String) {
+        for index in skipped.indices.dropFirst(start) where skipped[index].owner == nil {
+            skipped[index].owner = owner
+        }
+    }
+}
+
+/// An array that keeps every element it can decode and reports the rest to
+/// the decoder's `ConfigIssueSink` — one bad project never costs the others.
+struct LossyArray<Element: Decodable>: Decodable {
+    var elements: [Element]
+
+    private struct Skipped: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+
+    /// The bad entry's own name for itself — `key`, `ref`, `url` or `name` —
+    /// read leniently so a type error elsewhere in it does not hide it.
+    private struct Identity: Decodable {
+        let value: String?
+
+        private enum Keys: String, CodingKey { case key, ref, url, name }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            value = [Keys.key, .ref, .url, .name].lazy
+                .compactMap { (try? c.decodeIfPresent(String.self, forKey: $0)) ?? nil }.first
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        let path = ConfigIssueSink.path(decoder.codingPath)
+        let list = decoder.codingPath.last?.stringValue ?? ""
+        var kept: [Element] = []
+        while !container.isAtEnd {
+            let index = container.currentIndex
+            do {
+                kept.append(try container.decode(Element.self))
+            } catch {
+                // Read the bad element's identity, which also advances past
+                // it; anything not even an object is skipped blind. Without
+                // advancing, the loop never ends.
+                var identity: String?
+                if container.currentIndex == index {
+                    identity = (try? container.decode(Identity.self))?.value
+                    if container.currentIndex == index { _ = try? container.decode(Skipped.self) }
+                }
+                let sink = decoder.userInfo[ConfigIssueSink.key] as? ConfigIssueSink
+                sink?.skipped.append(SkippedEntry(list: list, owner: nil, index: index, identity: identity))
+                sink?.issues.append("\(path)[\(index)]: \(ConfigIssueSink.describe(error))")
+                NSLog("pultik: settings %@[%d] skipped — %@", path, index, ConfigIssueSink.describe(error))
+            }
+        }
+        elements = kept
+    }
+}
+
+extension ConfigIssueSink {
+    /// "projects[2].links" — array positions as subscripts, not "Index 2".
+    static func path(_ keys: [CodingKey]) -> String {
+        keys.reduce(into: "") { path, key in
+            if let index = key.intValue {
+                path += "[\(index)]"
+            } else {
+                path += path.isEmpty ? key.stringValue : ".\(key.stringValue)"
+            }
+        }
+    }
+
+    /// "missing title", "expected String at key" — short enough for one row.
+    static func describe(_ error: Error) -> String {
+        guard let decoding = error as? DecodingError else { return error.localizedDescription }
+        switch decoding {
+        case let .keyNotFound(key, _): return "missing \(key.stringValue)"
+        case let .typeMismatch(type, context):
+            return "expected \(type) at \(context.codingPath.last?.stringValue ?? "value")"
+        case let .valueNotFound(type, context):
+            return "null \(type) at \(context.codingPath.last?.stringValue ?? "value")"
+        case let .dataCorrupted(context): return context.debugDescription
+        @unknown default: return decoding.localizedDescription
+        }
+    }
+}
+
+// MARK: - Eve PR-subagent sessions
+
+struct EveSessionsResponse: Decodable {
+    let sessions: [EveSession]
+}
+
+struct EveSession: Codable, Identifiable {
+    let id: String
+    let status: String? // running | completed | failed | waiting
+    let updatedAt: Date?
+    let source: Source?
+    let prompt: String?
+
+    struct Source: Codable {
+        let repo: String?
+        let prNumber: Int?
+    }
+
+    var isRunning: Bool {
+        status == "running"
+    }
+
+    /// PR identity: source metadata when present, else parsed from the
+    /// subagent prompt ("Repo: example-org/ExampleApp\nNumber: 641").
+    var prKey: String? {
+        if let repo = source?.repo, let number = source?.prNumber {
+            return "\(repo)#\(number)".lowercased()
+        }
+        guard let prompt,
+              let repoRange = prompt.range(of: #"Repo: (\S+)"#, options: .regularExpression),
+              let numberRange = prompt.range(of: #"Number: (\d+)"#, options: .regularExpression)
+        else { return nil }
+        let repo = prompt[repoRange].dropFirst("Repo: ".count)
+        let number = prompt[numberRange].dropFirst("Number: ".count)
+        return "\(repo)#\(number)".lowercased()
+    }
+
+    var consoleUrl: String {
+        "https://app.assistant.example.invalid/sessions/\(id)"
+    }
+}
+
+// MARK: - Eve approvals (a workflow parked on the operator)
+
+/// `GET /eve/v1/sessions?view=approvals`: every session genuinely parked on
+/// an approval (`approvalKind == "approval"`, non-terminal — a subagent's
+/// park stays `running`) plus its whole ancestor chain, unpaginated, so the
+/// list is eve's own badge. Questions are not in it.
+struct EveApprovalsResponse: Decodable {
+    let sessions: [EveRecordedSession]
+}
+
+/// The fields of eve's `RecordedSession` the approvals list needs.
+struct EveRecordedSession: Decodable {
+    let id: String
+    let title: String
+    let status: String
+    let parentSessionId: String?
+    let approvalKind: String?
+    let waitingTool: String?
+    let workflowFlow: String?
+    let flow: String?
+    let updatedAt: Date
+    /// Parked before eve's process booted: it survived a restart, so it is
+    /// a dismiss-or-redrive candidate rather than a live prompt.
+    let stalled: Bool
+    let source: EveSession.Source?
+
+    var isParkedApproval: Bool {
+        status != "done" && status != "failed" && approvalKind == "approval"
+    }
+}
+
+/// One workflow waiting on the operator: its root (the answerable session,
+/// carrying the continuation) and the approvals parked under it, deepest
+/// first — the one eve's Approvals page answers.
+struct EveApproval: Codable, Equatable, Identifiable, Sendable {
+    struct Node: Codable, Equatable, Sendable {
+        let id: String
+        let title: String
+        let tool: String?
+        let updatedAt: Date
+        let stalled: Bool
+
+        /// Stalled (it survived an eve restart) and parked over a week: a
+        /// dismiss-or-redrive candidate that drifts, never a live ask on
+        /// you (the operator, 2026-10-11 — 77 parked 109 days read "78 waiting").
+        func drifts(now: Date) -> Bool {
+            stalled && now.timeIntervalSince(updatedAt) > EveApproval.driftAfter
+        }
+    }
+
+    static let driftAfter: TimeInterval = 7 * 86_400
+
+    let rootID: String
+    let title: String
+    let flow: String?
+    let repo: String?
+    let prNumber: Int?
+    /// Never empty; deepest first, then the most recently parked.
+    let parked: [Node]
+
+    var id: String { rootID }
+    var display: Node { parked[0] }
+
+    /// Every parked node drifts: the workflow no longer waits on you.
+    func drifts(now: Date) -> Bool { parked.allSatisfy { $0.drifts(now: now) } }
+
+    /// The Sessions module's object id, the one Now's need opens.
+    static func objectID(_ rootID: String) -> String { "approval:\(rootID)" }
+
+    /// eve's Approvals page for the node it answers.
+    var url: URL {
+        URL(string: "https://app.assistant.example.invalid/approvals/\(display.id)")!
+    }
+
+    /// Groups the view's rows by top-level root, walking `parentSessionId`
+    /// inside the returned subset (eve sends the full ancestor chain).
+    static func group(_ sessions: [EveRecordedSession]) -> [EveApproval] {
+        let byID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func lineage(_ session: EveRecordedSession) -> [EveRecordedSession] {
+            var chain = [session]
+            var seen: Set<String> = [session.id]
+            while let parent = chain.last?.parentSessionId.flatMap({ byID[$0] }), seen.insert(parent.id).inserted {
+                chain.append(parent)
+            }
+            return chain
+        }
+        var groups: [String: (root: EveRecordedSession, parked: [(node: EveRecordedSession, depth: Int)])] = [:]
+        for session in sessions where session.isParkedApproval {
+            let chain = lineage(session)
+            let root = chain.last ?? session
+            groups[root.id, default: (root, [])].parked.append((session, chain.count - 1))
+        }
+        return groups.values.map { group in
+            let parked = group.parked.sorted {
+                $0.depth != $1.depth ? $0.depth > $1.depth : $0.node.updatedAt > $1.node.updatedAt
+            }
+            return EveApproval(
+                rootID: group.root.id, title: group.root.title, flow: group.root.workflowFlow ?? group.root.flow,
+                repo: group.root.source?.repo, prNumber: group.root.source?.prNumber,
+                parked: parked.map { Node(id: $0.node.id, title: $0.node.title, tool: $0.node.waitingTool,
+                                          updatedAt: $0.node.updatedAt, stalled: $0.node.stalled) })
+        }
+        .sorted { $0.display.updatedAt < $1.display.updatedAt }
+    }
+}
+
+// MARK: - Eve alerts (notifications ledger)
+
+struct EveAlertsResponse: Decodable {
+    let notifications: [EveAlert]
+}
+
+/// One eve notification — what lands in the Telegram forum topics, mirrored
+/// into the Postgres ledger at the `sendFlowTelegram` chokepoint.
+struct EveAlert: Codable, Identifiable {
+    let id: Int
+    let ts: Date
+    let flow: String? // "monitor", "exampleapp_prod", …; null when the ledger row has none
+    let category: String // lane: "incidents", "priority", …
+    let severity: Severity? // null when the emitter doesn't know
+    let title: String
+    let body: String
+
+    enum Severity: String, Codable {
+        case critical, warning
+    }
+}
+
+// MARK: - Aggregated view models
+
+enum CheckState: Codable {
+    case running, success, failure, none
+}
+
+struct DeployInfo: Identifiable, Codable {
+    let deployment: Deployment
+    let state: String
+    let url: String?
+    var id: Int {
+        deployment.id
+    }
+
+    var isRunning: Bool {
+        ["pending", "queued", "in_progress"].contains(state)
+    }
+
+    var failed: Bool {
+        state == "failure" || state == "error"
+    }
+}
+
+enum ReviewState: Codable {
+    case approved, changesRequested, awaiting
+}
+
+struct PRInfo: Identifiable, Codable {
+    let pr: PullRequest
+    let state: CheckState
+    let review: ReviewState
+    var id: Int {
+        pr.id
+    }
+
+    var isDraft: Bool {
+        pr.draft ?? false
+    }
+
+    /// Attention-first ordering: needs-me < awaiting < ready < draft.
+    var attentionRank: Int {
+        if isDraft { return 3 }
+        if state == .failure || review == .changesRequested { return 0 }
+        if review == .awaiting || state == .running { return 1 }
+        return 2
+    }
+}
+
+struct RepoStatus: Identifiable, Codable {
+    let slug: String // "owner/name"
+    var runs: [WorkflowRun] = []
+    var deploys: [DeployInfo] = []
+    var prs: [PRInfo] = []
+    var error: String?
+    var id: String {
+        slug
+    }
+
+    var runningCount: Int {
+        runs.filter(\.isRunning).count
+            + deploys.filter(\.isRunning).count
+            + prs.filter { $0.state == .running }.count
+    }
+
+    var failedCount: Int {
+        runs.filter(\.failed).count
+            + deploys.filter(\.failed).count
+            + prs.filter { $0.state == .failure }.count
+    }
+}
+
+enum AggregateState: Equatable {
+    case allClear
+    case running(Int)
+    case failed(Int)
+}
+
+// MARK: - Devbox (ws-v2 workspaces on BuildServer)
+
+/// One checkout inside a slot. Branch state comes from `devbox status --json`;
+/// cadvisor has no idea what a git repo is.
+struct DevboxRepo: Identifiable, Codable {
+    let name: String
+    let branch: String
+    let dirty: Int
+    let ahead: Int
+    let behind: Int
+    var id: String {
+        name
+    }
+
+    var isClean: Bool {
+        dirty == 0 && ahead == 0 && behind == 0
+    }
+}
+
+/// One container of a slot's stack, from `devbox hub --json`'s docker
+/// ps + stats pass — the drill-down rows behind a slot's totals.
+struct DevboxContainerStat: Identifiable, Codable {
+    let name: String
+    /// docker's sum-of-cores number (100 = one core busy).
+    let cpuPercent: Double
+    let memBytes: Double
+    /// docker ps prose ("Up 3 hours (healthy)", "Exited (1) 2 hours ago").
+    let status: String
+    var id: String {
+        name
+    }
+
+    var isUp: Bool {
+        status.hasPrefix("Up")
+    }
+
+    /// "(healthy)" / "(unhealthy)" when the container declares a healthcheck.
+    var isUnhealthy: Bool {
+        status.contains("(unhealthy)")
+    }
+
+    var memoryLabel: String {
+        guard memBytes > 0 else { return "—" }
+        let gb = memBytes / 1_073_741_824
+        if gb >= 1 { return String(format: "%.1fG", gb) }
+        return String(format: "%.0fM", memBytes / 1_048_576)
+    }
+}
+
+/// One routed workspace surface (`portal.example-studio.ws.example.invalid`), from
+/// the vhosts deployed on the box. `up` is live — something listens on the
+/// upstream port. Resolvable everywhere, reachable only on the mesh.
+struct DevboxHost: Identifiable, Codable {
+    let workspace: String
+    let fqdn: String
+    let port: Int
+    let up: Bool
+    var id: String {
+        fqdn
+    }
+
+    /// "portal" from "portal.example-studio.ws.example.invalid" — the chip label.
+    var label: String {
+        String(fqdn.split(separator: ".").first ?? "app")
+    }
+
+    /// The open target — VALIDATED, same philosophy as `DevboxName`: the
+    /// fqdn arrives in a remote payload and ends up in NSWorkspace.open, so
+    /// it must be a plain hostname under the ws domain. The charset check
+    /// matters as much as the suffix: "evil.example/x.ws.example.invalid" passes
+    /// a suffix test but opens evil.example. Fails → nil, chip goes inert.
+    var url: URL? {
+        guard fqdn.hasSuffix(".ws.example.invalid"),
+              fqdn.count <= 253,
+              fqdn.range(of: "^[A-Za-z0-9][A-Za-z0-9.-]*$", options: .regularExpression) != nil
+        else { return nil }
+        return URL(string: "http://\(fqdn)")
+    }
+}
+
+/// One process exposed by a ws-v2 workspace. Its runtime state comes from the
+/// box, while port/FQDN/source are enriched by this Mac's `devbox ws ls`.
+struct DevboxWorkspaceApp: Identifiable, Codable {
+    let name: String
+    let port: Int?
+    let fqdn: String?
+    let syncPath: String?
+    /// systemd ActiveState (active/inactive/failed/…), nil when the unit is
+    /// not installed or the box returned an older payload.
+    let active: String?
+    /// Public-vhost liveness from hub's one `ss` pass. Hostless instance apps
+    /// deliberately have no equivalent probe; their unit state is the truth.
+    let hostUp: Bool?
+    /// The box's own answer for "where does this app listen" — the same
+    /// string `devbox url` prints. Empty for source-only apps. VALIDATED
+    /// before use: it arrives over the network and ends in NSWorkspace.open.
+    var remoteURL: String? = nil
+
+    var id: String {
+        name
+    }
+
+    var isActive: Bool {
+        active == "active"
+    }
+
+    var isFailed: Bool {
+        active == "failed"
+    }
+
+    /// Committed workspaces prefer their routed domain. Hostless instances
+    /// are reached directly over the mesh, by design. The box's `url` wins
+    /// when it validates; the port-derived address stays as the fallback for
+    /// an older payload, so the two can never disagree about the mesh IP.
+    var url: URL? {
+        if let remote = Self.meshURL(remoteURL) { return remote }
+        if let fqdn, !fqdn.isEmpty {
+            guard fqdn.hasSuffix(".ws.example.invalid"),
+                  fqdn.count <= 253,
+                  fqdn.range(of: "^[A-Za-z0-9][A-Za-z0-9.-]*$",
+                             options: .regularExpression) != nil
+            else { return nil }
+            return URL(string: "http://\(fqdn)")
+        }
+        guard let port, (1 ... 65535).contains(port) else { return nil }
+        return URL(string: "http://192.0.2.10:\(port)")
+    }
+
+    /// Accepts exactly `http://192.0.2.10:<port>` (optionally with a bare `/`)
+    /// and nothing else — no other host, no path, no query, no credentials.
+    /// `*.ws.example.invalid` names are never synthesized from this field; they
+    /// belong to committed workspaces and arrive as `fqdn`.
+    static func meshURL(_ raw: String?) -> URL? {
+        guard let raw, !raw.isEmpty, raw.count <= 64,
+              let parts = URLComponents(string: raw),
+              parts.scheme == "http",
+              parts.host == "192.0.2.10",
+              let port = parts.port, (1 ... 65535).contains(port),
+              parts.path.isEmpty || parts.path == "/",
+              parts.query == nil, parts.fragment == nil,
+              parts.user == nil, parts.password == nil
+        else { return nil }
+        return URL(string: "http://192.0.2.10:\(port)")
+    }
+}
+
+/// A distinct local checkout feeding a workspace. Multi-repo committed
+/// workspaces can carry several; per-branch recipe instances normally carry
+/// one worktree shared by all their app processes.
+struct DevboxWorkspaceSource: Identifiable, Codable {
+    let app: String
+    let path: String
+    var id: String {
+        path
+    }
+}
+
+/// The ws-v2 unit of work. This is deliberately assembled from several
+/// partial truths: `.ws-meta` (identity), systemd (runtime), local manifests
+/// (apps/ports/source), hub vhosts (public URLs), and exact compose projects
+/// (fleet metrics). No one source covers both committed and per-branch forms.
+struct DevboxWorkspace: Identifiable, Codable {
+    let name: String
+    let project: String?
+    let branch: String?
+    let portBase: Int?
+    var portCount: Int? = nil
+    let created: Date?
+    let apps: [DevboxWorkspaceApp]
+    let stats: [DevboxContainerStat]
+    let memoryBytes: Double
+    let cpuPercent: Double
+    let declaredSources: [DevboxWorkspaceSource]
+    /// `running` | `parked` from the overview (2026-09-02 parking contract).
+    /// A parked workspace keeps its identity and is one `devbox up`
+    /// from hot; it never counts in capacity.running.
+    var state: String = "running"
+    /// `devbox hold` — exempt from the park sweep until `unhold`.
+    var hold: Bool = false
+    var parkedAt: Date? = nil
+    /// The worktree on this Mac that `devbox up` syncs from. Only this path
+    /// can revive the workspace — `up` resolves its recipe from the cwd.
+    var macPath: String? = nil
+    /// Recipe `resources.memory` in GiB; nil when the recipe is silent.
+    var declaredGB: Int? = nil
+    /// Slice MemoryPeak (systemd ≥ 254), or the peak recorded at the last
+    /// park — the learned footprint admission uses when the recipe is silent.
+    var memPeakBytes: Double = 0
+    /// The box's `WS_MEM_ESTIMATE_DRIFT` verdict text, when declared and
+    /// measured disagree; nil otherwise.
+    var drift: String? = nil
+    /// The guest this row came from (spec 2026-09-25) — stamped by
+    /// `DevboxEstate`, since Pultík knows which endpoint it polled. Anything
+    /// that acts on the row over ssh uses this endpoint, never a default.
+    var box: DevboxEndpoint? = nil
+
+    /// A name is unique per box; during a `devbox move` both copies can be
+    /// listed, so the box keeps them apart.
+    var id: String {
+        box.map { "\($0.name)/\(name)" } ?? name
+    }
+
+    var isParked: Bool {
+        state == "parked"
+    }
+
+    /// The box says the target is up. Distinct from `isRunning`, which is
+    /// about units answering — a hot workspace whose units all died is still
+    /// a hot slot and must stay on the rail, just not green.
+    var isHot: Bool {
+        state == "running"
+    }
+
+    var unitApps: [DevboxWorkspaceApp] {
+        apps.filter { $0.active != nil }
+    }
+
+    var activeApps: Int {
+        unitApps.filter(\.isActive).count
+    }
+
+    var failedApps: Int {
+        unitApps.filter(\.isFailed).count
+    }
+
+    var isRunning: Bool {
+        activeApps > 0 || apps.contains { $0.hostUp == true } || stats.contains(where: \.isUp)
+    }
+
+    var memoryLabel: String {
+        Self.gigabytes(memoryBytes)
+    }
+
+    var memPeakLabel: String {
+        Self.gigabytes(memPeakBytes)
+    }
+
+    /// "2.7G · peak 5.5G" — live use next to the learned footprint. A parked
+    /// workspace has no live figure, only what it peaked at before parking.
+    var footprintLabel: String? {
+        guard memoryBytes > 0 || memPeakBytes > 0 else { return nil }
+        var parts = [String]()
+        if !isParked, memoryBytes > 0 { parts.append(memoryLabel) }
+        if memPeakBytes > 0 { parts.append("peak \(memPeakLabel)") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Tooltip for the footprint: the declaration (or its absence) and the
+    /// box's drift verdict verbatim — never re-derived here.
+    var footprintHelp: String {
+        var lines = [String]()
+        if let declaredGB {
+            lines.append("declared \(declaredGB)G (recipe resources.memory)")
+        } else {
+            lines.append("no declaration — admission uses the learned peak, else 3G")
+        }
+        if memPeakBytes > 0 { lines.append("peak \(memPeakLabel)") }
+        if let drift, !drift.isEmpty { lines.append(drift) }
+        return lines.joined(separator: "\n")
+    }
+
+    /// "parked · 3h" — how long the slot has been cold.
+    var parkedLabel: String {
+        guard let parkedAt else { return "parked" }
+        return "parked · \(Self.age(since: parkedAt))"
+    }
+
+    var cpuLabel: String {
+        guard !stats.isEmpty else { return "—" }
+        return "\(Int(cpuPercent.rounded()))%"
+    }
+
+    /// "24M" / "2.7G" / "12G" — a 24 MB idle slice must not print as 0.0G.
+    static func gigabytes(_ bytes: Double) -> String {
+        guard bytes > 0 else { return "—" }
+        let gb = bytes / 1_073_741_824
+        if gb < 1 { return String(format: "%.0fM", bytes / 1_048_576) }
+        return gb >= 10 ? String(format: "%.0fG", gb) : String(format: "%.1fG", gb)
+    }
+
+    /// Compact relative age: "40s", "12m", "3h", "2d".
+    static func age(since date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        switch seconds {
+        case ..<60: return "\(seconds)s"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86400)d"
+        }
+    }
+
+    var portWindowLabel: String? {
+        let width = portCount ?? 20 // Older guests allocated fixed 20-port windows.
+        guard let portBase, (1 ... 65535).contains(portBase),
+              width > 0, width <= 65536 - portBase else { return nil }
+        return width == 1 ? "\(portBase)" : "\(portBase)–\(portBase + width - 1)"
+    }
+
+    var sources: [DevboxWorkspaceSource] {
+        var seen = Set<String>()
+        var result = [DevboxWorkspaceSource]()
+        for source in declaredSources where !source.path.isEmpty && seen.insert(source.path).inserted {
+            result.append(source)
+        }
+        for app in apps {
+            guard let path = app.syncPath, !path.isEmpty, seen.insert(path).inserted else { continue }
+            result.append(DevboxWorkspaceSource(app: app.name, path: path))
+        }
+        return result
+    }
+}
+
+/// Optional nested fields preserve older overview documents whose identities
+/// block only carried used/capacity. Saved identities and live port leases are
+/// separate facts in the dynamic producer.
+struct DevboxOverviewIdentities: Codable {
+    let saved: Int?
+    let runtimeLeases: Int?
+    let portsUsed: Int?
+    let portCapacity: Int?
+}
+
+/// Pure decoding model shared by the SSH client and focused compatibility tests.
+struct DevboxOverviewCapacity: Codable {
+    let identitySlots: Int
+    let targetHot: Int
+    let hotCeiling: Int?
+    let claimed: Int
+    let running: Int
+    let identities: DevboxOverviewIdentities?
+    let parked: Int?
+    let floorGB: Int?
+    let pressureSome: Double?
+    let pressureFull: Double?
+}
+
+/// The overview's capacity + resources block. Modern guests admit by RAM;
+/// hotCeiling is retained for older payloads. floorGB is the protected
+/// MemAvailable line the park sweep defends.
+struct DevboxOverviewSummary: Codable {
+    let identitySlots: Int
+    let targetHot: Int
+    let hotCeiling: Int
+    let claimed: Int
+    let running: Int
+    let identities: DevboxOverviewIdentities?
+    let parked: Int
+    let floorGB: Int
+    /// Memory PSI avg10, the same readings the sweep and admission act on.
+    let pressureSome: Double
+    let pressureFull: Double
+    let cpus: Int
+    let load1: Double
+    var cpuUsagePercent: Double? = nil
+    var diskTotalBytes: Double? = nil
+    var diskUsedBytes: Double? = nil
+    let memoryTotalBytes: Double
+    let memoryAvailableBytes: Double
+    let swapTotalBytes: Double
+    let swapFreeBytes: Double
+    /// The box these figures are when there is more than one; nil for a
+    /// single box. Never a sum of several (`DevboxEstate`).
+    var box: String? = nil
+    /// Every discovered box when there is more than one (silent ones
+    /// included, `box` among them); empty for a single box.
+    var boxes: [DevboxBoxShare] = []
+
+    /// Mirrors the sweep's own thresholds so the rail turns colour when the
+    /// box would start parking, not at a HUD-invented number: elevated at
+    /// PSI some ≥ 5 (the sweep's hysteresis floor) or under 8G above the
+    /// floor (its recovery target); critical at PSI some ≥ 10 or below the
+    /// floor (when it parks).
+    enum Pressure: Comparable, Codable {
+        case normal, elevated, critical
+    }
+
+    var availableGB: Double {
+        memoryAvailableBytes / 1_073_741_824
+    }
+
+    /// This box's own tier; another box's strain is its own line's.
+    var pressure: Pressure {
+        if pressureSome >= 10 || availableGB < Double(floorGB) { return .critical }
+        if pressureSome >= 5 || availableGB - Double(floorGB) < 8 { return .elevated }
+        return .normal
+    }
+
+    private var usesMemoryAdmission: Bool {
+        identitySlots == 0 || identities?.saved != nil
+    }
+
+    /// Modern saved identities do not form a denominator for running work.
+    var shortLabel: String {
+        let available = String(format: "%.0fG", availableGB)
+        let activity = usesMemoryAdmission || hotCeiling <= 0
+            ? "\(running) running" : "\(running) hot of \(hotCeiling)"
+        return "\(activity) · \(parked) parked · \(available) free / \(floorGB)G floor"
+    }
+
+    var helpLabel: String {
+        let load = String(format: "%.1f", load1)
+        let psi = String(format: "%.1f/%.1f", pressureSome, pressureFull)
+        var capacity = [String]()
+        if usesMemoryAdmission {
+            if let saved = identities?.saved { capacity.append("\(saved) saved workspaces") }
+            if let leases = identities?.runtimeLeases { capacity.append("\(leases) workspaces with ports") }
+            if let used = identities?.portsUsed, let total = identities?.portCapacity, total > 0 {
+                capacity.append("\(used) of \(total) ports allocated")
+            }
+            capacity.append("admission by RAM")
+        } else {
+            capacity.append("\(claimed) of \(identitySlots) identities claimed")
+            if hotCeiling > 0 { capacity.append("ceiling \(hotCeiling) hot (RAM-derived)") }
+        }
+        return capacity.joined(separator: " · ")
+            + " · \(cpus) vCPU · load \(load) · memory PSI some/full \(psi)"
+    }
+}
+
+/// One devbox slot. Slot 0 is the shared stack; 1..N are claimed per worktree.
+///
+/// Everything comes from `devbox hub --json` over ssh in one round-trip:
+/// `containers`/`repos` from its embedded status doc, `memoryBytes`/
+/// `cpuPercent`/`stats` from its docker-stats pass, joined by
+/// `composeProject` (the label devbox stamps on every stack).
+struct DevboxSlot: Identifiable, Codable {
+    let n: Int
+    let slug: String
+    let composeProject: String
+    let containerPrefix: String
+    let running: Bool
+    let containers: Int
+    let containersTotal: Int
+    let lastUsed: Int
+    /// Someone ran `acquire` (slot 0 is always claimed).
+    let claimed: Bool
+    let entrypointPort: Int
+    let repos: [DevboxRepo]
+
+    var memoryBytes: Double?
+    var cpuPercent: Double?
+    /// Per-container rows for the drill-down; nil until the hub merge.
+    var stats: [DevboxContainerStat]?
+
+    var id: String {
+        composeProject
+    }
+
+    var isShared: Bool {
+        n == 0
+    }
+
+    var memoryLabel: String {
+        guard let memoryBytes, memoryBytes > 0 else { return "—" }
+        let gb = memoryBytes / 1_073_741_824
+        return gb >= 10 ? String(format: "%.0fG", gb) : String(format: "%.1fG", gb)
+    }
+
+    var cpuLabel: String {
+        guard let cpuPercent else { return "—" }
+        return "\(Int(cpuPercent.rounded()))%"
+    }
+
+    /// Repos with anything uncommitted or unpushed — what you actually want to
+    /// see at a glance when several slots exist.
+    var dirtyRepos: [DevboxRepo] {
+        repos.filter { !$0.isClean }
+    }
+}
+
+struct DevboxProject: Identifiable, Codable {
+    /// Internal tenant key ("booking-be").
+    let name: String
+    /// GitHub owner/repo of the primary checkout, e.g. Booking/BookingBack.
+    let repoOwner: String
+    let repoName: String
+    /// What to print. Derived from the repo name, overridable per tenant —
+    /// sample-stack's primary repo is "sample-compose", which nobody calls
+    /// the project.
+    let displayName: String
+    var slots: [DevboxSlot]
+    var id: String {
+        name
+    }
+
+    /// Owner/repo for the tooltip, so the label stays short but the exact
+    /// repo is one hover away.
+    var repoSlug: String {
+        repoOwner.isEmpty ? repoName : "\(repoOwner)/\(repoName)"
+    }
+
+    var runningSlots: [DevboxSlot] {
+        slots.filter(\.running)
+    }
+
+    /// Slots worth a card: the shared stack, anything claimed, anything
+    /// running. Three tenants × three slots is nine cards, most of them idle
+    /// and unclaimed — enough to push the interesting ones off screen.
+    var visibleSlots: [DevboxSlot] {
+        slots.filter { $0.claimed || $0.running }
+    }
+
+    var freeSlotCount: Int {
+        slots.count - visibleSlots.count
+    }
+}

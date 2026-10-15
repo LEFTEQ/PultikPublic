@@ -2,6 +2,7 @@
 # The same Foundation contract selection locally and in CI; no native app host.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+app="$repo/Apps/Pultik"
 # Stay in Pultík AC 14: only the adapters name GitHub.
 bash "$repo/tools/host-neutral-check.sh"
 harness=$(mktemp -d "${TMPDIR:-/tmp}/pultik-foundation.XXXXXX")
@@ -19,9 +20,10 @@ sources=(Sources/Models/Models.swift Sources/Models/OverviewGlance.swift
   Sources/Views/Shell/KeyboardCoordinator.swift Sources/Models/FleetContract.swift
   Sources/Data/GitMirror.swift Sources/Data/WarmSet.swift Sources/Models/RunBadge.swift
   Sources/API/CIStatus/CIStatusSource.swift Sources/Views/Shell/PanelPlace.swift Sources/Views/Shell/ModuleWarmth.swift
-  Sources/API/WorkflowGraph.swift Sources/Views/Markdown/Autolink.swift
-  "$repo"/Sources/Domain/*.swift "$repo"/Sources/API/Hosts/*.swift
-  "$repo"/Sources/Models/Now/*.swift "$repo"/Sources/Models/Now/Adapters/*.swift)
+  Sources/API/WorkflowGraph.swift Sources/Views/Markdown/Autolink.swift Sources/Views/Modules/PRs/PRVerbCatalogue.swift
+  Sources/Code/CodeSearch.swift
+  "$app"/Sources/Domain/*.swift "$app"/Sources/API/Hosts/*.swift
+  "$app"/Sources/Models/Now/*.swift "$app"/Sources/Models/Now/Adapters/*.swift)
 tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/DevboxBoxesTests.swift
   Tests/FiringWatchTests.swift Tests/DevboxClearTests.swift Tests/DevboxClearWorktreeTests.swift
   Tests/PanelTestDisplayTests.swift Tests/PultikLinkTests.swift
@@ -31,15 +33,15 @@ tests=(Tests/DevboxCapacityTests.swift Tests/OverviewGlanceTests.swift Tests/Dev
   Tests/FleetContractTests.swift Tests/BackendScheduleTests.swift
   Tests/HostAdapterTests.swift Tests/GitMirrorTests.swift Tests/WarmSetTests.swift
   Tests/RunBadgeTests.swift Tests/CIWatchTests.swift Tests/WorkflowGraphTests.swift Tests/RunCardTests.swift
-  Tests/AutolinkTests.swift)
+  Tests/AutolinkTests.swift Tests/FileTreeTests.swift Tests/CodeSearchTests.swift)
 # Golden payloads the contract tests read beside themselves (#filePath).
-cp -R "$repo/Tests/Fixtures" "$harness/Tests/PultikTests/Fixtures"
-for file in "${sources[@]}" "$repo"/Sources/API/GitHub*.swift; do
-  [[ "$file" = /* ]] || file="$repo/$file"
+cp -R "$app/Tests/Fixtures" "$harness/Tests/PultikTests/Fixtures"
+for file in "${sources[@]}" "$app"/Sources/API/GitHub*.swift; do
+  [[ "$file" = /* ]] || file="$app/$file"
   cp "$file" "$harness/Sources/Pultik/"
 done
-for file in "${tests[@]}" "$repo"/Tests/GitHub*Tests.swift; do
-  [[ "$file" = /* ]] || file="$repo/$file"
+for file in "${tests[@]}" "$app"/Tests/GitHub*Tests.swift; do
+  [[ "$file" = /* ]] || file="$app/$file"
   cp "$file" "$harness/Tests/PultikTests/"
 done
 cat > "$harness/Package.swift" <<'SWIFT'

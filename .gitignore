@@ -9,3 +9,7 @@ Tuist/.build/
 .vitrinka/
 dist/
 tools/pultik/pultik
+toolkit.config.local.json
+# The root cargo workspace's build output, and the apps' own build directories.
+/target/
+/Apps/*/Build/
