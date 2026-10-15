@@ -10,6 +10,9 @@ struct CIPage: View {
     let store: StatusStore
     let filter: String
     var selectedID: String?
+    /// CI's Live view (vt-7727 D1) until the timeline lands as its first.
+    var view: ModuleView? = .live
+    var onView: (ModuleView) -> Void = { _ in }
     @Environment(\.openRow) private var openRow
 
     private enum Slice: String {
@@ -36,11 +39,22 @@ struct CIPage: View {
         text.isEmpty || fields.contains { $0.localizedCaseInsensitiveContains(text) }
     }
 
-    /// Every host with lanes, in Settings order — one section each, never a
-    /// merged fleet (2026-10-14).
+    /// The host chip's host — one at a time, never a merged fleet (vt-7727
+    /// D6, 2026-10-14) — and lanes no host claims.
     private var hosts: [String] {
-        store.laneBoard.hosts(in: store.servers.map(\.ref))
+        let all = store.laneBoard.hosts(in: store.servers.map(\.ref))
+        guard let chip = store.ciSemaforHost else { return all }
+        return [chip] + all.filter(\.isEmpty)
     }
+
+    /// GitHub-hosted jobs running or waiting, once whatever host is picked
+    /// (D14): from the Semafor that lists more hosted lanes.
+    private var hostedLive: [SemaforJob] {
+        SemaforCI.hostedJobs(store.semaforStates)
+            .filter { $0.isLive && matches($0.repo, $0.workflow ?? "", $0.name, $0.lane) }
+    }
+
+    static func hostedID(_ job: SemaforJob) -> String { "hosted:\(job.id)" }
 
     private func hostName(_ host: String) -> String {
         store.servers.first { $0.ref == host }?.name ?? (host.isEmpty ? "Unplaced lanes" : host)
@@ -100,6 +114,7 @@ struct CIPage: View {
                         hostSection(host)
                     }
                     elsewhereSection
+                    hostedSection
                 }
                 if shows(.failed) {
                     Kicker(text: "Failed runs", count: failures.count, tone: failures.isEmpty ? .secondary : .red)
@@ -183,6 +198,29 @@ struct CIPage: View {
         }
     }
 
+    /// GitHub-hosted jobs live now, drawn once (D14), with the hour's count.
+    @ViewBuilder
+    private var hostedSection: some View {
+        let jobs = shows(.running) ? hostedLive : []
+        let hour = SemaforCI.hostedJobs(store.semaforStates).count
+        if !jobs.isEmpty || hour > 0 {
+            HStack(alignment: .firstTextBaseline) {
+                Kicker(text: "GitHub-hosted", count: jobs.count)
+                Text("\(hour) in the last hour").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 10)
+            ForEach(jobs) { job in
+                let id = Self.hostedID(job)
+                RailRow(dot: .filled(SemaforResult.tone(job.result)),
+                        title: "\(job.repo.split(separator: "/").last.map(String.init) ?? job.repo) · \(job.workflow ?? job.name)",
+                        meta: [job.name, job.result].joined(separator: " · "),
+                        help: job.lane, selected: selectedID == id, action: { openRow?(id) })
+                    .id(id)
+            }
+        }
+    }
+
     /// One tick for every row's elapsed clock.
     private func jobRows(_ jobs: [CIJob]) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -196,30 +234,8 @@ struct CIPage: View {
     }
 
     private func header(_ glance: CIGlance) -> some View {
-        HStack(spacing: 8) {
-            Text("CI")
-                .font(.system(size: 14, weight: .semibold))
-            Text("\(glance.running) running · \(glance.queued) queued · \(glance.failedRuns) failed")
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Spacer()
-            // The Grafana escape hatch the old CI · lanes rail carried as its
-            // accessory; the rail's CI section now opens this page instead.
-            Button {
-                if let url = URL(string: "https://runners.ops.example.invalid") {
-                    NSWorkspace.shared.open(url)
-                }
-            } label: {
-                Image(systemName: "chart.xyaxis.line")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            .help("BuildServer JIT lane fleet — Grafana runners dashboard")
-        }
-        .padding(.horizontal, 8)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
+        CIViewHeader(store: store, view: view, onView: onView,
+                     summary: "\(glance.running) running · \(glance.queued) queued · \(glance.failedRuns) failed")
     }
 }
 
@@ -246,6 +262,14 @@ extension CIPage: ModulePage {
             objects.append(ModuleObject(id: Self.elsewhereID, title: "elsewhere",
                                         status: Chip("\(store.laneBoard.elsewhereQueued) queued", .warn),
                                         meta: "GitHub-hosted or unmapped lanes", symbol: "rectangle.stack"))
+        }
+        if shows(.running) {
+            objects += hostedLive.map { job in
+                ModuleObject(id: Self.hostedID(job), title: job.workflow ?? job.name, label: job.repo,
+                             status: Chip(job.result, job.result == "running" ? .ok : .warn), meta: job.name,
+                             symbol: "cloud", project: job.repo,
+                             facts: [.init(label: "lane", value: job.lane), .init(label: "job", value: job.name)])
+            }
         }
         if shows(.failed) {
             objects += failures.map { run in
@@ -347,6 +371,11 @@ extension CIPage: ModulePage {
     func detailContent(for object: ModuleObject) -> some View {
         if let ref = runRef(for: object.id) ?? Self.runRef(url: object.url) {
             CIRunDetailContent(store: store, ref: ref).id(ref)
+            // Semafor keys a run by GitHub's run id: its needs graph and
+            // critical path from the chip host's Semafor (vt-7727 S10).
+            if let host = store.ciSemaforHost, object.id.hasPrefix("run:"), let runID = Int64(object.id.dropFirst(4)) {
+                RunGraphView(store: store, host: host, runID: runID)
+            }
         }
     }
 }

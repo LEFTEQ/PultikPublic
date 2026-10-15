@@ -67,7 +67,9 @@ final class ModuleRouter {
             text = value
             pendingToken = ""
         case let .enter(target, filter, rest, opens):
-            enter(target, filter: filter, select: opens, openDetail: opens != nil)
+            // An alias's object lives on the module's first view (`.m`, `.f`: Machines).
+            enter(target, filter: filter, select: opens, openDetail: opens != nil,
+                  view: opens == nil ? nil : target.views.first)
             pendingToken = rest
         case let .global(value):
             leave(keeping: value)
@@ -89,12 +91,21 @@ final class ModuleRouter {
 
     /// Enters `target` (⌘1–9, a strip click, a `.x` alias, a page link).
     /// Home is the global search at rest, so entering it leaves instead.
-    func enter(_ target: PanelModule, filter: String = "", select id: String? = nil, openDetail: Bool = false) {
+    /// `view` shows that body first: the one that lists `id`.
+    func enter(_ target: PanelModule, filter: String = "", select id: String? = nil, openDetail: Bool = false,
+               view: ModuleView? = nil)
+    {
         guard target != .home else {
             leave()
             return
         }
         remember()
+        if let view, target.views.contains(view), view != self.view(of: target) {
+            // The view being left keeps its cursor for ⇥ back.
+            viewSelections[Self.viewKey(target, self.view(of: target))] = remembered[target]
+            remembered[target] = viewSelections[Self.viewKey(target, view)]
+            views[target] = view
+        }
         module = target
         text = filter
         pendingToken = ""
@@ -104,6 +115,13 @@ final class ModuleRouter {
         tab = nil
         dropStack()
         clearMarks()
+    }
+
+    /// A `pultik://pr/…` link (another app, a notification, a reference in a
+    /// description): the PR's detail in PRs, an inbox row by its own id
+    /// (`inboxID`), any other by `archive:` (stay in Pultík: never the browser).
+    func openPR(repo: String, number: Int, inboxID: String?) {
+        enter(.prs, filter: "", select: inboxID.map { "pr:\($0)" } ?? "archive:\(repo)#\(number)", openDetail: true)
     }
 
     /// Back to the global search — Home once nothing is typed.
@@ -158,6 +176,46 @@ final class ModuleRouter {
     /// The selection `module` had when it was left — a warm body's frozen one.
     func rememberedSelection(_ module: PanelModule) -> String? {
         remembered[module]
+    }
+
+    // MARK: - Views (vt-7727 D1, D5)
+
+    /// The body each module shows: ⇥/⇧⇥ cycle it, and it outlives leaving
+    /// the module and a summon (`Place.view`). Absent = the module's first.
+    private(set) var views: [PanelModule: ModuleView] = [:]
+    /// Each view's cursor while another view shows, by `viewKey`.
+    private var viewSelections: [String: String] = [:]
+
+    func view(of module: PanelModule) -> ModuleView? {
+        views[module] ?? module.views.first
+    }
+
+    /// The entered module's view; nil on Home or a module with one body.
+    var view: ModuleView? { module.flatMap(view(of:)) }
+
+    private static func viewKey(_ module: PanelModule, _ view: ModuleView?) -> String {
+        "\(module.rawValue).\(view?.rawValue ?? "")"
+    }
+
+    /// ⇥ (+1) / ⇧⇥ (−1): the entered module's next view, wrapping.
+    func cycleView(_ step: Int) {
+        guard let module, let current = view, let index = module.views.firstIndex(of: current) else { return }
+        let count = module.views.count
+        showView(module.views[((index + step) % count + count) % count])
+    }
+
+    /// A view's own list: the filter stays, the cursor is the one that view
+    /// last had, and the detail, cards and marks of the other view close.
+    func showView(_ next: ModuleView) {
+        guard let module, module.views.contains(next), next != view else { return }
+        viewSelections[Self.viewKey(module, view)] = selection
+        views[module] = next
+        selection = viewSelections[Self.viewKey(module, next)]
+        detailOpen = false
+        entered = false
+        tab = nil
+        dropStack()
+        clearMarks()
     }
 
     // MARK: - Marks (bulk actions D1)
@@ -484,6 +542,8 @@ final class ModuleRouter {
         /// Inside a workbench, and on which tab (PR workbench D5).
         var entered = false
         var tab: String?
+        /// The module's view (vt-7727 D5).
+        var view: ModuleView?
 
         static let home = Place()
     }
@@ -493,12 +553,15 @@ final class ModuleRouter {
         Place(module: module, filter: module == nil ? "" : text, selection: module == nil ? nil : selection,
               detailOpen: module == nil ? false : detailOpen, inspectorOpen: inspectorOpen,
               stack: module == nil ? [] : stack, entered: module == nil ? false : entered,
-              tab: module == nil ? nil : tab)
+              tab: module == nil ? nil : tab, view: view)
     }
 
     func restore(_ place: Place) {
         if place.module == nil { leave() } else {
             remember()
+            if let module = place.module, let view = place.view, module.views.contains(view) {
+                views[module] = view
+            }
             module = place.module
             text = place.filter
             pendingToken = ""

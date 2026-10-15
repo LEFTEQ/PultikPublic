@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// What the HUD shows: Home's style, section visibility, firing-alert
-/// notifications and the eve alert lanes.
+/// What the HUD shows: when a summon returns Home, section visibility,
+/// firing-alert notifications and the eve alert lanes.
 struct PanelPane: View {
     let store: StatusStore
 
@@ -14,23 +14,6 @@ struct PanelPane: View {
 
     var body: some View {
         Form {
-            Section {
-                Picker("Home style", selection: Binding(
-                    get: { store.homeStyle },
-                    set: { store.setHomeStyle($0) }
-                )) {
-                    Text("The Now Line").tag(HomeStyle.nowLine)
-                    Text("Now first, tiles below").tag(HomeStyle.nowFirst)
-                }
-                .pickerStyle(.radioGroup)
-            } header: {
-                Text("Home")
-            } footer: {
-                Text("What ⌥Space opens on while nothing is typed. Both draw the same Now queue: the Now Line runs every need as a bar into now, in four lanes, beside the ranked list; Now first leads with the ranked table and keeps the module tiles below it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Section {
                 Picker("Return to the last place for", selection: Binding(
                     get: { Int(store.homeAfter / 60) },

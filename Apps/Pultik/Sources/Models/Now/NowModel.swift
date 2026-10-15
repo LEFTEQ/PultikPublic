@@ -282,7 +282,7 @@ enum NowFeed: String, Codable, Sendable {
     /// so it leaves the screen — on a read, a summon or a relaunch —
     /// unhandled. Nil = no horizon.
     var horizon: TimeInterval? {
-        self == .eveNotifications ? NowAxis.window : nil
+        self == .eveNotifications ? NowWindow.span : nil
     }
 }
 

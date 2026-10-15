@@ -93,6 +93,17 @@ final class StatusStore {
     var ciThroughputs: [String: CIThroughput] = [:]
     var throughputFetchedAt: [String: Date] = [:]
     static let throughputInterval: TimeInterval = 60
+    /// Each host Semafor's v1 views by the host's `ref` (vt-7727 WP3), read
+    /// only while a view draws them and restored from their snapshot.
+    var semaforHosts: [String: SemaforHostState] = [:]
+    /// CI's host chip (D6): the host whose Semafor CI shows; nil = the busiest.
+    var ciHostChoice: String?
+    /// A run's needs graph and critical path, read on selection, by
+    /// `"<host>/<run id>"`.
+    var semaforRunDetails: [String: SemaforRunDetail] = [:]
+    /// A machine's per-core load and 24 h CPU, read when its detail opens
+    /// (vt-7727 D9), by `ServerMetrics.id`.
+    var machineHistory: [String: MachineHistory] = [:]
     var vitrinkaListening: [VitrinkaListening] { selectedVitrinkaWorkspace?.tray.listeners ?? [] }
     var vitrinkaBoards: [VitrinkaBoard] { selectedVitrinkaWorkspace?.tray.boards ?? [] }
     var vitrinkaWorkspaces: [VitrinkaWorkspaceSnapshot] = []
@@ -126,6 +137,8 @@ final class StatusStore {
     var pollingStarted = false
     /// The module on screen; see `setVisibleModule`.
     @ObservationIgnored var visibleModule: PanelModule?
+    /// Its view (vt-7727 D5): which Semafor reads the lane makes.
+    @ObservationIgnored var visibleView: ModuleView?
     var globalError: String?
 
     let client = GitHubClient()
@@ -340,6 +353,10 @@ final class StatusStore {
         schedule.add("infra", every: lane("infra")) { [weak self] in await self?.refreshInfraMetrics() }
         schedule.add("vitrinka", every: lane("vitrinka")) { [weak self] in await self?.refreshVitrinka() }
         schedule.add("devbox", every: lane("devbox")) { [weak self] in await self?.refreshDevbox() }
+        // Only while a view draws it: nothing reads Semafor while hidden (D10).
+        schedule.add("semafor", every: { [weak self] in self?.semaforInterval(cadence: cadence()) ?? 3600 }) { [weak self] in
+            await self?.refreshSemafor()
+        }
         // Both keep their own five-minute floors inside.
         schedule.add("sentry", every: cadence) { [weak self] in await self?.refreshSentryIfStale() }
         schedule.add("issues", every: cadence) { [weak self] in await self?.refreshIssuesIfStale() }
@@ -351,19 +368,23 @@ final class StatusStore {
 
     /// The module on screen (nil while the panel is hidden): its backends
     /// refresh at its Settings ▸ Modules speed (stay in Pultík N1).
-    func setVisibleModule(_ module: PanelModule?) {
-        guard module != visibleModule else { return }
+    /// A view of its own (vt-7727 D5) decides which Semafor reads the lane
+    /// makes; a change to what is on screen reads what it needs now.
+    func setVisibleModule(_ module: PanelModule?, view: ModuleView? = nil) {
+        guard module != visibleModule || view != visibleView else { return }
         let before = Self.lanes.map(visibleCadence)
         visibleModule = module
+        visibleView = view
         if Self.lanes.map(visibleCadence) != before { schedule.nudge() }
+        if module != nil { kickSemafor() }
     }
 
     static let lanes = ["prod", "github", "eve", "infra", "vitrinka", "devbox"]
     /// The lanes a module draws from.
     static let moduleLanes: [PanelModule: Set<String>] = [
-        .home: ["prod", "github", "eve", "infra", "vitrinka", "devbox"],
-        .prs: ["github"], .ci: ["github", "infra"], .prod: ["prod"], .devbox: ["devbox"],
-        .work: ["vitrinka"], .sessions: ["eve", "vitrinka"], .estate: ["infra"], .mac: [],
+        .home: ["prod", "github", "eve", "infra", "vitrinka", "devbox", "semafor"],
+        .prs: ["github"], .ci: ["github", "infra", "semafor"], .prod: ["prod"], .devbox: ["devbox"],
+        .work: ["vitrinka"], .sessions: ["eve", "vitrinka"], .estate: ["infra", "semafor"],
     ]
     /// GitHub-backed modules never poll it faster than this: the hourly
     /// request budget is shared with every other GitHub read.

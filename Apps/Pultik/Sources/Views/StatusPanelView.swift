@@ -1,3 +1,4 @@
+import Links
 import SwiftUI
 
 enum OverviewURL {
@@ -266,12 +267,16 @@ struct StatusPanelView: View {
         // D4: the strip's lift follows the router at once; the body follows
         // once the keys settle (a warm body at once).
         .onChange(of: router.place) { old, new in
-            guard old.module != new.module else { return }
+            guard old.module != new.module else {
+                if old.view != new.view { store.setVisibleModule(new.module ?? .home, view: new.view) }
+                return
+            }
             departing = old.module.map { ($0, ModuleInputs(filter: old.filter, selection: old.selection,
                                                            detailOpen: old.detailOpen,
-                                                           inspectorOpen: old.inspectorOpen, stack: old.stack)) }
+                                                           inspectorOpen: old.inspectorOpen, stack: old.stack,
+                                                           view: old.view)) }
             warmth.request(new.module ?? .home)
-            store.setVisibleModule(new.module ?? .home)
+            store.setVisibleModule(new.module ?? .home, view: new.view)
         }
         // D1: a place rested on for 1.5 s while up is where a summon returns.
         .task(id: router.place) {
@@ -298,7 +303,7 @@ struct StatusPanelView: View {
         warmth.keepHot = store.keepHotModules
         warmth.request(router.module ?? .home, immediate: true)
         warmth.presented()
-        store.setVisibleModule(router.module ?? .home)
+        store.setVisibleModule(router.module ?? .home, view: router.view)
         // The open this call belongs to. Anything asynchronous started here
         // must check it before writing state back: the view is permanently
         // mounted, so a late completion would otherwise land in a hidden
@@ -469,15 +474,17 @@ struct StatusPanelView: View {
         var detailOpen = false
         var inspectorOpen = false
         var stack: [DetailRef] = []
+        /// The module's view (vt-7727 D5); nil for a module with one body.
+        var view: ModuleView?
     }
 
     func inputs(for module: PanelModule) -> ModuleInputs {
         guard router.module == module else {
             if let departing, departing.module == module, warmth.displayed == module { return departing.inputs }
-            return ModuleInputs(selection: router.rememberedSelection(module))
+            return ModuleInputs(selection: router.rememberedSelection(module), view: router.view(of: module))
         }
         return ModuleInputs(filter: router.text, selection: router.selection, detailOpen: router.detailOpen,
-                            inspectorOpen: router.inspectorOpen, stack: router.stack)
+                            inspectorOpen: router.inspectorOpen, stack: router.stack, view: router.view)
     }
 
     /// Each module's list — the one place a module plugs into the shell.
@@ -497,7 +504,22 @@ struct StatusPanelView: View {
         case .prs:
             return PRListPage(store: store, filter: filter, hidden: hiddenResolved, selectedID: selected)
         case .ci:
-            return CIPage(store: store, filter: filter, selectedID: selected)
+            let view = inputs.view
+            let onView: (ModuleView) -> Void = { router.showView($0) }
+            switch view {
+            case .runs:
+                return CIRunsPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView, onOpen: open)
+            case .workflows:
+                return CIWorkflowsPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView,
+                                       onOpen: open)
+            case .failures:
+                return CIFailuresPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView,
+                                      onOpen: open)
+            case .fleet:
+                return CIFleetPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView, onOpen: open)
+            default:
+                return CIPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView)
+            }
         case .prod:
             return ProdMatrixPage(store: store, filter: filter, selectedID: selected, onOpen: open)
         case .devbox:
@@ -508,12 +530,15 @@ struct StatusPanelView: View {
             return SessionsPage(fleet: FleetStore.shared, store: store, listeners: modeVit(filter), filter: filter,
                                 selectedID: selected, onOpen: open)
         case .estate:
-            return EstatePage(store: store, filter: filter, selectedID: selected,
-                              firing: estateFiring,
-                              renewals: ExpiryRadarStore.shared.watched, onOpen: open)
-        case .mac:
-            return MacHealthPage(health: MacHealthStore.shared, fansShown: store.isSectionVisible("fans"),
-                                 filter: filter, selectedID: selected, onOpen: open)
+            if inputs.view == .backups {
+                return BackupsPage(store: store, filter: filter, selectedID: selected, view: inputs.view,
+                                   onView: { router.showView($0) }, onOpen: open)
+            }
+            let mac = MacHealthPage(health: MacHealthStore.shared, fansShown: store.isSectionVisible("fans"),
+                                    filter: filter, selectedID: selected, onOpen: open)
+            return MachinesPage(store: store, filter: filter, selectedID: selected,
+                                firing: estateFiring, renewals: ExpiryRadarStore.shared.watched, mac: mac,
+                                view: inputs.view, onView: { router.showView($0) }, onOpen: open)
         }
     }
 
@@ -521,7 +546,8 @@ struct StatusPanelView: View {
     /// and the host read the same list without recomputing it.
     func pageObjects(_ module: PanelModule, _ inputs: ModuleInputs) -> [ModuleObject] {
         // PRs draws an object for a PR opened from a link (its selection).
-        let key = "\(inputs.filter)|\(module == .prs ? "\(hiddenResolved.count)|\(inputs.selection ?? "")" : "")"
+        let key = "\(inputs.view?.rawValue ?? "")|\(inputs.filter)|"
+            + (module == .prs ? "\(hiddenResolved.count)|\(inputs.selection ?? "")" : "")
         return pageMemo.objects(module, inputs: key) { modulePage(module, inputs: inputs)?.objects ?? [] }
     }
 
@@ -622,16 +648,19 @@ struct StatusPanelView: View {
     }
 
     /// A `pultik://` link — a notification, another app, a reference in a
-    /// description: the PR opens its detail in PRs, an inbox row by its own
-    /// id, any other by `archive:` (stay in Pultík: never the browser).
+    /// description: a PR opens its detail in PRs (`ModuleRouter.openPR`),
+    /// a deployment Prod, a rail unfolds.
     func openLink(_ link: PultikLink) {
         switch link {
         case let .pr(repo, number):
             let entry = store.inbox.first {
                 $0.repoSlug.caseInsensitiveCompare(repo) == .orderedSame && $0.info.pr.number == number
             }
-            router.enter(.prs, filter: "", select: entry.map { "pr:\($0.id)" } ?? "archive:\(repo)#\(number)",
-                         openDetail: true)
+            router.openPR(repo: repo, number: number, inboxID: entry.map { "\($0.id)" })
+        case let .prod(key):
+            enterMode(.health, filter: key)
+        case let .panel(rail):
+            store.setRail(rail, collapsed: false)
         }
     }
 
@@ -807,6 +836,8 @@ struct StatusPanelView: View {
             router.markAll(markableIDs)
         case let .tab(step):
             withAnimation(Theme.Motion.tab(reduceMotion)) { router.moveTab(step) }
+        case let .view(step):
+            withAnimation(Theme.Motion.swap(reduceMotion)) { router.cycleView(step) }
         case let .scroll(amount):
             router.scroll(amount)
         case let .verb(key):

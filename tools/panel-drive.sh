@@ -26,8 +26,7 @@
 #   tools/panel-drive.sh clear-action '<action>'     # keep|backup|discard|clear|inspect|refresh|show-log|show-changes|close
 #   tools/panel-drive.sh mac-stop '<finding id>'      # open a .mac finding's Stop… confirm (never confirms it)
 #   tools/panel-drive.sh mark '<object id>|all|none'  # ⌘-click a row's mark, ⌘A, or unmark (bulk actions)
-#   tools/panel-drive.sh home-toggle '<owner/repo>'   # open/close a Now first PR-tile ready line ('fold' = drafts · stale)
-#   tools/panel-drive.sh home-style nowLine|nowFirst  # Settings ▸ Panel ▸ Home style, through its own setter
+#   tools/panel-drive.sh home-toggle '<owner/repo>'   # open/close a Home PR-tile ready line ('fold' = drafts · stale)
 #   PULTIK_DEVBOX_EXECUTABLE can select a test CLI in Debug; a disposable
 #   PULTIK_CLEAR_FIXTURE_PATH enables the clear-fixture preview for native QA.
 #
@@ -48,7 +47,7 @@ case "$cmd" in
       if out="$(toolkit displays resolve --role qa --app pultik)"; then PD_TEXT="$out"; else printf '%s\n' "$out" >&2; fi
     fi ;;
   close|github-pause|github-resume) ;;
-  query|size|clear-preview|clear-action|mac-stop|home-toggle|home-style|mark|diff-fixture|gutter) PD_TEXT="${1-}" ;;
+  query|size|clear-preview|clear-action|mac-stop|home-toggle|mark|diff-fixture|gutter) PD_TEXT="${1-}" ;;
   scroll-bench) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-scroll-bench.json ;;
   pr-verb) PD_TEXT="${1:?verb}"; PD_PATH=/tmp/pultik-pr-verb.json ;;
   paste) ;;

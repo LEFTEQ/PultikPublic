@@ -139,6 +139,8 @@ enum KeyIntent: Equatable {
     case markAll
     /// ←/→ inside an entered workbench: the next tab, wrapping (PR workbench D5).
     case tab(Int)
+    /// ⇥ (+1) / ⇧⇥ (−1) in a module with views: its next view, wrapping (vt-7727 D5).
+    case view(Int)
     /// ↑/↓ inside an entered workbench scroll its tab.
     case scroll(ScrollAmount)
     /// A letter inside an entered workbench: its verb. The workbench
@@ -245,6 +247,11 @@ enum KeyboardCoordinator {
         case .tab:
             if context.card != nil { return .cardColumn(stroke.shift ? -1 : 1) }
             if context.detailOpen || context.bulk, !context.focusTargets.isEmpty { return .focus(stroke.shift ? -1 : 1) }
+            // A module's views (D5): what ⇥ means in it once no detail ring
+            // or card claims it; a view's rows have nothing to triage.
+            if let module = context.module, !module.views.isEmpty, !context.entered {
+                return .view(stroke.shift ? -1 : 1)
+            }
             if context.pathCard, context.selection == nil { return .cyclePathVerb(stroke.shift ? -1 : 1) }
             if let id = context.selection {
                 // A module's other rows have nothing to triage, and ⇥ must not

@@ -493,7 +493,7 @@ var topLevelKinds = map[string]jsonKind{
 	"vaultPath": kindString, "todoProject": kindString, "codeEditor": kindString, "collapsedRails": kindStringArray,
 	"leftRailTab": kindString, "leftRailSplit": kindNumber, "vitrinkaWorkspace": kindString,
 	"workspaces": kindObject, "displayPresets": kindArray, "externalBrightnessOffset": kindInteger,
-	"dimBrightness": kindNumber, "neverSleep": kindBool, "codeUnwrapped": kindBool,
+	"dimBrightness": kindNumber, "neverSleep": kindBool, "codeUnwrapped": kindBool, "codeTheme": kindString,
 	"modules": kindArray, "homeAfterMinutes": kindInteger,
 }
 

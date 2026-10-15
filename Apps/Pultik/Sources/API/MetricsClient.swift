@@ -221,6 +221,50 @@ actor MetricsClient {
         return board
     }
 
+    // MARK: - A machine's history (vt-7727 D9, read on selection only)
+
+    /// Range queries sent — the debug driver's proof they run only when a
+    /// machine is selected (vt-7727 AC 6).
+    private(set) var rangeQueries = 0
+
+    /// The PromQL selector of one machine: its `instance`, and a guest's `vm_host`.
+    nonisolated static func selector(instance: String, vmHost: String?) -> String {
+        let host = vmHost.map { #",vm_host="\#($0)""# } ?? #",vm_host="""#
+        return #"instance="\#(instance)"\#(host)"#
+    }
+
+    /// Each core's busy share over the last two minutes, in core order —
+    /// the detail's heatmap. nil when Prometheus does not answer.
+    func coreBusy(instance: String, vmHost: String?) async -> [Double]? {
+        let query = #"1 - rate(node_cpu_seconds_total{mode="idle","# + Self.selector(instance: instance, vmHost: vmHost)
+            + "}[2m])"
+        guard let series = try? await instantSeries(query) else { return nil }
+        return series.compactMap { sample in sample.labels["cpu"].flatMap(Int.init).map { ($0, sample.value) } }
+            .sorted { $0.0 < $1.0 }
+            .map { min(max($0.1, 0), 1) }
+    }
+
+    /// The machine's busy share over the last 24 h, one point per 15 min.
+    func cpuDay(instance: String, vmHost: String?, now: Date = Date()) async -> [Double]? {
+        let query = #"1 - avg(rate(node_cpu_seconds_total{mode="idle","# + Self.selector(instance: instance, vmHost: vmHost)
+            + "}[5m]))"
+        var components = URLComponents(url: base.appending(path: "api/v1/query_range"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "start", value: String(Int(now.timeIntervalSince1970) - 86400)),
+            URLQueryItem(name: "end", value: String(Int(now.timeIntervalSince1970))),
+            URLQueryItem(name: "step", value: "900"),
+        ]
+        rangeQueries += 1
+        guard let (data, response) = try? await session.data(from: components.url!),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = (body["data"] as? [String: Any])?["result"] as? [[String: Any]],
+              let values = result.first?["values"] as? [[Any]]
+        else { return nil }
+        return values.compactMap { ($0.last as? String).flatMap(Double.init) }
+    }
+
     /// Every configured server, each followed by the VM guests whose
     /// `vm_host` is its instance (devbox-c and firefly-vm under
     /// build-server-next) — found in the same queries' answers, at no extra

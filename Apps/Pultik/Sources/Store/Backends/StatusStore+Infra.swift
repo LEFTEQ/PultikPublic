@@ -83,7 +83,6 @@ extension StatusStore {
         let snapshotKey = infraSnapshotKey
         let servers = preferences.servers.map { (name: $0.name, instance: $0.ref) }
         let services = preferences.services.map { (name: $0.name, probe: $0.ref, host: $0.host, job: $0.job) }
-        var lanesRefreshed = false
         await gated(.prometheus, probe: {
             await MetricsClient.shared.reachable()
                 ? nil : .unreachable("prometheus not answering")
@@ -118,61 +117,31 @@ extension StatusStore {
             }
 
             if isSectionVisible("runners") {
+                // Each host's pool is its own Semafor's, read by the Semafor
+                // lane while CI shows (vt-7727 WP3): a new board keeps them.
+                let pools = laneBoard.pools
                 laneBoard = await MetricsClient.shared.laneBoard()
-                lanesRefreshed = true
+                laneBoard.pools = pools
             } else {
                 laneBoard = CILaneBoard()
             }
             recordInfraSnapshot(key: snapshotKey)
             return nil
         }
-        // Each host's pool line is its own Semafor's, another host: its
-        // failures back off on its own breaker instead of riding
-        // Prometheus's success, and while it holds that host's line stays
-        // hidden. Only a board this pass fetched is labelled — a board kept
-        // through a Prometheus pause keeps its last pools rather than pairing
-        // a new head with old lanes.
-        guard lanesRefreshed, !laneBoard.isEmpty else { return }
-        let lanes = laneBoard.lanes
-        let semafors = preferences.servers.compactMap { server in server.semaforURL.map { (server.ref, $0) } }
-        await withTaskGroup(of: Void.self) { group in
-            for (host, base) in semafors {
-                group.addTask { await self.refreshSemafor(host: host, base: base,
-                                                          lanes: lanes.filter { $0.host == host }) }
-            }
-        }
-        let configured = Set(semafors.map(\.0))
-        laneBoard.pools = laneBoard.pools.filter { configured.contains($0.key) }
-        ciThroughputs = ciThroughputs.filter { configured.contains($0.key) }
-        recordInfraSnapshot(key: snapshotKey)
     }
 
-    /// One host's Semafor behind its own breaker: the pool, and once a
-    /// minute the day.
-    private func refreshSemafor(host: String, base: URL, lanes: [CILane]) async {
-        laneBoard.pools[host] = nil
-        var answered = false
-        await gated(.semafor(host: base.host() ?? base.absoluteString)) {
-            let (pool, failure) = await SemaforClient.shared.pool(at: base, lanes: lanes)
-            laneBoard.pools[host] = pool
-            guard failure == nil else { return failure }
-            answered = true
-            // The overview is a day-scale read: once a minute, like Semafor's
-            // own SPA. A failed overview hides its lines but is no reason to
-            // back off the pool that just answered.
-            if Date().timeIntervalSince(throughputFetchedAt[host] ?? .distantPast) >= Self.throughputInterval {
-                let (throughput, overviewFailure) = await SemaforClient.shared.overview(at: base)
-                ciThroughputs[host] = throughput
-                throughputFetchedAt[host] = throughput == nil ? nil : Date()
-                if let overviewFailure {
-                    NSLog("pultik: semafor %@ overview — %@", host, String(describing: overviewFailure))
-                }
-            }
+    /// A machine's history for its detail (vt-7727 D9): per-core load and
+    /// the 24 h CPU line, read when the detail opens and at most once a
+    /// minute while it stays open — never polled, never while hidden.
+    func loadMachineHistory(_ server: ServerMetrics) async {
+        if let known = machineHistory[server.id], Date().timeIntervalSince(known.fetchedAt) < 60 { return }
+        await gated(.prometheus) {
+            async let cores = MetricsClient.shared.coreBusy(instance: server.instance, vmHost: server.vmHost)
+            async let day = MetricsClient.shared.cpuDay(instance: server.instance, vmHost: server.vmHost)
+            let (coreLoad, dayLoad) = await (cores, day)
+            guard coreLoad != nil || dayLoad != nil else { return .unreachable("prometheus history not answering") }
+            machineHistory[server.id] = MachineHistory(cores: coreLoad ?? [], day: dayLoad ?? [], fetchedAt: Date())
             return nil
-        }
-        if !answered {
-            ciThroughputs[host] = nil
-            throughputFetchedAt[host] = nil
         }
     }
 

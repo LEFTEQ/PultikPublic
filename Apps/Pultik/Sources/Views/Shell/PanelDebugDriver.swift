@@ -93,6 +93,8 @@ extension StatusPanelView {
                 // The shell (WP3): where the panel is, what ↑/↓ walk and what is open.
                 "module": stripModule?.rawValue ?? NSNull(),
                 "moduleFilter": router.module == nil ? NSNull() : query,
+                "moduleView": router.view?.rawValue ?? NSNull(),
+                "moduleViews": router.module?.views.map(\.rawValue) ?? [],
                 "selection": selectedID ?? NSNull(),
                 "moduleItems": keyItems,
                 "detailOpen": detailShown,
@@ -140,11 +142,11 @@ extension StatusPanelView {
                 "strip": stripSignals,
                 "prodExpanded": prodExpandedKey ?? NSNull(),
                 "eveAskedPrompt": eveAskedPrompt ?? NSNull(),
-                // Home (copilot shell D6): which region shows, its style, the
-                // Now queue's incidents and the rows the keyboard walks, the
-                // prod rail beside results, the frame.
+                // Home (copilot shell D6, vt-7727 D8): which region shows, the
+                // widgets beside Now, the Now queue's incidents and the rows
+                // the keyboard walks, the prod rail beside results, the frame.
                 "home": showsHome,
-                "homeStyle": store.homeStyle.rawValue,
+                "homeWidgets": showsHome ? homeWidgets.map(\.rawValue) : [],
                 "homeExpanded": homeExpanded.sorted(),
                 "nowExpanded": nowExpanded.sorted(),
                 "homeRows": showsHome ? homeNowRows.map(\.id) : [],
@@ -193,6 +195,13 @@ extension StatusPanelView {
                 state["ciRerun"] = CIRerunCenter.shared.outcomes.mapValues { "\($0)" }
                     .reduce(into: [String: String]()) { $0[String($1.key)] = $1.value }
                 state["prAllSearchIDs"] = store.searchResults.map(\.id)
+                // vt-7727 AC 12: Semafor requests by path, zero while hidden.
+                state["semaforRequests"] = SemaforClient.requests.snapshot
+                // vt-7727 AC 6: a machine's history is read on selection only.
+                state["prometheusRangeQueries"] = await MetricsClient.shared.rangeQueries
+                state["semaforHosts"] = store.semaforHosts.mapValues { host in
+                    host.fetchedAt.mapValues { PultikFormat.clock($0) }
+                }
                 PanelDriver.write(state: state, to: path)
             }
         default:
@@ -235,7 +244,7 @@ extension StatusPanelView {
     static func describe(_ place: ModuleRouter.Place) -> [String: Any] {
         ["module": place.module?.rawValue ?? "home", "filter": place.filter, "selection": place.selection ?? NSNull(),
          "detailOpen": place.detailOpen, "stack": place.stack.map(\.id), "entered": place.entered,
-         "tab": place.tab ?? NSNull()]
+         "tab": place.tab ?? NSNull(), "view": place.view?.rawValue ?? NSNull()]
     }
 
     /// A driver key through the same coordinator a real keystroke takes,

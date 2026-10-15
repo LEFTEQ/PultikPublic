@@ -34,14 +34,21 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertFalse(router.swallowTokenKey("p"))
     }
 
-    /// `.f` lands on Mac's fans with their detail open; Mac's own token stays `.mac`.
+    /// `.f` lands on This Mac's fans and `.m` on This Mac, both in Estate's
+    /// Machines with their detail open (vt-7727 D1); Estate's own token stays `.estate`.
     func testFansAliasOpensMacFans() {
         let router = ModuleRouter()
+        router.enter(.estate)
+        router.cycleView(1)
         router.type(".f")
-        XCTAssertEqual(router.module, .mac)
+        XCTAssertEqual(router.module, .estate)
+        XCTAssertEqual(router.view, .machines)
         XCTAssertEqual(router.selection, PaletteMode.macFans)
         XCTAssertTrue(router.detailOpen)
-        XCTAssertEqual(PaletteMode.alias(of: .mac), .mac)
+        router.leave()
+        router.type(".m")
+        XCTAssertEqual(router.selection, PaletteMode.thisMac)
+        XCTAssertEqual(PaletteMode.alias(of: .estate), .estate)
     }
 
     /// `.prs` enters PRs and `.ho` lands on Home with `me` swallowed, while
@@ -65,8 +72,8 @@ final class ModuleRouterTests: XCTestCase {
     /// ←/→ on an empty field walk the strip, wrapping; with text they stay the caret's.
     func testArrowsOnAnEmptyFieldWalkTheStrip() {
         XCTAssertEqual(intent(.right, KeyContext()), .module(.prs))
-        XCTAssertEqual(intent(.left, KeyContext()), .module(.mac))
-        XCTAssertEqual(intent(.right, KeyContext(module: .mac)), .module(.home))
+        XCTAssertEqual(intent(.left, KeyContext()), .module(.estate))
+        XCTAssertEqual(intent(.right, KeyContext(module: .estate)), .module(.home))
         XCTAssertEqual(intent(.left, KeyContext(module: .ci, selection: "run:1", detailOpen: true)), .module(.prs))
         XCTAssertNil(intent(.right, KeyContext(module: .ci, text: "failed")))
         XCTAssertNil(intent(.left, KeyContext(completion: true)))
@@ -218,9 +225,89 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertTrue(router.stack.isEmpty)
     }
 
+    // MARK: - Module views (vt-7727 D5, AC 4)
+
+    /// ⇥/⇧⇥ cycle a module's views, wrapping, once no detail ring or card
+    /// claims ⇥; a module with one body keeps the ⇥ it had.
+    func testTabCyclesAModulesViews() {
+        XCTAssertEqual(intent(.tab, KeyContext(module: .ci)), .view(1))
+        XCTAssertEqual(KeyboardCoordinator.intent(for: KeyStroke(key: .tab, shift: true),
+                                                  in: KeyContext(module: .estate, items: ["server:a"], selection: "server:a")),
+                       .view(-1))
+        XCTAssertEqual(intent(.tab, KeyContext(module: .ci, detailOpen: true, focusTargets: ["run:x"])), .focus(1))
+        XCTAssertEqual(intent(.tab, KeyContext(module: .ci, card: "gh:o/r/run/9")), .cardColumn(1))
+        XCTAssertEqual(intent(.tab, KeyContext(module: .devbox, items: ["ws:a"], selection: "ws:a")), .ignore)
+
+        let router = ModuleRouter()
+        router.enter(.ci)
+        XCTAssertEqual(router.view, .live, "a module opens on its first view")
+        router.cycleView(1)
+        XCTAssertEqual(router.view, .runs)
+        router.cycleView(-1)
+        router.cycleView(-1)
+        XCTAssertEqual(router.view, .fleet, "⇧⇥ wraps")
+        router.enter(.devbox)
+        XCTAssertNil(router.view)
+    }
+
+    /// Each view keeps its own cursor and closes the other's detail; ↵ opens
+    /// the view's row; ←/→ keep walking the strip with a detail open; Esc
+    /// peels detail, selection and module, and the view is no layer.
+    func testViewsKeepTheirCursorAndEscLeavesTheViewBehind() {
+        let router = ModuleRouter()
+        router.enter(.estate)
+        router.openDetail("server:a")
+        router.showView(.backups)
+        XCTAssertNil(router.selection)
+        XCTAssertFalse(router.detailOpen)
+        router.select("box:build-server")
+        router.showView(.machines)
+        XCTAssertEqual(router.selection, "server:a")
+        XCTAssertFalse(router.detailOpen, "a view comes back with its cursor, never its detail")
+        router.leave()
+        router.enter(.estate)
+        XCTAssertEqual(router.view, .machines)
+        router.enter(.ci, select: "x", view: .failures)
+        XCTAssertEqual(router.view, .failures, "an object's view is shown with it")
+
+        let open = KeyContext(module: .estate, items: ["server:a"], selection: "server:a", detailOpen: true)
+        XCTAssertEqual(intent(.enter, KeyContext(module: .estate, items: ["server:a"], selection: "server:a")),
+                       .openDetail("server:a"))
+        XCTAssertEqual(intent(.right, open), .module(PanelModule.estate.neighbour(1)))
+        var context = open
+        var peeled: [EscStep] = []
+        while peeled.last != .close {
+            let step = KeyboardCoordinator.escape(context)
+            peeled.append(step)
+            switch step {
+            case .closeDetail: context.detailOpen = false
+            case .clearSelection: context.selection = nil
+            case .leaveModule: context.module = nil
+            default: break
+            }
+        }
+        XCTAssertEqual(peeled, [.closeDetail, .clearSelection, .leaveModule, .close])
+    }
+
+    /// The place a summon restores carries its view: wandering on without
+    /// resting, then leaving, still lands on the view rested on.
+    func testTheViewSurvivesASummon() {
+        let place = PanelPlace()
+        place.router.enter(.ci)
+        place.router.cycleView(1)
+        let now = Date()
+        place.rested(on: place.router.place, since: now.addingTimeInterval(-2), now: now)
+        place.router.cycleView(1)
+        place.router.leave()
+        place.dismissed(at: now)
+        place.presented(at: now.addingTimeInterval(60))
+        XCTAssertEqual(place.router.module, .ci)
+        XCTAssertEqual(place.router.view, .runs)
+    }
+
     /// AC 13: Settings ▸ Modules' order is the strip's — ⌘1–9 and ←/→ follow it.
     func testTheModuleOrderDrivesCommandDigitsAndArrows() {
-        let order: [PanelModule] = [.home, .ci, .prs, .prod, .devbox, .work, .sessions, .estate, .mac]
+        let order: [PanelModule] = [.home, .ci, .prs, .prod, .devbox, .work, .sessions, .estate]
         XCTAssertEqual(intent(.character("2"), command: true, KeyContext(order: order)), .module(.ci))
         XCTAssertEqual(intent(.right, KeyContext(order: order)), .module(.ci))
         XCTAssertEqual(intent(.right, KeyContext(module: .ci, order: order)), .module(.prs))
@@ -234,7 +321,7 @@ final class ModuleRouterTests: XCTestCase {
         let items = ["fans", "finding:a", "finding:b", "finding:c", "finding:d"]
         let markable = Array(items.dropFirst())
         let router = ModuleRouter()
-        router.enter(.mac, select: "finding:a", openDetail: true)
+        router.enter(.estate, select: "finding:a", openDetail: true)
         router.toggleMark("finding:b")
         XCTAssertEqual(router.marks, ["finding:b"])
         XCTAssertEqual(router.selection, "finding:b")
@@ -392,7 +479,7 @@ final class ModuleRouterTests: XCTestCase {
     /// ⇥ walks its verbs, and Esc drops the marks before the filter.
     func testBulkKeysMarkFocusAndPeelBeforeTheFilter() {
         let shiftDown = KeyStroke(key: .down, shift: true)
-        let plain = KeyContext(module: .mac, items: ["finding:a"], selection: "finding:a")
+        let plain = KeyContext(module: .estate, items: ["finding:a"], selection: "finding:a")
         XCTAssertEqual(KeyboardCoordinator.intent(for: shiftDown, in: plain), .select("finding:a"))
         XCTAssertNil(intent(.character("a"), command: true, plain))
 
@@ -416,7 +503,7 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertEqual(intent(.esc, pane), .escape(.cancelConfirm))
 
         let router = ModuleRouter()
-        router.enter(.mac)
+        router.enter(.estate)
         router.toggleMark("finding:a")
         router.confirm("stop")
         router.clearMarks()

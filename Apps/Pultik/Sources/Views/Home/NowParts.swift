@@ -1,8 +1,8 @@
 import SwiftUI
 
-// The parts both Home styles draw the Now queue with (copilot shell D6,
-// D12–D15; board cards 77430/77431/77434–77438). They format `NowQueue`
-// only — ranking, folding and onsets are the queue's — and hold no state.
+// The parts Home's Now column draws the queue with (copilot shell D6, D14;
+// vt-7727 D7: the PR list's line). They format `NowQueue` only — ranking,
+// folding and onsets are the queue's — and hold no state.
 
 /// One line of Home's Now list: a live row, or the tombstone a resolved
 /// selection leaves at its old place until the next arrow (contract
@@ -49,15 +49,6 @@ extension NowLane {
         }
     }
 
-    var symbol: String {
-        switch self {
-        case .onFire: "flame.fill"
-        case .waitingOnYou: "hand.raised.fill"
-        case .due: "calendar"
-        case .drifting: "arrow.up.right"
-        }
-    }
-
     var tone: Color {
         switch self {
         case .onFire: Theme.danger
@@ -68,7 +59,7 @@ extension NowLane {
 }
 
 extension NowSeverity {
-    /// A bar's colour is its severity (the lane is its class): critical and
+    /// A need's colour is its severity (the lane is its class): critical and
     /// emergency are danger, a warning warns, normal takes the lane's tone.
     func tone(in lane: NowLane) -> Color {
         switch self {
@@ -77,47 +68,36 @@ extension NowSeverity {
         case .normal: lane.tone
         }
     }
+
+    /// The line's leading glyph: the shape says it too, never colour alone.
+    var symbol: String {
+        switch self {
+        case .emergency, .critical: "xmark.circle.fill"
+        case .warning: "exclamationmark.circle.fill"
+        case .normal: "circle"
+        }
+    }
 }
 
 extension NowKind {
-    var symbol: String {
-        switch self {
-        case .deployment: "waveform.path.ecg"
-        case .monitoringBlind: "eye.slash"
-        case .sentryIssue: "ladybug.fill"
-        case .firingAlert: "bell.fill"
-        case .eveNotification: "sparkles"
-        case .eveApproval: "checkmark.seal.fill"
-        case .sessionWaiting: "terminal.fill"
-        case .failedCheck: "xmark.octagon.fill"
-        case .reviewRequested: "eye.fill"
-        case .stalePR: "arrow.triangle.pull"
-        case .reminder: "bell.badge.fill"
-        case .overdueTask: "checklist"
-        case .staleWorkspace: "shippingbox.fill"
-        case .macFinding: "laptopcomputer"
-        case .expiry: "key.fill"
-        }
-    }
-
-    /// Now first's kind tag under the lane: "eve approval", "stale PR".
-    var label: String {
+    /// The kind column's micro tag: "alert", "session", "pr".
+    var tag: String {
         switch self {
         case .deployment: "prod"
-        case .monitoringBlind: "monitoring"
+        case .monitoringBlind: "blind"
         case .sentryIssue: "sentry"
         case .firingAlert: "alert"
         case .eveNotification: "eve"
-        case .eveApproval: "eve approval"
+        case .eveApproval: "approval"
         case .sessionWaiting: "session"
-        case .failedCheck: "ci · yours"
+        case .failedCheck: "ci"
         case .reviewRequested: "review"
-        case .stalePR: "stale PR"
+        case .stalePR: "pr"
         case .reminder: "reminder"
-        case .overdueTask: "overdue"
+        case .overdueTask: "todo"
         case .staleWorkspace: "devbox"
-        case .macFinding: "this Mac"
-        case .expiry: "expiring"
+        case .macFinding: "mac"
+        case .expiry: "expiry"
         }
     }
 
@@ -143,490 +123,162 @@ extension NowKind {
     }
 }
 
-extension NowQueue {
-    /// Rank labels as drawn: an incident or ×N row is one rank, a fold
-    /// spans the ranks it holds ("6–8") and an open fold's children take
-    /// them one by one; a tombstone has none.
-    static func ranks(_ rows: [NowHomeRow]) -> [String: String] {
-        var next = 1
-        var out: [String: String] = [:]
-        var children: [String: Int] = [:]
-        for item in rows where !item.isTombstone {
-            let row = item.row
-            if let parent = row.parentKey, let rank = children[parent] {
-                out[item.id] = "\(rank)"
-                children[parent] = rank + 1
-                continue
-            }
-            let span = row.shape == .fold ? row.incidents.count : 1
-            if row.shape == .fold { children[row.key] = next }
-            out[item.id] = span > 1 ? "\(next)–\(next + span - 1)" : "\(next)"
-            next += span
-        }
-        return out
-    }
-}
-
-/// The need's glyph: its kind on a quiet square, its severity as the dot.
-struct NowGlyph: View {
-    let kind: NowKind
-    let tone: Color
-    var size: CGFloat = 20
+/// A lane as the PR list draws a repo: its title in the lane's tone and its
+/// incident count, over its lines.
+struct NowLaneHeading: View {
+    let summary: NowLaneSummary
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(Theme.surfaceRaised)
-            .frame(width: size, height: size)
-            .overlay {
-                Image(systemName: kind.symbol)
-                    .font(.system(size: size * 0.5, weight: .semibold))
-                    .foregroundStyle(Theme.ink2)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                Circle().fill(tone).frame(width: 7, height: 7)
-                    .overlay(Circle().strokeBorder(Theme.canvas, lineWidth: 1.5))
-                    .offset(x: 2, y: 2)
-            }
+        HStack(spacing: 6) {
+            Text(summary.lane.title).microLabel(summary.lane.tone)
+            Text(verbatim: "\(summary.incidents)")
+                .font(Theme.Typo.micro).monospacedDigit().foregroundStyle(Theme.ink2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.white.opacity(0.06), in: Capsule())
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 26, alignment: .bottom)
+        .padding(.bottom, 2)
     }
 }
 
-// MARK: - The time track
-
-/// Geometry shared by the axis and every row's track: the rolling 24 h
-/// (D12) with its magnified last half hour (D13) over `trackWidth`, then a
-/// future gutter for deadline diamonds.
-struct NowTrackMetrics {
-    static let gutter: CGFloat = 46
-    let axis: NowAxis
-    let width: CGFloat
-
-    var trackWidth: CGFloat { max(0, width - Self.gutter) }
-
-    func x(_ date: Date) -> CGFloat { CGFloat(axis.x(date)) * trackWidth }
-
-    /// Clock hours on a three-hour grid across the linear day, midnight included.
-    func hourTicks(calendar: Calendar = .current) -> [Date] {
-        guard let first = calendar.nextDate(after: axis.start, matching: DateComponents(minute: 0, second: 0),
-                                            matchingPolicy: .nextTime) else { return [] }
-        var ticks: [Date] = []
-        var tick = first
-        let last = axis.breakAt.addingTimeInterval(-40 * 60)
-        while tick <= last {
-            if calendar.component(.hour, from: tick) % 3 == 0 { ticks.append(tick) }
-            tick = tick.addingTimeInterval(3600)
-        }
-        return ticks
-    }
-
-    /// Ten-minute marks inside the magnified half hour.
-    func magnifiedTicks(calendar: Calendar = .current) -> [Date] {
-        guard let first = calendar.nextDate(after: axis.breakAt, matching: DateComponents(second: 0),
-                                            matchingPolicy: .nextTime) else { return [] }
-        var ticks: [Date] = []
-        var tick = first
-        while tick <= axis.now.addingTimeInterval(-6 * 60) {
-            if calendar.component(.minute, from: tick) % 10 == 0 { ticks.append(tick) }
-            tick = tick.addingTimeInterval(60)
-        }
-        return ticks
-    }
-
-    /// The `//` gap's span.
-    var breakRange: ClosedRange<CGFloat> {
-        let start = CGFloat(NowAxis.linearShare) * trackWidth
-        return start...(start + CGFloat(NowAxis.breakShare) * trackWidth)
-    }
-}
-
-/// The axis over the track: hours, the `//` break with its ×N chip, ten-
-/// minute marks in the magnified half hour, and the now pill.
-struct NowAxisHeader: View {
-    let now: Date
-
-    var body: some View {
-        Canvas { context, size in
-            let metrics = NowTrackMetrics(axis: NowAxis(now: now), width: size.width)
-            let y = size.height / 2
-            let gap = metrics.breakRange
-            let pill = context.resolve(Text("NOW \(PultikFormat.clock(now))")
-                .font(Theme.Typo.micro).foregroundStyle(Theme.ink))
-            let pillSize = pill.measure(in: size)
-            let center = min(metrics.trackWidth, size.width - pillSize.width / 2 - 8)
-            let rect = CGRect(x: center - pillSize.width / 2 - 7, y: y - 9, width: pillSize.width + 14, height: 18)
-            // Labels draw only where they clear their neighbours, the break
-            // and the now pill — a narrow track drops marks, never overlaps them.
-            var right: CGFloat = -.infinity
-            func label(_ text: Text, at x: CGFloat, before limit: CGFloat) {
-                let resolved = context.resolve(text)
-                let half = resolved.measure(in: size).width / 2
-                guard x - half > right + 6, x + half < limit - 4 else { return }
-                context.draw(resolved, at: CGPoint(x: x, y: y))
-                right = x + half
-            }
-            for tick in metrics.hourTicks() {
-                let hour = Calendar.current.component(.hour, from: tick)
-                label(Text(String(format: "%02d", hour)).font(Theme.Typo.micro)
-                    .foregroundStyle(hour == 0 ? Theme.ink2 : Theme.ink3), at: metrics.x(tick), before: gap.lowerBound)
-            }
-            let slash = Text("//").font(Theme.Typo.micro).foregroundStyle(Theme.ink3)
-            context.draw(context.resolve(slash), at: CGPoint(x: (gap.lowerBound + gap.upperBound) / 2, y: y))
-            let zoom = context.resolve(Text("×\(Int(NowAxis.magnification))").font(Theme.Typo.micro)
-                .foregroundStyle(Theme.ink2))
-            context.draw(zoom, at: CGPoint(x: gap.upperBound + 4, y: y), anchor: .leading)
-            right = gap.upperBound + 4 + zoom.measure(in: size).width
-            for tick in metrics.magnifiedTicks() {
-                label(Text(PultikFormat.clock(tick)).font(Theme.Typo.micro).foregroundStyle(Theme.ink3),
-                      at: metrics.x(tick), before: rect.minX)
-            }
-            context.fill(Capsule().path(in: rect), with: .color(Theme.accent.opacity(0.22)))
-            context.stroke(Capsule().path(in: rect), with: .color(Theme.accent.opacity(0.7)), lineWidth: 1)
-            context.draw(pill, at: CGPoint(x: center, y: y))
-        }
-        .frame(height: 22)
-        .accessibilityLabel("Last 24 hours, the last 30 minutes magnified, now \(PultikFormat.clock(now))")
-    }
-}
-
-/// One row's stretch of the line: the bar from onset into now, its onset
-/// mark (hollow when only observed), a chevron and true age when it began
-/// before the window, and a deadline diamond in the future gutter. Lane
-/// gridlines, the break band and the now line are drawn here too, so rows
-/// stack into one continuous chart.
-struct NowTrack: View {
-    let incident: NowIncident
-    let lane: NowLane
-    let now: Date
-    var compact = false
-
-    var body: some View {
-        Canvas { context, size in
-            let metrics = NowTrackMetrics(axis: NowAxis(now: now), width: size.width)
-            NowTrack.drawGrid(context, size: size, metrics: metrics)
-            let bar = metrics.axis.bar(incident)
-            let tone = incident.severity.tone(in: lane)
-            let y = compact ? size.height / 2 : size.height * 0.64
-            let start = CGFloat(bar.start) * metrics.trackWidth
-            let end = metrics.trackWidth
-            let line = Path(roundedRect: CGRect(x: start, y: y - 2, width: max(2, end - start), height: 4),
-                            cornerRadius: 2)
-            context.fill(line, with: .color(tone.opacity(bar.hollow ? 0.45 : 0.9)))
-            let dot = CGRect(x: start - 4, y: y - 4, width: 8, height: 8)
-            if bar.hollow {
-                context.fill(Circle().path(in: dot), with: .color(Theme.canvas))
-                context.stroke(Circle().path(in: dot), with: .color(tone), lineWidth: 1.5)
-            } else {
-                context.fill(Circle().path(in: dot), with: .color(tone))
-            }
-            if let deadline = bar.deadline { NowTrack.drawDeadline(context, deadline, y: y, metrics: metrics) }
-            guard !compact else { return }
-            let label = context.resolve(onsetLabel(bar))
-            let room = label.measure(in: size).width + 10
-            let labelY = y - 11
-            if bar.pinned || start < room {
-                context.draw(label, at: CGPoint(x: bar.pinned ? 4 : start + 8, y: labelY), anchor: .leading)
-            } else {
-                context.draw(label, at: CGPoint(x: start - 6, y: labelY), anchor: .trailing)
-            }
-        }
-    }
-
-    /// "14:57 jobs stuck"-style: the onset's clock, or "‹ since Oct 2 · 6d"
-    /// past the window's edge; "observed" when Pultík only saw it begin.
-    private func onsetLabel(_ bar: NowAxis.Bar) -> Text {
-        let onset = incident.onset.date
-        let lead: Text
-        if bar.pinned {
-            lead = Text("‹ since \(PultikFormat.date(onset, now: now)) · \(PultikFormat.age(bar.age))")
-        } else {
-            lead = Text(PultikFormat.clock(onset)).fontWeight(.semibold).foregroundStyle(Theme.ink)
-        }
-        let tail = incident.onset.isObserved ? " observed" : incident.onset.isFirstSeen ? " first seen" : ""
-        return Text("\(lead)\(tail)").font(.system(size: 10.5)).monospacedDigit().foregroundStyle(Theme.ink2)
-    }
-
-    /// The hourly gridlines, the break band and the now line.
-    static func drawGrid(_ context: GraphicsContext, size: CGSize, metrics: NowTrackMetrics) {
-        for tick in metrics.hourTicks() {
-            let x = metrics.x(tick)
-            context.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(Theme.hairline))
-        }
-        let gap = metrics.breakRange
-        context.fill(Path(CGRect(x: gap.lowerBound, y: 0, width: gap.upperBound - gap.lowerBound, height: size.height)),
-                     with: .color(Theme.canvasDeep))
-        context.fill(Path(CGRect(x: metrics.trackWidth - 0.5, y: 0, width: 1.5, height: size.height)),
-                     with: .color(Theme.accent.opacity(0.8)))
-    }
-
-    /// A deadline: a diamond in the future gutter with its date, or a tick
-    /// on the bar once it has passed.
-    static func drawDeadline(_ context: GraphicsContext, _ placement: NowAxis.Placement, y: CGFloat,
-                             metrics: NowTrackMetrics) {
-        switch placement {
-        case let .future(seconds):
-            let x = metrics.trackWidth + NowTrackMetrics.gutter / 2
-            var dash = Path()
-            dash.move(to: CGPoint(x: metrics.trackWidth, y: y))
-            dash.addLine(to: CGPoint(x: x - 5, y: y))
-            context.stroke(dash, with: .color(Theme.ink3), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
-            var diamond = Path()
-            diamond.move(to: CGPoint(x: x, y: y - 5))
-            diamond.addLine(to: CGPoint(x: x + 5, y: y))
-            diamond.addLine(to: CGPoint(x: x, y: y + 5))
-            diamond.addLine(to: CGPoint(x: x - 5, y: y))
-            diamond.closeSubpath()
-            context.stroke(diamond, with: .color(Theme.ink2), lineWidth: 1.2)
-            let at = metrics.axis.now.addingTimeInterval(seconds)
-            let label = seconds < 86400 ? PultikFormat.clock(at) : PultikFormat.date(at, now: metrics.axis.now)
-            let when = context.resolve(Text(label).font(.system(size: 9.5)).monospacedDigit()
-                .foregroundStyle(Theme.ink3))
-            context.draw(when, at: CGPoint(x: x, y: y - 12), anchor: .center)
-        case let .track(fraction):
-            let x = CGFloat(fraction) * metrics.trackWidth
-            context.fill(Path(CGRect(x: x - 0.75, y: y - 6, width: 1.5, height: 12)), with: .color(Theme.ink))
-        case .pinned:
-            break
-        }
-    }
-}
-
-// MARK: - Ranked rows
-
-/// One ranked row: rank · glyph · title over a meta line led by its id ·
-/// age · verb. A fold reads "+N sessions waiting" and expands in place; a
-/// ×N series carries its count; a tombstone says the object left Now.
-struct NowRankedRow: View {
+/// One 28 pt line (D7): severity glyph · kind · the title with its meta in
+/// ink3 · age. Only the selected line names its verb; a fold reads "+N
+/// sessions waiting · …" and opens in place; a tombstone says the object
+/// left Now.
+struct NowLine: View {
     let item: NowHomeRow
-    let rank: String?
     let now: Date
     let selected: Bool
     var expanded = false
-    /// Now first's table: the lane and kind as a micro tag after the rank.
-    var laneTag = false
-    /// Now first's table: a compact track before the age column.
-    var trackWidth: CGFloat?
+    let action: () -> Void
+
+    static let height: CGFloat = 28
+    @State private var hovering = false
 
     var body: some View {
         let row = item.row
-        let incident = row.lead
-        HStack(spacing: 10) {
-            Text(rank ?? "")
-                .font(Theme.Typo.figure).foregroundStyle(Theme.ink3)
-                .frame(width: 30, alignment: .trailing)
-            if laneTag {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.lane.title).microLabel(row.lane.tone)
-                    Text(row.kind.label).microLabel()
-                }
-                .frame(width: 112, alignment: .leading)
+        Button(action: action) {
+            HStack(spacing: 8) {
+                glyph(row).frame(width: 14)
+                Text(item.isTombstone ? "" : row.kind.tag).microLabel().frame(width: 62, alignment: .leading)
+                text(row).lineLimit(1).truncationMode(.tail)
+                    .opacity(item.isTombstone ? 0.55 : 1)
+                Spacer(minLength: 8)
+                if selected { verb(row) }
+                Text(item.isTombstone ? "—" : PultikFormat.age(now.timeIntervalSince(row.lead.onset.date)))
+                    .font(Theme.Typo.figure)
+                    .foregroundStyle(row.lead.onset.isObserved ? Theme.ink3 : Theme.ink2)
+                    .lineLimit(1).fixedSize()
+                    .frame(minWidth: 46, alignment: .trailing)
             }
-            NowGlyph(kind: row.kind, tone: incident.severity.tone(in: row.lane))
-                // An open fold's children sit under its header.
-                .padding(.leading, row.parentKey == nil ? 0 : 14)
-            VStack(alignment: .leading, spacing: 1) {
-                title(row)
-                meta(row).lineLimit(1).truncationMode(.tail)
-            }
-            .opacity(item.isTombstone ? 0.5 : 1)
-            Spacer(minLength: 8)
-            if let trackWidth {
-                NowTrack(incident: incident, lane: row.lane, now: now, compact: true)
-                    .frame(width: trackWidth, height: 22)
-                    .opacity(item.isTombstone ? 0.35 : 1)
-            }
-            Text(item.isTombstone ? "—" : PultikFormat.age(now.timeIntervalSince(incident.onset.date)))
-                .font(Theme.Typo.figure).foregroundStyle(incident.onset.isObserved ? Theme.ink3 : Theme.ink2)
-                .frame(width: 58, alignment: .trailing)
-            verb(row).frame(width: 150, alignment: .trailing)
+            // An open fold's children sit under its header.
+            .padding(.leading, row.parentKey == nil ? 6 : 20)
+            .padding(.trailing, 6)
+            .frame(height: Self.height)
+            .contentShape(Rectangle())
+            .background { RowBackground(selected: selected, hovering: hovering) }
         }
-        .padding(.horizontal, 6)
-        .frame(height: 44)
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(row.lead.lead.displayID ?? "")
     }
 
     @ViewBuilder
-    private func title(_ row: NowRow) -> some View {
+    private func glyph(_ row: NowRow) -> some View {
+        if item.isTombstone {
+            Image(systemName: "checkmark.circle").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+        } else if row.shape == .fold {
+            Image(systemName: "plus.circle").font(.system(size: 12)).foregroundStyle(Theme.ink2)
+        } else {
+            let severity = row.lead.severity
+            Image(systemName: severity.symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(severity == .normal ? Theme.ink3 : severity.tone(in: row.lane))
+        }
+    }
+
+    /// The title, then its meta after a `·` in ink3, on one line.
+    private func text(_ row: NowRow) -> Text {
+        let title: String
+        var meta: [String] = []
+        let need = row.lead.lead
         switch (item.isTombstone, row.shape) {
         case (true, _):
-            Text("Resolved · no longer in Now").font(Theme.Typo.body).foregroundStyle(Theme.ink2).lineLimit(1)
+            title = "Resolved · no longer in Now"
+            meta.append(need.title)
         case (false, .fold):
-            Text("\(Text("+\(row.incidents.count)").fontWeight(.semibold)) \(row.kind.plural)")
-                .font(Theme.Typo.body).foregroundStyle(Theme.ink).lineLimit(1)
+            title = "+\(row.incidents.count) \(row.kind.plural)"
+            meta.append(row.incidents.prefix(3).map(\.lead.title).joined(separator: " · "))
         case (false, .series):
-            HStack(spacing: 6) {
-                Text(row.lead.lead.title).font(Theme.Typo.body).foregroundStyle(Theme.ink).lineLimit(1)
-                Chip("×\(row.incidents.count)", .danger)
-            }
+            title = "\(need.title) ×\(row.incidents.count)"
+            meta.append("\(row.incidents.count) objects")
         case (false, .incident):
-            Text(row.lead.lead.title).font(Theme.Typo.body).foregroundStyle(Theme.ink).lineLimit(1)
+            title = need.title
+            if let subtitle = need.subtitle, !subtitle.isEmpty { meta.append(subtitle) }
+            if row.lead.evidence > 1 { meta.append("\(row.lead.evidence) signals") }
+            if need.onset.isObserved { meta.append("observed \(PultikFormat.clock(row.lead.onset.date))") }
         }
+        if !item.isTombstone, row.shape != .fold, let deadline = row.lead.deadline {
+            meta.append(deadline < now ? "overdue \(PultikFormat.date(deadline, now: now))"
+                : "due \(PultikFormat.date(deadline, now: now))")
+        }
+        let tail = meta.isEmpty ? "" : " · " + meta.joined(separator: " · ")
+        return Text("\(Text(title).foregroundStyle(Theme.ink))\(Text(tail).foregroundStyle(Theme.ink3))")
+            .font(Theme.Typo.body)
     }
 
-    /// Led by the id, which never ellipsizes; the prose after it truncates.
-    private func meta(_ row: NowRow) -> some View {
-        let need = row.lead.lead
-        var parts: [String] = []
-        if item.isTombstone {
-            parts.append(need.title)
-        } else if row.shape == .fold {
-            parts.append(row.incidents.prefix(3).map(\.lead.title).joined(separator: " · "))
-        } else {
-            if let subtitle = need.subtitle, !subtitle.isEmpty { parts.append(subtitle) }
-            if row.shape == .series { parts.append("\(row.incidents.count) objects") }
-            if row.lead.evidence > 1 { parts.append("\(row.lead.evidence) signals") }
-            if need.onset.isObserved { parts.append("observed \(PultikFormat.clock(row.lead.onset.date))") }
-            if let deadline = row.lead.deadline {
-                parts.append(deadline < now ? "overdue \(PultikFormat.date(deadline, now: now))"
-                             : "due \(PultikFormat.date(deadline, now: now))")
-            }
-        }
-        return HStack(spacing: 6) {
-            if let id = need.displayID, !item.isTombstone, row.shape != .fold {
-                Text(id).font(Theme.Typo.figure).foregroundStyle(Theme.ink2).lineLimit(1).fixedSize().layoutPriority(1)
-            }
-            Text(parts.joined(separator: " · ")).font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink2)
-        }
-    }
-
-    /// ↵ opens — the selected row says so; every other row names the one
-    /// verb its object offers in its module.
-    @ViewBuilder
+    /// ↵'s meaning on the selected line: the need's verb, or the fold's.
     private func verb(_ row: NowRow) -> some View {
-        if item.isTombstone {
-            Text("—").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
-        } else if row.shape == .fold {
-            HStack(spacing: 5) {
-                Text(expanded ? "collapse" : "expand").font(Theme.Typo.meta).foregroundStyle(Theme.ink2)
+        let title = item.isTombstone ? nil
+            : row.shape == .fold ? (expanded ? "Collapse" : "Expand")
+            : row.lead.lead.verb.title
+        return HStack(spacing: 5) {
+            if let title {
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
                 KbdHint("↵")
             }
-        } else if selected {
-            HStack(spacing: 5) {
-                Text("Open").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
-                Text("↵").font(.system(size: 9.5, weight: .semibold, design: .monospaced)).foregroundStyle(.white.opacity(0.75))
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 22)
-            .background(Theme.accent, in: Capsule())
-        } else {
-            HStack(spacing: 5) {
-                Text(row.lead.lead.verb.title).font(Theme.Typo.meta).foregroundStyle(Theme.ink2).lineLimit(1)
-                if let shortcut = row.lead.lead.verb.shortcut { KbdHint(shortcut) }
-            }
         }
+        .padding(.horizontal, title == nil ? 0 : 8)
+        .frame(height: 20)
+        .background(Color.white.opacity(title == nil ? 0 : 0.1), in: Capsule())
+        .fixedSize()
     }
 }
 
-/// Needs cleared within the window (D14): off the line, out of rank and
-/// counts, each with the time it cleared.
+/// Needs cleared within the window (D14): out of rank and counts, each with
+/// the time it cleared.
 struct NowHandledSection: View {
     let entries: [ObservationLedger.Entry]
 
     var body: some View {
         if !entries.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                HStack {
+                HStack(spacing: 6) {
                     Text("Handled · 24 h").microLabel()
+                    Text(verbatim: "\(entries.count)").font(Theme.Typo.micro).monospacedDigit()
+                        .foregroundStyle(Theme.ink3)
                     Spacer()
-                    Text("\(entries.count)").font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink3)
                 }
                 .padding(.horizontal, 6)
-                .padding(.vertical, 8)
+                .frame(height: 26, alignment: .bottom)
+                .padding(.bottom, 2)
                 ForEach(entries.prefix(12), id: \.episodeID) { entry in
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.ok)
-                            .frame(width: 30, alignment: .trailing)
-                        Text(entry.need.title).font(Theme.Typo.body).foregroundStyle(Theme.ink2).lineLimit(1)
-                        if let subtitle = entry.need.subtitle {
-                            Text(subtitle).font(Theme.Typo.meta).foregroundStyle(Theme.ink3).lineLimit(1)
-                        }
+                            .frame(width: 14)
+                        Text(entry.need.kind.tag).microLabel().frame(width: 62, alignment: .leading)
+                        Text("\(Text(entry.need.title).foregroundStyle(Theme.ink2))\(Text(entry.need.subtitle.map { " · \($0)" } ?? "").foregroundStyle(Theme.ink3))")
+                            .font(Theme.Typo.body).lineLimit(1)
                         Spacer(minLength: 8)
                         Text("cleared \(entry.clearedAt.map { PultikFormat.clock($0) } ?? "—")")
-                            .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink3)
+                            .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink3).fixedSize()
                     }
                     .padding(.horizontal, 6)
-                    .frame(height: 26)
+                    .frame(height: NowLine.height)
                 }
-            }
-        }
-    }
-}
-
-// MARK: - Hero
-
-/// The hero strip both styles lead with: the incident count, the four
-/// lanes (grouped incidents, raw signals labelled beside them), the CI day
-/// and the snapshot's age while restored needs still show.
-struct NowHero: View {
-    let queue: NowQueue
-    let now: Date
-    var ci: CIThroughput?
-    var ciHost: String?
-    var asOf: Date?
-    var compact = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 18) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(asOf.map { "Now · \(PultikFormat.asOf($0))" } ?? "Now · ranked").microLabel()
-                HStack(alignment: .lastTextBaseline, spacing: 8) {
-                    Text("\(queue.incidentCount)")
-                        .font(Theme.Typo.hero).foregroundStyle(Theme.ink)
-                        .contentTransition(.numericText()).animation(.snappy, value: queue.incidentCount)
-                    Text(queue.incidentCount == 1 ? "needs you" : "need you")
-                        .font(Theme.Typo.heroUnit).foregroundStyle(Theme.ink2)
-                }
-                .opacity(asOf == nil ? 1 : 0.6)
-                if !compact {
-                    Text("\(queue.needCount) signals grouped").font(Theme.Typo.meta).monospacedDigit()
-                        .foregroundStyle(Theme.ink2)
-                }
-            }
-            .frame(minWidth: 150, alignment: .leading)
-            ForEach(NowLane.allCases, id: \.self) { lane in
-                Rectangle().fill(Theme.hairline).frame(width: 1, height: 52)
-                laneCell(queue.summary(lane))
-            }
-            if let ci {
-                Rectangle().fill(Theme.hairline).frame(width: 1, height: 52)
-                ciCell(CIThroughputGlance(ci), jobs: ci.jobs)
-            }
-            Spacer(minLength: 0)
-        }
-        .kitTile()
-    }
-
-    private func laneCell(_ summary: NowLaneSummary) -> some View {
-        let lead = queue.rows.first { $0.lane == summary.lane }?.lead
-        return VStack(alignment: .leading, spacing: 3) {
-            Label(summary.lane.title, systemImage: summary.lane.symbol).labelStyle(.titleAndIcon).microLabel()
-            Text("\(summary.incidents)")
-                .font(Theme.Typo.stat)
-                .foregroundStyle(summary.incidents > 0 ? summary.lane.tone : Theme.ink3)
-            if !compact {
-                Group {
-                    if let lead {
-                        Text("\(lead.lead.title) · \(PultikFormat.age(now.timeIntervalSince(lead.onset.date)))")
-                    } else {
-                        Text("none")
-                    }
-                }
-                .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink2).lineLimit(1)
-                .frame(maxWidth: 170, alignment: .leading)
-                if summary.folded > 0 || summary.needs > summary.incidents {
-                    Text("\(summary.needs) signals\(summary.folded > 0 ? " · \(summary.folded) folded" : "")")
-                        .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink3).lineLimit(1)
-                }
-            }
-        }
-    }
-
-    private func ciCell(_ glance: CIThroughputGlance, jobs: Int) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(ciHost.map { "CI today · \($0)" } ?? "CI today").microLabel()
-            HStack(alignment: .lastTextBaseline, spacing: 4) {
-                Text("\(jobs)").font(Theme.Typo.stat).foregroundStyle(Theme.ink)
-                Text("jobs").font(Theme.Typo.meta).foregroundStyle(Theme.ink2)
-            }
-            if !compact, let delta = glance.delta {
-                Text("\(delta) vs yesterday").font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink2)
             }
         }
     }

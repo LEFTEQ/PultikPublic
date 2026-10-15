@@ -362,61 +362,59 @@ extension StatusPanelView {
 
     // MARK: - Home
 
-    /// Home (copilot shell D6): the Now queue in the style Settings picked —
-    /// the Now Line by default, Now first with the module tiles below.
-    @ViewBuilder
+    /// Home (vt-7727 D8): the Now column, the widgets beside it.
     var home: some View {
-        switch store.homeStyle {
-        case .nowLine:
-            NowLineView(model: nowHomeModel, onActivate: activateNow)
-        case .nowFirst:
-            NowFirstView(model: nowHomeModel, onActivate: activateNow) { homeTiles }
-        }
+        HomeView(model: nowHomeModel, widgets: homeWidgets, onActivate: activateNow) { homeWidget($0) }
     }
 
     var nowHomeModel: NowHomeModel {
         let now = NowStore.shared
         return NowHomeModel(queue: now.queue, rows: homeNowRows, handled: now.handled, selectedID: selectedID,
-                            expanded: nowExpanded, ci: store.ciDay?.throughput, ciHost: store.ciDay?.host,
-                            asOf: now.restoredAsOf,
-                            awaiting: now.awaitingFirstRead)
+                            expanded: nowExpanded, asOf: now.restoredAsOf, awaiting: now.awaitingFirstRead)
     }
 
-    /// Now first's tiles, side by side under the table: a tile hidden when
-    /// its backend is off the mesh — Production excepted while Hlídač is
+    /// The widgets drawn, in their one order: one sits out while its backend
+    /// has nothing true to say — Production excepted while Hlídač is
     /// configured, it reads blind rather than vanishing.
-    var homeTiles: some View {
-        HStack(alignment: .top, spacing: TileMetrics.gap) {
-            if showProdBoard || !store.prodConfigIssues.isEmpty || (!prodSentryLive && !railProdIssues.isEmpty) {
-                homeTile {
-                    ProdTile(glance: showProdBoard ? store.prodGlance : ProdGlance(cards: [], waiting: nil),
-                             configIssues: store.prodConfigIssues,
-                             sentryIssues: prodSentryLive ? [] : railProdIssues,
-                             isResolved: { resolvedStore.isResolved("prod:\($0.id)") },
-                             now: Date(), onOpen: { enterMode(.health, filter: $0) })
-                }
-            }
-            homeTile {
-                if store.pinned.isEmpty {
-                    emptyState.tileSurface()
-                } else {
-                    PRDigestTile(digest: homeDigest, expanded: $homeExpanded, selectedID: nil,
-                                 isResolved: { resolvedStore.isResolved($0) })
-                }
-            }
-            if CITile.isShown(store: store) {
-                homeTile { CITile(store: store, onOpen: { enterMode(.ci, filter: $0) }) }
-            }
-            if DevboxTile.isShown(store: store) {
-                homeTile { DevboxTile(store: store, onOpen: { enterMode(.devbox, filter: $0) }) }
+    var homeWidgets: [HomeWidget] {
+        HomeWidget.allCases.filter { widget in
+            switch widget {
+            case .prod: showProdBoard || !store.prodConfigIssues.isEmpty || (!prodSentryLive && !railProdIssues.isEmpty)
+            case .prs: true
+            case .ci: CITile.isShown(store: store)
+            case .devbox: DevboxTile.isShown(store: store)
+            case .estate: EstateTile.isShown(store: store)
+            case .mac: MacTile.isShown(store: store)
             }
         }
     }
 
-    private func homeTile(@ViewBuilder _ tile: () -> some View) -> some View {
-        ScrollView { tile() }
-            .scrollIndicators(.never)
-            .frame(maxWidth: .infinity)
+    @ViewBuilder
+    func homeWidget(_ widget: HomeWidget) -> some View {
+        switch widget {
+        case .prod:
+            ProdTile(glance: showProdBoard ? store.prodGlance : ProdGlance(cards: [], waiting: nil),
+                     configIssues: store.prodConfigIssues,
+                     sentryIssues: prodSentryLive ? [] : railProdIssues,
+                     isResolved: { resolvedStore.isResolved("prod:\($0.id)") },
+                     now: Date(), onOpen: { enterMode(.health, filter: $0) })
+        case .prs:
+            if store.pinned.isEmpty {
+                emptyState.frame(maxHeight: .infinity).tileSurface()
+            } else {
+                PRDigestTile(digest: homeDigest, expanded: $homeExpanded, selectedID: nil,
+                             isResolved: { resolvedStore.isResolved($0) })
+            }
+        case .ci:
+            CITile(store: store, onOpen: { enterMode(.ci, filter: $0) })
+        case .devbox:
+            DevboxTile(store: store, onOpen: { enterMode(.devbox, filter: $0) })
+        case .estate:
+            EstateTile(store: store, firing: estateFiring) { openObject(.estate, $0) }
+        case .mac:
+            // This Mac is Estate's (vt-7727 D1): the widget opens it, or a finding under it.
+            MacTile { openObject(.estate, $0 ?? PaletteMode.thisMac) }
+        }
     }
 
     // MARK: - Empty state

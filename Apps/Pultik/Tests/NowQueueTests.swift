@@ -210,28 +210,4 @@ final class NowQueueTests: XCTestCase {
         XCTAssertEqual(tombstone.moved(.down, in: laterStill)?.incidentKey, "vitrinka:exampleapp:task:1365")
         XCTAssertEqual(tombstone.moved(.up, in: laterStill)?.incidentKey, "fleet:mac:session:brainstorm")
     }
-
-    /// D12/D13: a rolling 24 h, linear to the break, the last 30 minutes ×N
-    /// on one monotonic transform; older onsets pin with their true age and
-    /// future deadlines are markers.
-    func testAxisIsRollingLinearThenMagnified() throws {
-        let axis = NowAxis(now: Self.now)
-        XCTAssertEqual(axis.x(axis.start), 0)
-        XCTAssertEqual(axis.x(Self.now), 1, accuracy: 1e-9)
-        let linearRate = NowAxis.linearShare / (NowAxis.window - NowAxis.magnifiedSpan)
-        let magnifiedRate = NowAxis.magnifiedShare / NowAxis.magnifiedSpan
-        XCTAssertEqual(magnifiedRate / linearRate, NowAxis.magnification, accuracy: 1e-9)
-
-        let samples = stride(from: -NowAxis.window, through: 0, by: 60).map { axis.x(Self.now.addingTimeInterval($0)) }
-        XCTAssertEqual(samples, samples.sorted())
-
-        XCTAssertEqual(axis.place(Self.at(2, 9, 0)), .pinned(age: Self.now.timeIntervalSince(Self.at(2, 9, 0))))
-        XCTAssertEqual(axis.place(Self.at(21, 0, 0)), .future(in: Self.at(21, 0, 0).timeIntervalSince(Self.now)))
-
-        let queue = NowQueue.build(needs: dataset(), now: Self.now)
-        let overdue = axis.bar(try XCTUnwrap(queue.incident("vitrinka:exampleapp:task:1365")))
-        XCTAssertTrue(overdue.pinned)
-        XCTAssertEqual(overdue.start, 0)
-        XCTAssertFalse(overdue.hollow)
-    }
 }

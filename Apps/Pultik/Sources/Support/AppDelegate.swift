@@ -1,4 +1,5 @@
 import AppKit
+import Links
 import SwiftUI
 
 /// Pultík owns its status item directly instead of using SwiftUI's `MenuBarExtra`.
@@ -284,21 +285,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return pendingProdKey
     }
 
-    /// A `pultik://` click: the panel opens (never toggles shut) on what the
-    /// link names, handed over like a prod notification's key. An unknown
-    /// link is logged and dropped.
+    /// A `pultik://` click from another app or a page. An unknown link is
+    /// logged and dropped (Packages/Links parses strictly).
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             guard let link = PultikLink(url) else {
                 NSLog("pultik: ignored link %@", url.absoluteString)
                 continue
             }
+            open(link)
+        }
+    }
+
+    /// The panel opens (never toggles shut) on what `link` names: a PR's
+    /// detail handed over like a prod notification's key, Prod on its
+    /// deployment, or a rail unfolded.
+    func open(_ link: PultikLink) {
+        switch link {
+        case .pr:
             pendingLink = link
             let wasVisible = panel?.isVisible == true
             if !wasVisible { togglePanel(nil) }
             if wasVisible {
                 NotificationCenter.default.post(name: .pultikOpenLink, object: nil)
             }
+        case let .prod(key):
+            showProd(key: key)
+        case let .panel(rail):
+            showPanel(unfolding: rail)
         }
     }
 
@@ -338,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "presented": panelSession.isPresented,
             "panelScreen": panel?.screen?.localizedName ?? "",
             "summonMilliseconds": debugLastSummonMilliseconds,
+            "semaforRequests": SemaforClient.requests.snapshot,
             "refreshing": store.isRefreshing,
             "todoCount": TodoStore.shared.openTodos.count,
             "inboxCount": store.inbox.count,

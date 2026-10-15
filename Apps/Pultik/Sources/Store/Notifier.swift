@@ -1,17 +1,18 @@
 import AppKit
 import Foundation
+import Links
 import UserNotifications
 
 enum Notifier {
     /// A notification whose click opens the panel with the Firing rail
     /// unfolded, rather than a web page. A URL string so it rides FocusGate's
     /// persisted queue unchanged.
-    static let firingPanelURL = "pultik://panel/firing"
+    static let firingPanelURL = PultikLink.panel(rail: "firing").url.absoluteString
 
     /// A prod notification's click: the panel on the `.h` matrix with this
     /// deployment expanded (AppDelegate.showProd).
     static func prodPanelURL(_ key: String) -> String {
-        "pultik://panel/prod/\(key)"
+        PultikLink.prod(key: key).url.absoluteString
     }
 
     typealias Interruption = NotificationContent.Interruption
@@ -66,11 +67,8 @@ enum Notifier {
                   let url = URL(string: string)
             else { return }
             await MainActor.run {
-                let path = url.pathComponents // ["/", "prod", "<key>"]
-                if url.scheme == "pultik", url.host() == "panel", path.count == 3, path[1] == "prod" {
-                    AppDelegate.shared?.showProd(key: path[2])
-                } else if url.scheme == "pultik", url.host() == "panel" {
-                    AppDelegate.shared?.showPanel(unfolding: url.lastPathComponent)
+                if let link = PultikLink(url) {
+                    AppDelegate.shared?.open(link)
                 } else {
                     NSWorkspace.shared.open(url)
                 }

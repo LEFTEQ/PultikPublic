@@ -28,7 +28,7 @@ extension NowAdapters {
                 lane: finding.stopSupported ? .waitingOnYou : .drifting, severity: severity,
                 onset: .exact(finding.since), title: finding.title, subtitle: finding.detail,
                 verb: finding.stopSupported ? NowVerb(title: "Stop…", destructive: true) : .open("Inspect finding"),
-                target: NowTarget(module: .mac, objectID: "finding:\(finding.id)"))
+                target: NowTarget(module: .estate, objectID: "finding:\(finding.id)"))
         }
         return NowRead(source: source, coverage: .complete, needs: needs)
     }

@@ -63,15 +63,17 @@ enum ModuleSignals {
                                             tone: firing.contains(where: \.critical) ? Theme.danger : Theme.warn)
         }
 
-        if let total = fanStore.diskTotalBytes, total > 0, let free = fanStore.diskFreeBytes {
+        // This Mac is one of Estate's machines (vt-7727 D1): its full disk or
+        // red findings speak for Estate while nothing is firing.
+        if signals[.estate] == nil, let total = fanStore.diskTotalBytes, total > 0, let free = fanStore.diskFreeBytes {
             let used = 1 - Double(free) / Double(total)
             if used >= 0.8 {
-                signals[.mac] = ModuleSignal(kind: .text("disk \(PultikFormat.percent(used))", symbol: nil),
-                                             tone: MeterBar.tone(used))
+                signals[.estate] = ModuleSignal(kind: .text("Mac disk \(PultikFormat.percent(used))", symbol: nil),
+                                                tone: MeterBar.tone(used))
             }
         }
-        if signals[.mac] == nil, let chip = macHealth.status.chip, chip.severity == .red {
-            signals[.mac] = ModuleSignal(kind: .text(chip.text, symbol: nil), tone: Theme.danger, help: chip.help)
+        if signals[.estate] == nil, let chip = macHealth.status.chip, chip.severity == .red {
+            signals[.estate] = ModuleSignal(kind: .text(chip.text, symbol: nil), tone: Theme.danger, help: chip.help)
         }
         return signals
     }

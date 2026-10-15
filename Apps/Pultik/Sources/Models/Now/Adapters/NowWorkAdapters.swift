@@ -18,7 +18,7 @@ extension NowAdapters {
                                  now: Date) -> NowRead {
         let source = NowSource(feed: .eveNotifications, identity: "\(origin)/\(account)")
         guard let alerts else { return failed(source) }
-        let floor = now.addingTimeInterval(-NowAxis.window)
+        let floor = now.addingTimeInterval(-NowWindow.span)
         let needs = alerts.compactMap { alert -> NowNeed? in
             guard lanes.contains(alert.category), let severity = alert.severity, alert.ts >= floor else { return nil }
             let key = "eve:\(origin):notification:\(alert.id)"

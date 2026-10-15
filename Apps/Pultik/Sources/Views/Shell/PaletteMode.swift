@@ -101,24 +101,30 @@ enum PaletteMode: String, CaseIterable {
         case .devbox: .devbox
         case .work: .work
         case .vit: .sessions
-        case .estate: .estate
-        case .mac, .fans: .mac
+        case .estate, .mac, .fans: .estate
         case .home: .home
         case .prs: .prs
         case .todos, .schedule, .prod, .boards, .issues, .notes, .organize: nil
         }
     }
 
-    /// Mac's fans and sensors object: `.f` enters Mac with its detail open.
+    /// This Mac's fans and sensors object: `.f` enters Estate with its detail open.
     static let macFans = "mac:fans"
+    /// This Mac in Estate's Machines (vt-7727 D1): `.m` opens it.
+    static let thisMac = "this-mac"
 
     /// The object entering through this alias opens, beyond the module itself.
     var opens: String? {
-        self == .fans ? Self.macFans : nil
+        switch self {
+        case .fans: Self.macFans
+        case .mac: Self.thisMac
+        default: nil
+        }
     }
 
     /// The mode a module filters through (its field hint, its `.x` token):
-    /// the module's own name, so Mac stays `.mac` though `.f` enters it too.
+    /// the module's own name, so Estate stays `.estate` though `.m` and `.f`
+    /// enter it too.
     static func alias(of module: PanelModule) -> PaletteMode? {
         allCases.first { $0.module == module && $0.opens == nil }
     }

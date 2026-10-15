@@ -382,6 +382,14 @@ struct ZFSUsage: Codable, Equatable {
     }
 }
 
+/// A machine's recent load for its detail (vt-7727 D9): each core's busy
+/// share now, and the last 24 h one point per 15 minutes. Memory only.
+struct MachineHistory: Equatable, Sendable {
+    let cores: [Double]
+    let day: [Double]
+    let fetchedAt: Date
+}
+
 extension FiringAlert {
     /// The `ServerMetrics.id` this alert is about, most specific first: a
     /// guest by `vm_host` + `instance`, a host by `instance`, else by

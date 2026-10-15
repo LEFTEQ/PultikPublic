@@ -121,15 +121,6 @@ extension StatusStore {
         mutate { $0.codeEditor = id }
     }
 
-    var homeStyle: HomeStyle {
-        preferences.homeStyle ?? .nowLine
-    }
-
-    /// Settings ▸ Panel ▸ Home; the default is written as absent.
-    func setHomeStyle(_ style: HomeStyle) {
-        mutate { $0.homeStyle = style == .nowLine ? nil : style }
-    }
-
     /// Settings ▸ Modules, normalized: every module once, Home first.
     var moduleSettings: [ModuleSetting] {
         Preferences.normalizedModules(preferences.modules)

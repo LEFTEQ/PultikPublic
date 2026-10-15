@@ -217,6 +217,14 @@ func TestReadSettingsRejectsWhatFailsTheAppsWholeDecode(t *testing.T) {
 	if _, err := readSettings([]byte(`{"hotkey":null,"notifyFiring":true,"externalBrightnessOffset":20,"someday":1}`)); err != nil {
 		t.Fatal(err)
 	}
+	// homeStyle retired with the Now Line (vt-7727): any string still
+	// reads, like leftRailSplit; only a wrong kind fails the app's decode.
+	if _, err := readSettings([]byte(`{"homeStyle":"nowLine","leftRailSplit":0.4}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSettings([]byte(`{"homeStyle":1}`)); err == nil {
+		t.Error(`{"homeStyle":1} passed, but Preferences.init(from:) throws on it`)
+	}
 }
 
 // The kind table must name every field Preferences.init(from:) decodes, with

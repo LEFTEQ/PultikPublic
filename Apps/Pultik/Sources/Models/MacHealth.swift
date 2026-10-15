@@ -266,7 +266,7 @@ enum MacHealthStatus: Equatable, Sendable {
         var lines = top.map { "\(MacHealthFormat.glyph($0.severity)) \($0.title)" }
         if health.findings.count > top.count { lines.append("+\(health.findings.count - top.count) more") }
         return MacHealthChip(severity: health.headline.severity, text: health.headline.text,
-                             help: (lines + ["", "Open Mac health — .mac"]).joined(separator: "\n"))
+                             help: (lines + ["", "Open This Mac in Estate — .m"]).joined(separator: "\n"))
     }
 }
 
