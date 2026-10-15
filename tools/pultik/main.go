@@ -53,6 +53,12 @@ type manifest struct {
 	VersionCmd  string   `yaml:"version_cmd"`
 	Version     string   `yaml:"version"`
 	NotesPaths  []string `yaml:"notes_paths"` // scope AI release notes to these paths (monorepos)
+	// Hold builds the app at the ship's version and never uploads it: an app on
+	// a release train before its first release.
+	Hold bool `yaml:"hold"`
+	// Apps makes the manifest a release train (monorepos): every entry ships at
+	// the top level's one version, inheriting its platform and channel.
+	Apps []manifest `yaml:"apps"`
 }
 
 type release struct {
@@ -188,6 +194,7 @@ USAGE
 
 SHIP FLAGS
   -f <file>          manifest path (default ./release.yaml)
+  --app <id>         ship one app of a release train (apps: in the manifest)
   --version <v>      override the manifest/derived version
   --channel <c>      override channel (default from manifest, else "stable")
   --notes <mode>     ai | editor | - (stdin) | literal text
@@ -219,6 +226,7 @@ func shipUsage() {
 
 FLAGS
   -f <file>          manifest path (default ./release.yaml)
+  --app <id>         ship one app of a release train
   --version <v>      override the manifest/derived version
   --channel <c>      override channel (default from manifest, else "stable")
   --notes <mode>     ai | editor | - (stdin) | literal text
@@ -228,7 +236,14 @@ FLAGS
   --dry-run          do everything except upload
   --yes              answer every prompt yes: accept the AI draft and ship
   --allow-overwrite  replace a version that is already on the counter
-  --json             result object on stdout, progress on stderr
+  --json             result object on stdout (an array for a train), progress on stderr
+
+RELEASE TRAIN (monorepos)
+  A manifest whose apps: lists several apps ships them all at its one
+  version (version_cmd at the top), each with its own build and artifact.
+  hold: true builds an app at that version and never uploads it — an app
+  on the train before its first release. Refusals and notes for every app
+  are settled before the first build.
 
 UNATTENDED (CI, hooks, agents)
   There is no terminal to ask, so pultik never opens an editor and never
@@ -243,36 +258,51 @@ UNATTENDED (CI, hooks, agents)
 
 // ── ship ────────────────────────────────────────────────────────────────────
 
+// shipOpts are the ship flags every app of a manifest shares.
+type shipOpts struct {
+	channel, notesMode                                         string
+	notesGiven, skipBuild, dryRun, yes, allowOverwrite, asJSON bool
+}
+
+// shipJob is one app of a ship, prepared before anything builds.
+type shipJob struct {
+	m       manifest
+	channel string
+	notes   string
+}
+
 func ship(args []string) error {
 	file := "./release.yaml"
-	var overrideVersion, channel, notesMode string
-	var skipBuild, dryRun, yes, allowOverwrite, asJSON bool
-	notesGiven := false
+	var overrideVersion, only string
+	var o shipOpts
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-f":
 			i++
 			file = arg(args, i, "-f")
+		case "--app":
+			i++
+			only = arg(args, i, "--app")
 		case "--version":
 			i++
 			overrideVersion = arg(args, i, "--version")
 		case "--channel":
 			i++
-			channel = arg(args, i, "--channel")
+			o.channel = arg(args, i, "--channel")
 		case "--notes":
 			i++
-			notesMode = arg(args, i, "--notes")
-			notesGiven = true
+			o.notesMode = arg(args, i, "--notes")
+			o.notesGiven = true
 		case "--skip-build":
-			skipBuild = true
+			o.skipBuild = true
 		case "--dry-run":
-			dryRun = true
+			o.dryRun = true
 		case "--yes":
-			yes = true
+			o.yes = true
 		case "--allow-overwrite":
-			allowOverwrite = true
+			o.allowOverwrite = true
 		case "--json":
-			asJSON = true
+			o.asJSON = true
 		case "--help", "-h":
 			shipUsage()
 			return nil
@@ -280,7 +310,7 @@ func ship(args []string) error {
 			return fmt.Errorf("unknown flag %q (see pultik ship --help)", args[i])
 		}
 	}
-	if asJSON {
+	if o.asJSON {
 		// stdout belongs to the result object from here on.
 		uiOut = os.Stderr
 	}
@@ -293,24 +323,13 @@ func ship(args []string) error {
 	if err := yaml.Unmarshal(raw, &m); err != nil {
 		return fmt.Errorf("parse %s: %w", file, err)
 	}
-	if m.App == "" || m.Artifact == "" {
-		return fmt.Errorf("%s must set at least `app` and `artifact`", file)
-	}
-	if !segmentRe.MatchString(m.App) {
-		return fmt.Errorf("app id %q must match %s", m.App, segmentRe)
-	}
-	if m.Name == "" {
-		m.Name = m.App
-	}
-	if channel == "" {
-		channel = m.Channel
-	}
-	if channel == "" {
-		channel = "stable"
+	apps, err := trainApps(m, file, only)
+	if err != nil {
+		return err
 	}
 	dir := filepath.Dir(file)
 
-	// Version: flag > version_cmd > manifest literal.
+	// Version: flag > version_cmd > manifest literal — one for the whole train.
 	version := overrideVersion
 	if version == "" && m.VersionCmd != "" {
 		out, err := shell(dir, m.VersionCmd)
@@ -330,31 +349,138 @@ func ship(args []string) error {
 		return fmt.Errorf("version %q must match %s", version, segmentRe)
 	}
 
+	// Every app's refusals and notes come before any app builds: a train's
+	// second app must not learn it has no notes source after the first one's
+	// notarized build.
+	jobs := make([]shipJob, 0, len(apps))
+	for _, a := range apps {
+		job, err := prepareShip(a, version, dir, o)
+		if err != nil {
+			return err
+		}
+		jobs = append(jobs, job)
+	}
+	results := make([]shipResult, 0, len(jobs))
+	for _, job := range jobs {
+		r, err := publishShip(job, version, dir, o)
+		if err != nil {
+			return err
+		}
+		results = append(results, r)
+	}
+	if o.asJSON {
+		if len(m.Apps) == 0 {
+			printShipJSON(results[0])
+		} else {
+			printShipJSON(results)
+		}
+	}
+	return nil
+}
+
+// trainApps is what a manifest ships: the manifest itself, or for a release
+// train (`apps:`) each entry with the top level's platform and channel filled
+// in. A train ships every app at its one version, so only the top level sets
+// one. only (--app) narrows the list to one app id.
+func trainApps(m manifest, file, only string) ([]manifest, error) {
+	apps := []manifest{m}
+	if len(m.Apps) > 0 {
+		if m.App != "" || m.Build != "" || m.Artifact != "" {
+			return nil, fmt.Errorf("%s: a release train sets `app`, `build` and `artifact` on each entry of `apps`, never at the top", file)
+		}
+		apps = make([]manifest, 0, len(m.Apps))
+		for _, a := range m.Apps {
+			if a.Version != "" || a.VersionCmd != "" {
+				return nil, fmt.Errorf("%s: %q sets a version, but a train's apps ship at the top level's one version", file, a.App)
+			}
+			if len(a.Apps) > 0 {
+				return nil, fmt.Errorf("%s: %q nests `apps` — a train is one level deep", file, a.App)
+			}
+			if a.Platform == "" {
+				a.Platform = m.Platform
+			}
+			if a.Channel == "" {
+				a.Channel = m.Channel
+			}
+			apps = append(apps, a)
+		}
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(apps))
+	for i := range apps {
+		a := &apps[i]
+		if a.App == "" || a.Artifact == "" {
+			return nil, fmt.Errorf("%s must set at least `app` and `artifact` (each entry of `apps`, for a train)", file)
+		}
+		if !segmentRe.MatchString(a.App) {
+			return nil, fmt.Errorf("app id %q must match %s", a.App, segmentRe)
+		}
+		if seen[a.App] {
+			return nil, fmt.Errorf("%s lists app %q twice", file, a.App)
+		}
+		seen[a.App] = true
+		ids = append(ids, a.App)
+		if a.Name == "" {
+			a.Name = a.App
+		}
+	}
+	if only == "" {
+		return apps, nil
+	}
+	for _, a := range apps {
+		if a.App == only {
+			return []manifest{a}, nil
+		}
+	}
+	return nil, fmt.Errorf("--app %q: %s ships %s", only, file, strings.Join(ids, ", "))
+}
+
+// prepareShip announces one app and settles what would otherwise fail after
+// its build: an overwrite refusal and the notes. A held app needs neither.
+func prepareShip(m manifest, version, dir string, o shipOpts) (shipJob, error) {
+	channel := o.channel
+	if channel == "" {
+		channel = m.Channel
+	}
+	if channel == "" {
+		channel = "stable"
+	}
 	fmt.Fprintf(uiOut, "%s%s %s%s %s%s · %s · %s%s\n", bold, m.Icon, m.Name, reset, cyan, version, m.Platform, channel, reset)
+	if m.Hold {
+		fmt.Fprintf(uiOut, "%s▸ held (hold: true) — built at %s, never uploaded%s\n", dim, version, reset)
+		return shipJob{m: m, channel: channel}, nil
+	}
 
 	// Refuse to quietly replace a published release. Re-running a ship after a
 	// mid-flight failure is normal; overwriting what users already downloaded
 	// is not — say so before the build, when it still costs nothing.
-	if !allowOverwrite && !dryRun && alreadyShipped(m.App, version) {
-		return fmt.Errorf("%s %s is already on the counter — bump the version, or pass --allow-overwrite to replace it", m.Name, version)
+	if !o.allowOverwrite && !o.dryRun && alreadyShipped(m.App, version) {
+		return shipJob{}, fmt.Errorf("%s %s is already on the counter — bump the version, or pass --allow-overwrite to replace it", m.Name, version)
 	}
 
 	// Notes BEFORE the build: a missing notes source used to surface only
 	// after the build had run, which on a notarized macOS app meant throwing
 	// away three minutes of Apple's time to learn that vi wasn't available.
-	notes, err := resolveNotes(notesMode, notesGiven, dir, m, version, yes)
+	notes, err := resolveNotes(o.notesMode, o.notesGiven, dir, m, version, o.yes)
 	if err != nil {
-		return err
+		return shipJob{}, err
 	}
+	return shipJob{m: m, channel: channel, notes: notes}, nil
+}
 
-	if m.Build != "" && !skipBuild {
+// publishShip builds one prepared app and puts it on the counter — unless it
+// is held or the ship is a dry run.
+func publishShip(job shipJob, version, dir string, o shipOpts) (shipResult, error) {
+	m, channel, notes := job.m, job.channel, job.notes
+	if m.Build != "" && !o.skipBuild {
 		step("build: " + m.Build)
 		cmd := exec.Command("sh", "-c", m.Build)
 		cmd.Dir = dir
-		cmd.Stdout = os.Stdout
+		// Progress, not the result: under --json stdout carries only the result object.
+		cmd.Stdout = uiOut
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("build failed: %w", err)
+			return shipResult{}, fmt.Errorf("%s: build failed: %w", m.App, err)
 		}
 		ok("built")
 	} else if m.Build != "" {
@@ -364,7 +490,7 @@ func ship(args []string) error {
 	// Artifact: newest glob match.
 	matches, err := filepath.Glob(filepath.Join(dir, m.Artifact))
 	if err != nil || len(matches) == 0 {
-		return fmt.Errorf("no artifact matches %s", m.Artifact)
+		return shipResult{}, fmt.Errorf("no artifact matches %s", m.Artifact)
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		fi, _ := os.Stat(matches[i])
@@ -377,11 +503,11 @@ func ship(args []string) error {
 	artifact := matches[0]
 	info, err := os.Stat(artifact)
 	if err != nil {
-		return err
+		return shipResult{}, err
 	}
 	sum, err := fileSha256(artifact)
 	if err != nil {
-		return err
+		return shipResult{}, err
 	}
 	ok("artifact %s (%s, sha256 %s…)", filepath.Base(artifact), humanSize(info.Size()), sum[:12])
 
@@ -391,10 +517,10 @@ func ship(args []string) error {
 	if m.IconFile != "" {
 		iconPath = filepath.Join(dir, m.IconFile)
 		if _, err := os.Stat(iconPath); err != nil {
-			return fmt.Errorf("icon_file: %w", err)
+			return shipResult{}, fmt.Errorf("icon_file: %w", err)
 		}
 		if !strings.EqualFold(filepath.Ext(iconPath), ".png") {
-			return fmt.Errorf("icon_file must be a PNG (square, full-bleed, ≥256px)")
+			return shipResult{}, fmt.Errorf("icon_file must be a PNG (square, full-bleed, ≥256px)")
 		}
 		ok("icon %s", m.IconFile)
 	} else {
@@ -411,82 +537,86 @@ func ship(args []string) error {
 		rel.IconFile = "icon.png"
 	}
 
+	if m.Hold {
+		fmt.Fprintf(uiOut, "%s▸ %s %s held — built, not uploaded%s\n", dim, m.Name, version, reset)
+		return newShipResult(rel, artifact, o.dryRun, true), nil
+	}
 	fmt.Fprintf(uiOut, "\n%s%s %s %s%s → %s/%s\n", bold, m.Icon, m.Name, version, reset, baseURL(), m.App)
 	if notes != "" {
 		fmt.Fprintf(uiOut, "%s%s%s\n", dim, indent(notes), reset)
 	}
-	if dryRun {
+	if o.dryRun {
 		fmt.Fprintf(uiOut, "%s▸ dry run — nothing uploaded%s\n", dim, reset)
-		if asJSON {
-			printResult(rel, artifact, true)
-		}
-		return nil
+		return newShipResult(rel, artifact, true, false), nil
 	}
-	if !yes {
+	if !o.yes {
 		if !interactive() {
-			return fmt.Errorf("nothing to confirm with — no terminal on stdin; pass --yes to ship unattended")
+			return shipResult{}, fmt.Errorf("nothing to confirm with — no terminal on stdin; pass --yes to ship unattended")
 		}
-		if !confirm("ship it?") {
-			return fmt.Errorf("aborted")
+		if !confirm("ship " + m.Name + "?") {
+			return shipResult{}, fmt.Errorf("aborted")
 		}
 	}
 
 	token, err := readToken()
 	if err != nil {
-		return err
+		return shipResult{}, err
 	}
 	step("uploading artifact")
 	if err := putFile(token, fmt.Sprintf("%s/api/releases/%s/%s/artifact/%s", baseURL(), m.App, version, rel.Artifact), artifact); err != nil {
-		return err
+		return shipResult{}, err
 	}
 	if iconPath != "" {
 		step("uploading icon")
 		if err := putFile(token, fmt.Sprintf("%s/api/releases/%s/%s/artifact/icon.png", baseURL(), m.App, version), iconPath); err != nil {
-			return err
+			return shipResult{}, err
 		}
 	}
 	step("publishing release")
 	body, _ := json.Marshal(rel)
 	if err := putJSON(token, fmt.Sprintf("%s/api/releases/%s/%s", baseURL(), m.App, version), body); err != nil {
-		return err
+		return shipResult{}, err
 	}
 	ok("shipped — it's on the counter")
 	fmt.Fprintf(uiOut, "\n  %smarketplace%s  %s/\n  %sdirect%s       %s/releases/%s/%s/%s\n  %sstable%s       %s/get/%s\n",
 		dim, reset, baseURL(),
 		dim, reset, baseURL(), m.App, version, rel.Artifact,
 		dim, reset, baseURL(), m.App)
-	if asJSON {
-		printResult(rel, artifact, false)
-	}
-	return nil
+	return newShipResult(rel, artifact, false, false), nil
 }
 
-// printResult is the machine-readable half of a ship: everything a caller
-// would otherwise have to scrape out of decorated prose.
-func printResult(rel release, artifactPath string, dryRun bool) {
-	out := struct {
-		release
-		ArtifactPath string `json:"artifact_path"`
-		DryRun       bool   `json:"dry_run"`
-		Download     string `json:"download"`
-		Stable       string `json:"stable"`
-		Page         string `json:"page"`
-	}{
+// shipResult is the machine-readable half of a ship: everything a caller
+// would otherwise have to scrape out of decorated prose. A train prints one
+// per app, as an array.
+type shipResult struct {
+	release
+	ArtifactPath string `json:"artifact_path"`
+	DryRun       bool   `json:"dry_run"`
+	Held         bool   `json:"held,omitempty"`
+	Download     string `json:"download"`
+	Stable       string `json:"stable"`
+	Page         string `json:"page"`
+}
+
+func newShipResult(rel release, artifactPath string, dryRun, held bool) shipResult {
+	return shipResult{
 		release:      rel,
 		ArtifactPath: artifactPath,
 		DryRun:       dryRun,
+		Held:         held,
 		Download:     fmt.Sprintf("%s/releases/%s/%s/%s", baseURL(), rel.App, rel.Version, rel.Artifact),
 		Stable:       fmt.Sprintf("%s/get/%s", baseURL(), rel.App),
 		Page:         fmt.Sprintf("%s/%s", baseURL(), rel.App),
 	}
-	b, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
+}
+
+// printShipJSON prints the result through doctor's printJSON.
+func printShipJSON(v any) {
+	if err := printJSON(v); err != nil {
 		// Nothing recoverable here, but the ship itself already succeeded —
 		// say so on stderr rather than pretending the release didn't happen.
 		fmt.Fprintf(os.Stderr, "%s✕ result json: %v%s\n", red, err, reset)
-		return
 	}
-	fmt.Println(string(b))
 }
 
 // alreadyShipped reports whether this exact version is on the counter. It

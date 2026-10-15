@@ -15,7 +15,7 @@ import (
 
 func goldenDigest(t *testing.T) []byte {
 	t.Helper()
-	digest, err := os.ReadFile(filepath.Join("..", "..", "Tests", "Fixtures", "hlidac-digest.json"))
+	digest, err := os.ReadFile(filepath.Join("..", "..", "Apps", "Pultik", "Tests", "Fixtures", "hlidac-digest.json"))
 	if err != nil {
 		t.Fatalf("golden digest: %v", err)
 	}
@@ -23,7 +23,7 @@ func goldenDigest(t *testing.T) []byte {
 }
 
 // fixtureHlidac serves the golden digest every repo of the prod-watch
-// contract tests against (Tests/Fixtures/hlidac-digest.json), optionally
+// contract tests against (Apps/Pultik/Tests/Fixtures/hlidac-digest.json), optionally
 // edited by mutate.
 func fixtureHlidac(t *testing.T, mutate ...func(map[string]any)) *httptest.Server {
 	t.Helper()
@@ -241,7 +241,7 @@ func TestDecodePointerMirrorsReleaseSources(t *testing.T) {
 }
 
 func TestTopLevelKindsMatchPreferencesSwift(t *testing.T) {
-	src, err := os.ReadFile("../../Sources/Store/Preferences.swift")
+	src, err := os.ReadFile("../../Apps/Pultik/Sources/Store/Preferences.swift")
 	if err != nil {
 		t.Fatal(err)
 	}

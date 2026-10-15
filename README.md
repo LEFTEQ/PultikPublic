@@ -11,7 +11,8 @@ generated files.
 
 ## Build
 
-Requires macOS 14+, Xcode, and Tuist:
+Requires macOS 26+, Xcode, and Tuist. The app lives in `Apps/Pultik/`; the root
+`Workspace.swift` generates its workspace:
 
 ```sh
 tuist generate --no-open

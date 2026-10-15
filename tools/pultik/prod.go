@@ -43,7 +43,7 @@ const (
 
 // shippedProdPointers mirrors Preferences.defaultProdPointers: a project
 // whose `prod` key is absent gets these on the app's first load; an explicit
-// [] means none. Keep in step with Sources/Store/Preferences.swift.
+// [] means none. Keep in step with Apps/Pultik/Sources/Store/Preferences.swift.
 var shippedProdPointers = map[string][]prodPointer{
 	"exampleapp": {{Key: "exampleapp-prod", Title: "ExampleApp prod", Tier: "critical", Order: intPtr(1)}},
 	"eve":   {{Key: "eve-exampleapp-prod", Title: "eve · ExampleApp", Tier: "critical", Order: intPtr(2)}},
@@ -73,7 +73,7 @@ var prodKeyRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 var prodTiers = map[string]bool{"critical": true, "important": true, "watch": true}
 
-// prodPointer mirrors the app's ProdPointer (Sources/Models/Models.swift).
+// prodPointer mirrors the app's ProdPointer (Apps/Pultik/Sources/Models/Models.swift).
 type prodPointer struct {
 	Key     string          `json:"key"`
 	Title   string          `json:"title,omitempty"`
@@ -82,7 +82,7 @@ type prodPointer struct {
 	Release []releaseSource `json:"release,omitempty"`
 }
 
-// releaseSource mirrors GitHubRelease.Source (Sources/API/GitHubRelease.swift):
+// releaseSource mirrors GitHubRelease.Source (Apps/Pultik/Sources/API/GitHubRelease.swift):
 // the GitHub environment a deployment's release line is read from.
 type releaseSource struct {
 	Repo        string `json:"repo"`
@@ -284,7 +284,7 @@ type validateReport struct {
 }
 
 // readSettings decodes settings.json the way the app does
-// (Sources/Models/Models.swift ProjectSpec + LossyArray, Preferences):
+// (Apps/Pultik/Sources/Models/Models.swift ProjectSpec + LossyArray, Preferences):
 //   - a shape that fails the whole Preferences decode is an error (exit 5):
 //     a top-level field of the wrong JSON kind (topLevelKinds); the element
 //     shapes of displayPresets, expiryWatch, fanCurves and workspaces are
@@ -493,7 +493,8 @@ var topLevelKinds = map[string]jsonKind{
 	"vaultPath": kindString, "todoProject": kindString, "codeEditor": kindString, "collapsedRails": kindStringArray,
 	"leftRailTab": kindString, "leftRailSplit": kindNumber, "vitrinkaWorkspace": kindString,
 	"workspaces": kindObject, "displayPresets": kindArray, "externalBrightnessOffset": kindInteger,
-	"dimBrightness": kindNumber, "neverSleep": kindBool,
+	"dimBrightness": kindNumber, "neverSleep": kindBool, "codeUnwrapped": kindBool,
+	"modules": kindArray, "homeAfterMinutes": kindInteger,
 }
 
 func checkTopLevelKinds(top map[string]json.RawMessage) error {
