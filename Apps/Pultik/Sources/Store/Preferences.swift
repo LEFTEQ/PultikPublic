@@ -163,6 +163,12 @@ struct Preferences: Codable {
     /// ⌥Z in a diff turned wrapping off (PR workbench D9): true while long
     /// lines run past the edge. Absent (never false) while they wrap.
     var codeUnwrapped: Bool?
+    /// The code theme Settings ▸ Code picked (workbench WP4), a
+    /// `Packages/Theme` id. Absent until one is picked: the default draws
+    /// (`CodePreferences.defaultThemes`). An id this build does not know (a
+    /// hand edit, a newer build's theme) also draws the default and is kept
+    /// as written, so no migration touches it.
+    var codeTheme: String?
 
     /// Right-rail sections the user has folded shut. Collapse is a preference,
     /// not session state — the rail reopens the way you left it. The vitals
@@ -502,6 +508,7 @@ struct Preferences: Codable {
         dimBrightness = try container.decodeIfPresent(Double.self, forKey: .dimBrightness)
         neverSleep = try container.decodeIfPresent(Bool.self, forKey: .neverSleep)
         codeUnwrapped = try container.decodeIfPresent(Bool.self, forKey: .codeUnwrapped)
+        codeTheme = try container.decodeIfPresent(String.self, forKey: .codeTheme)
     }
 
     /// The shape for `id`: the user's edit if there is one, otherwise the

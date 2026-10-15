@@ -10,7 +10,7 @@ struct SettingsWindowView: View {
     /// Sidebar rows. `nil` selection can't happen (the list starts on
     /// `.general`), but NavigationSplitView insists on Optional anyway.
     enum Pane: String, CaseIterable, Identifiable, Hashable {
-        case general, fans, displays, panel, modules, integrations
+        case general, fans, displays, panel, modules, code, integrations
 
         var id: String { rawValue }
 
@@ -21,6 +21,7 @@ struct SettingsWindowView: View {
             case .displays: "Displays"
             case .panel: "Panel"
             case .modules: "Modules"
+            case .code: "Code"
             case .integrations: "Integrations"
             }
         }
@@ -32,6 +33,7 @@ struct SettingsWindowView: View {
             case .displays: "sun.max"
             case .panel: "rectangle.3.group"
             case .modules: "square.grid.3x3"
+            case .code: "chevron.left.forwardslash.chevron.right"
             case .integrations: "link"
             }
         }
@@ -44,6 +46,7 @@ struct SettingsWindowView: View {
             case .displays: .yellow
             case .panel: .indigo
             case .modules: .teal
+            case .code: .purple
             case .integrations: .orange
             }
         }
@@ -74,6 +77,7 @@ struct SettingsWindowView: View {
             case .displays: DisplaysPane()
             case .panel: PanelPane(store: store)
             case .modules: ModulesPane(store: store)
+            case .code: CodePane()
             case .integrations: IntegrationsPane(store: store)
             }
         }
