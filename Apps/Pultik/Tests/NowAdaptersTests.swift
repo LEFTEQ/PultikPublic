@@ -86,6 +86,18 @@ final class NowAdaptersTests: XCTestCase {
 
     /// A ruler that did not answer leaves its rules missing, not resolved:
     /// the read is partial, so the ledger keeps the firing need open.
+    /// vt-7727 AC 5: Mac joined Estate, so This Mac's findings open there,
+    /// on the finding's own row under This Mac.
+    func testMacFindingsLandOnEstate() throws {
+        let finding = NowInputs.MacFinding(id: "f1", severity: .red, title: "Agent shell left running",
+                                           detail: "claude ×3", since: now.addingTimeInterval(-3600), stopSupported: true)
+        let read = NowAdapters.macFindings(NowInputs.MacReport(generatedAt: now, findings: [finding]),
+                                           machine: "mac", now: now)
+        let target = try XCTUnwrap(read.needs.first?.target)
+        XCTAssertEqual(target.module, .estate)
+        XCTAssertEqual(target.objectID, "finding:f1")
+    }
+
     func testSilentRulerNeverClearsAFiringNeed() throws {
         let firing = FiringAlert(name: "LokiErrors", state: "firing", severity: "critical", summary: nil,
                                  description: nil, labels: ["alertname": "LokiErrors", "app": "exampleapp"],

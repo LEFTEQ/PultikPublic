@@ -46,7 +46,7 @@ struct SessionsPage: View {
     /// The watched lanes' notifications inside Now's window: the ones Now's
     /// rows open.
     private var notifications: [EveAlert] {
-        let floor = Date().addingTimeInterval(-NowAxis.window)
+        let floor = Date().addingTimeInterval(-NowWindow.span)
         return store.visibleAlerts.filter { $0.ts >= floor && matches([$0.title, $0.flow, $0.category]) }
     }
 
@@ -192,6 +192,7 @@ extension SessionsPage: ModulePage {
         let now = Date()
         let stale = fleet.isStale(now: now)
         let asOf = fleet.snapshot.map { "as of \(PultikFormat.clock($0.generatedAt))" } ?? "not publishing"
+        let shell = SessionShell.installed
         let sessions = { (session: FleetSession) -> ModuleObject in
             var facts = [ModuleObject.Fact(label: "project", value: session.project),
                          .init(label: "directory", value: session.cwd),
@@ -211,6 +212,16 @@ extension SessionsPage: ModulePage {
             if session.actions.contains(.focus) {
                 verbs.append(DetailVerb(title: "Focus", symbol: "macwindow", role: .primary,
                                         help: "Bring cmux to this session's surface") { fleet.focus(session) })
+            }
+            // The fleet cannot say which shell runs a session, so the agent
+            // shell is offered wherever it is installed; it leads where cmux
+            // cannot focus the session (workbench WP6).
+            if let shell = shell {
+                verbs.append(DetailVerb(title: "Open in \(shell.name)", symbol: "point.3.connected.trianglepath.dotted",
+                                        role: session.actions.contains(.focus) ? .normal : .primary,
+                                        help: "Fly \(shell.name)'s canvas to this session") {
+                    SessionShell.open(session.sessionId, in: shell)
+                })
             }
             return ModuleObject(id: Self.objectID(session), title: session.name ?? session.project,
                                 label: session.project, status: status, meta: Self.meta(session, now: now),

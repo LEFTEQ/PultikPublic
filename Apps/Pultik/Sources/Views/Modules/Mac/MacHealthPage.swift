@@ -1,14 +1,14 @@
 import SwiftUI
 
-/// The Mac module's list (spec 2026-10-04, WP8): the machine line, the
-/// fans and sensors as the first object (`.f` opens it), then what on this
-/// Mac is probably not needed — the whole Mac's memory as a square treemap
-/// beside the findings, worst first, each with its evidence and, where
-/// toolkit allows it, a Stop… that asks before it runs — and the last
-/// minute's network. Never Sleep and the display-preset cycle are the
-/// header's verbs. The report is toolkit's as published; the page computes
-/// nothing but layout. The filter matches a finding, a family, a talker,
-/// and the fans detail's sensors.
+/// This Mac in Estate (spec 2026-10-04; joined Estate in vt-7727 D1): the
+/// view is This Mac's detail — toolkit's machine line, the whole Mac's
+/// memory as a square treemap beside the last minute's network, Never
+/// Sleep and the display-preset cycle as its verbs — and the type is the
+/// provider Machines draws its rows from: the fans and sensors object
+/// (`.f` opens it), the findings worst first (`MacFindingsSection`), their
+/// bulk Stop… and their details. The report is toolkit's as published; it
+/// computes nothing but layout. The filter matches a finding, a family, a
+/// talker, and the fans detail's sensors.
 struct MacHealthPage: View {
     let health: MacHealthStore
     var fanStore: FanStore = .shared
@@ -20,8 +20,6 @@ struct MacHealthPage: View {
     var onOpen: (String) -> Void = { _ in }
     var now: () -> Date = Date.init
 
-    @State private var stops: [String: MacHealthStopState] = [:]
-
     private static let treemapSide: CGFloat = 272
 
     private var text: String {
@@ -32,86 +30,50 @@ struct MacHealthPage: View {
         text.isEmpty || fields.contains { $0?.localizedCaseInsensitiveContains(text) == true }
     }
 
+    /// This Mac's detail (vt-7727 D9): the header's verbs, toolkit's machine
+    /// line, the memory treemap beside the network, then any partial-read
+    /// diagnostics. The findings are rows of Estate's list (`MacFindingsSection`).
     var body: some View {
-        SelectionScrollView(selection: selectedID) {
-            VStack(alignment: .leading, spacing: 2) {
-                header
-                switch health.status {
-                case .hidden:
-                    RailNote("No Mac health report — toolkit watch serve publishes one every minute")
-                        .padding(.top, 6)
-                case let .stale(report):
-                    RailNote("toolkit watch is not publishing — last report \(report.generatedAt.shortAge(relativeTo: now())) ago")
-                        .padding(.top, 6)
-                case let .fresh(report):
-                    machineStrip(report.machine)
-                }
-                if fansShown {
-                    let id = PaletteMode.macFans
-                    ListRow(title: "Fans & sensors", id: fanStore.isSimulated ? "simulated" : nil,
-                            meta: Text(verbatim: fansMeta), selected: selectedID == id, action: { onOpen(id) }) {
-                        Image(systemName: "fanblades")
-                            .font(.system(size: 12))
-                            .foregroundStyle(fanStore.heldRPM.isEmpty ? Theme.ink2 : Theme.warn)
-                            .frame(width: 20)
-                    }
-                    .id(id)
-                    .padding(.bottom, 8)
-                }
-                if let report = health.status.fresh {
-                    HStack(alignment: .top, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            memory(report)
-                            network(report)
-                        }
+        VStack(alignment: .leading, spacing: 10) {
+            verbs
+            switch health.status {
+            case .hidden:
+                RailNote("No Mac health report — toolkit watch serve publishes one every minute")
+            case let .stale(report):
+                RailNote("toolkit watch is not publishing — last report \(report.generatedAt.shortAge(relativeTo: now())) ago")
+            case let .fresh(report):
+                machineStrip(report.machine)
+                HStack(alignment: .top, spacing: 16) {
+                    memory(report)
                         .frame(width: Self.treemapSide)
-                        findings(report)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(.horizontal, 8)
-                    diagnostics(report)
+                    network(report)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                diagnostics(report)
             }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 12)
         }
-        #if DEBUG
-        // Hands-off QA opens a row's confirm; only a click ever confirms it.
-        .onReceive(NotificationCenter.default.publisher(for: PanelDriver.paletteNotification)) { note in
-            guard note.userInfo?["cmd"] as? String == "mac-stop", let id = note.userInfo?["text"] as? String,
-                  health.status.fresh?.findings.contains(where: { $0.id == id && $0.stop.supported }) == true
-            else { return }
-            stops[id] = .confirming
-        }
-        #endif
     }
 
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("This Mac")
-                .font(Theme.Typo.title)
+    /// As of · Never Sleep · the display-preset cycle.
+    private var verbs: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             if let report = health.status.fresh {
                 Text(report.headline.text.isEmpty ? "nothing flagged" : report.headline.text)
                     .font(Theme.Typo.figure)
                     .foregroundStyle(report.headline.text.isEmpty ? Theme.ink2 : tone(report.headline.severity))
                     .lineLimit(1)
-            }
-            Spacer()
-            if let report = health.status.fresh {
                 Text("as of \(PultikFormat.clock(report.generatedAt))")
                     .font(Theme.Typo.meta)
                     .monospacedDigit()
                     .foregroundStyle(Theme.ink3)
                     .help("When toolkit published this report — CPU and network average the \(report.windowSeconds) s before it")
             }
+            Spacer()
             MacAwakeVerb(awake: AwakeStore.shared)
             if BrightnessStore.shared.isAvailable {
                 MacPresetVerb(brightness: BrightnessStore.shared)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
     }
 
     /// `2 fans · 2400 rpm · auto · 62 °C hottest`.
@@ -221,28 +183,6 @@ struct MacHealthPage: View {
         }
     }
 
-    private func findings(_ report: MacHealth) -> some View {
-        let rows = findingRows(report)
-        return VStack(alignment: .leading, spacing: 4) {
-            Kicker(text: "Findings", count: rows.count,
-                   tone: rows.first.map { tone($0.severity) } ?? .secondary)
-            if rows.isEmpty {
-                RailNote(report.findings.isEmpty ? "Nothing flagged — every process has an owner" : "No match")
-            }
-            ForEach(rows) { finding in
-                let id = Self.objectID(finding)
-                MacHealthFindingRow(finding: finding, markID: id, now: now(),
-                                    state: stops[finding.id],
-                                    selected: selectedID == id,
-                                    onOpen: { onOpen(id) },
-                                    onAsk: { stops[finding.id] = .confirming },
-                                    onCancel: { stops[finding.id] = nil },
-                                    onConfirm: { stop(finding) })
-                    .id(id)
-            }
-        }
-    }
-
     @ViewBuilder
     private func diagnostics(_ report: MacHealth) -> some View {
         if !report.diagnostics.isEmpty {
@@ -259,6 +199,51 @@ struct MacHealthPage: View {
         }
     }
 
+    private func tone(_ severity: MacHealth.Severity) -> Color {
+        MacHealthTone.color(severity)
+    }
+}
+
+/// This Mac's findings as rows of Estate's Machines list (vt-7727 D1), worst
+/// first, each with its evidence and, where toolkit allows it, a Stop… that
+/// asks before it runs. Markable: bulk Stop… takes them (bulk D4).
+struct MacFindingsSection: View {
+    let page: MacHealthPage
+    @State private var stops: [String: MacHealthStopState] = [:]
+
+    var body: some View {
+        if let report = page.health.status.fresh {
+            let rows = page.findingRows(report)
+            VStack(alignment: .leading, spacing: 4) {
+                Kicker(text: "This Mac · findings", count: rows.count,
+                       tone: rows.first.map { MacHealthTone.color($0.severity) } ?? .secondary)
+                if rows.isEmpty {
+                    RailNote(report.findings.isEmpty ? "Nothing flagged — every process has an owner" : "No match")
+                }
+                ForEach(rows) { finding in
+                    let id = MacHealthPage.objectID(finding)
+                    MacHealthFindingRow(finding: finding, markID: id, now: page.now(),
+                                        state: stops[finding.id],
+                                        selected: page.selectedID == id,
+                                        onOpen: { page.onOpen(id) },
+                                        onAsk: { stops[finding.id] = .confirming },
+                                        onCancel: { stops[finding.id] = nil },
+                                        onConfirm: { stop(finding) })
+                        .id(id)
+                }
+            }
+            #if DEBUG
+            // Hands-off QA opens a row's confirm; only a click ever confirms it.
+            .onReceive(NotificationCenter.default.publisher(for: PanelDriver.paletteNotification)) { note in
+                guard note.userInfo?["cmd"] as? String == "mac-stop", let id = note.userInfo?["text"] as? String,
+                      page.health.status.fresh?.findings.contains(where: { $0.id == id && $0.stop.supported }) == true
+                else { return }
+                stops[id] = .confirming
+            }
+            #endif
+        }
+    }
+
     private func stop(_ finding: MacHealth.Finding) {
         guard let argv = finding.stop.argv, stops[finding.id] == .confirming else { return }
         stops[finding.id] = .running
@@ -266,24 +251,16 @@ struct MacHealthPage: View {
             let names = Dictionary(finding.processes.map { ($0.pid, $0.name) }) { first, _ in first }
             let outcome = await MacHealthStop.run(argv, names: names)
             stops[finding.id] = .done(outcome)
-            health.reread()
+            page.health.reread()
         }
-    }
-
-    private func tone(_ severity: MacHealth.Severity) -> Color {
-        MacHealthTone.color(severity)
     }
 }
 
 /// The fans (`PaletteMode.macFans`), then the findings worst first, as
-/// drawn. Stop… stays on the row behind its confirmation; a finding's
-/// detail is read-only, the fans' detail is the fan deck.
-extension MacHealthPage: ModulePage {
+/// Machines draws them. Stop… stays on the row behind its confirmation; a
+/// finding's detail is read-only, the fans' detail is the fan deck.
+extension MacHealthPage {
     static func objectID(_ finding: MacHealth.Finding) -> String { "finding:\(finding.id)" }
-
-    /// The 272 pt treemap column beside findings that still read.
-    var listWidth: CGFloat { 580 }
-    var minListWidth: CGFloat { 580 }
 
     /// Stop on every marked finding toolkit allows it for (bulk D4): one
     /// `macwatch stop` call for all their processes, each finding told its
@@ -347,7 +324,7 @@ extension MacHealthPage: ModulePage {
         }
     }
 
-    private var fansObject: ModuleObject {
+    var fansObject: ModuleObject {
         let status = if fanStore.isSimulated {
             Chip("simulated", .dashed)
         } else {

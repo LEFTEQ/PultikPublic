@@ -1,13 +1,5 @@
 import Foundation
 
-/// Home's two drawings of the one Now queue (copilot shell D6).
-enum HomeStyle: String, Codable, CaseIterable, Sendable {
-    /// Every need a bar running into now, in four lanes, beside the ranked list.
-    case nowLine
-    /// The ranked Now table first, module tiles below it.
-    case nowFirst
-}
-
 /// Pultík's durable settings.
 ///
 /// Stored as JSON in Application Support rather than `UserDefaults`: the
@@ -72,9 +64,10 @@ struct Preferences: Codable {
     /// the rail and the icon's badge still show it.
     var notifyFiring: Bool = true
 
-    /// What ⌥Space opens on while nothing is typed (copilot shell D6):
-    /// Settings ▸ Panel. Nil = the Now Line.
-    var homeStyle: HomeStyle?
+    /// Retired 2026-10-15 with the Now Line (Home has one shape, D8 of
+    /// `docs/specs/2026-10-15-home-estate-timelines-decisions.md`); decoded
+    /// and re-encoded like `leftRailTab`, never read.
+    var homeStyle: String?
 
     /// Settings ▸ Modules (stay in Pultík D4, N1): the strip's order and ⌘1–9
     /// (Home first), the bodies kept hot while the panel is up, and each
@@ -483,8 +476,7 @@ struct Preferences: Codable {
         visibleAlertLanes = try container.decodeIfPresent([String].self, forKey: .visibleAlertLanes)
             ?? Preferences.defaultAlertLanes
         notifyFiring = try container.decodeIfPresent(Bool.self, forKey: .notifyFiring) ?? true
-        // An unknown style is a newer build's: read it as the default.
-        homeStyle = try container.decodeIfPresent(String.self, forKey: .homeStyle).flatMap(HomeStyle.init(rawValue:))
+        homeStyle = try container.decodeIfPresent(String.self, forKey: .homeStyle)
         modules = try container.decodeIfPresent(LossyArray<ModuleSetting>.self, forKey: .modules)?.elements
         homeAfterMinutes = try container.decodeIfPresent(Int.self, forKey: .homeAfterMinutes)
         activeFanCurve = try container.decodeIfPresent(String.self, forKey: .activeFanCurve)

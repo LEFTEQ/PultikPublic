@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Home's Production tile (panel Home D2/D7, 2026-10-07): the prod board
-/// given room — every deployment card in a grid (3 + 2 on a wide panel) with
-/// taller 24 h bars. Same cards, same verdicts as the rail: they only format
+/// Home's Production widget (vt-7727 D8): one dense line per deployment —
+/// its verdict, tier and the day's counts, its check chips while it is not
+/// green. Same cards, same verdicts as the rail: they only format
 /// `ProdGlance`, and a blind deployment still reads "blind since HH:MM",
 /// never hidden and never green. A card opens `.h <key>`.
 struct ProdTile: View {
@@ -13,8 +13,6 @@ struct ProdTile: View {
     let isResolved: (ProdIssue) -> Bool
     let now: Date
     let onOpen: (String) -> Void
-
-    private let columns = [GridItem(.adaptive(minimum: 236), spacing: 8, alignment: .top)]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -35,16 +33,21 @@ struct ProdTile: View {
                 .help("The prod board reads Hlídač's digest; nothing has answered yet.")
             }
             if !glance.cards.isEmpty {
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-                    ForEach(glance.cards) { card in
-                        ProdCardView(card: card, now: now, barHeight: 22) { onOpen(card.key) }
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(glance.cards) { card in
+                            ProdCardView(card: card, now: now, action: { onOpen(card.key) }, dense: true)
+                        }
+                        if !sentryIssues.isEmpty {
+                            ProdRail(issues: sentryIssues, isResolved: isResolved)
+                        }
                     }
                 }
-            }
-            if !sentryIssues.isEmpty {
+            } else if !sentryIssues.isEmpty {
                 ProdRail(issues: sentryIssues, isResolved: isResolved)
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
         .tileSurface()
     }
 }

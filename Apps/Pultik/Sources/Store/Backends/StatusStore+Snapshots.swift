@@ -51,6 +51,8 @@ extension StatusStore {
         static let infra = QueryResource<InfraState>(name: "infra.metrics", schema: 2, staleAfter: 180)
         static let vitrinka = QueryResource<VitrinkaState>(name: "vitrinka.daily", staleAfter: 180)
         static let devbox = QueryResource<DevboxState>(name: "devbox.estate", schema: 2, staleAfter: 180)
+        /// One host's Semafor views, keyed by its base URL (vt-7727 D10).
+        static let semafor = QueryResource<SemaforHostState>(name: "semafor.views", staleAfter: 180)
     }
 
     // MARK: Keys
@@ -105,6 +107,7 @@ extension StatusStore {
             group.addTask { await self.restoreInfra() }
             group.addTask { await self.restoreVitrinka() }
             group.addTask { await self.restoreDevbox() }
+            group.addTask { await self.restoreSemafor() }
         }
         onChange?()
     }

@@ -44,8 +44,22 @@ extension StatusPanelView {
     /// open — or, when the module does not list that object (yet), the
     /// module alone, never another row's detail.
     func openNowTarget(_ target: NowTarget) {
-        let listed = modulePage(target.module)?.objects.contains { $0.id == target.objectID } ?? false
-        router.enter(target.module, select: listed ? target.objectID : nil, openDetail: listed)
+        openObject(target.module, target.objectID)
+    }
+
+    /// `module` on the view that lists `id` — the shown one first, then the
+    /// others in ⇥ order (vt-7727 D5) — with it selected and its detail
+    /// open; the module alone when no view lists it, or `id` is nil.
+    func openObject(_ module: PanelModule, _ id: String?) {
+        guard let id else { return router.enter(module) }
+        let shown = router.view(of: module)
+        let others = module.views.filter { $0 != shown }
+        let candidates: [(ModuleView?, ModuleInputs)] = [(shown, inputs(for: module))]
+            + others.map { ($0, ModuleInputs(view: $0)) }
+        for (view, inputs) in candidates where modulePage(module, inputs: inputs)?.objects.contains(where: { $0.id == id }) == true {
+            return router.enter(module, select: id, openDetail: true, view: view)
+        }
+        router.enter(module)
     }
 
     /// After a refresh: the selected incident still shows — itself, or the

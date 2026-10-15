@@ -290,6 +290,26 @@ struct StatStrip: View {
     }
 }
 
+/// A bare 4 pt meter for a dense row (vt-7727 D9: cpu · ram · disk per
+/// machine): `MeterBar`'s track and thresholds without its label line. An
+/// unknown value draws the empty track, never a zero.
+struct MicroMeter: View {
+    let fraction: Double?
+    var width: CGFloat = 34
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(Theme.hairlineStrong)
+            if let fraction {
+                Capsule().fill(MeterBar.tone(fraction))
+                    .frame(width: max(2, width * min(max(fraction, 0), 1)))
+            }
+        }
+        .frame(width: width, height: 4)
+        .accessibilityValue(fraction.map { PultikFormat.percent($0) } ?? "unknown")
+    }
+}
+
 /// Label · value on one line over a 4 pt capsule track; the fill takes its
 /// colour from the threshold (< 70 % ok, < 90 % warn, else danger).
 struct MeterBar: View {

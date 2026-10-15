@@ -64,10 +64,6 @@ enum PanelDriver {
             ProbeGate.shared.failed(.github, .unreachable("Debug verification pause"))
         case "github-resume":
             ProbeGate.shared.succeeded(.github)
-        case "home-style":
-            // The Settings pane's own setter, so AC6 checks what Settings does.
-            guard let style = info["text"].flatMap(HomeStyle.init(rawValue:)) else { return }
-            StatusStore.shared.setHomeStyle(style)
         case "query", "key", "paste", "state", "clear-preview", "clear-action", "mac-stop", "home-toggle", "mark",
              "diff-fixture", "scroll-bench", "gutter", "pr-verb":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)

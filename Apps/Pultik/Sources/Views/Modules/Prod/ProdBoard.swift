@@ -72,27 +72,24 @@ struct ProdCardView: View {
     let action: () -> Void
     /// Home's Production tile draws the 24 h bars taller than the rail did.
     var barHeight: CGFloat = 10
+    /// Home's widget (vt-7727 D8): one line per deployment, the day's
+    /// counts on its right, chips only while it is not green; no bars,
+    /// pool or issue — the matrix (`.h`) has them.
+    var dense = false
     @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             header
-            if !card.chips.isEmpty {
+            if !card.chips.isEmpty, !dense || card.tone != .green {
                 FlowRow(hSpacing: 3, vSpacing: 3) {
                     ForEach(card.chips) { chip in ProdChipView(chip: chip) }
                 }
             }
-            if let pool = card.deployment?.pool {
-                Text(pool.summary(now: now))
-                    .font(RailRowMetrics.metaFont)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            barsRow
-            if let issue = card.topIssue { issueRow(issue) }
+            if !dense { details }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.vertical, dense ? 5 : 7)
         .background(Color.white.opacity(hovering ? 0.06 : 0.04), in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -100,6 +97,18 @@ struct ProdCardView: View {
         .help("Open \(card.title) in the prod matrix (.h \(card.key))")
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+    }
+
+    @ViewBuilder
+    private var details: some View {
+        if let pool = card.deployment?.pool {
+            Text(pool.summary(now: now))
+                .font(RailRowMetrics.metaFont)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        barsRow
+        if let issue = card.topIssue { issueRow(issue) }
     }
 
     private var header: some View {
@@ -121,6 +130,10 @@ struct ProdCardView: View {
                     .font(RailRowMetrics.metaFont)
                     .foregroundStyle(card.tone == .blind ? Color.orange : Color.secondary)
                     .lineLimit(1)
+            } else if dense, let logs = card.logsLine {
+                logsText(logs)
+            } else if dense, card.tone == .hollow {
+                Text("sentry only").font(RailRowMetrics.metaFont).foregroundStyle(.tertiary)
             } else if let project = card.deployment?.project {
                 Text(project)
                     .font(RailRowMetrics.metaFont)

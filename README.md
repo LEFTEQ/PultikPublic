@@ -13,7 +13,9 @@ generated files.
 
 Requires macOS 26+, Xcode, and Tuist. The app lives in `Apps/Pultik/`, its local
 code-theme package in `Packages/Theme/`; the root `Workspace.swift` generates the
-workspace:
+workspace. `Packages/CodeCore/` is only the Swift face of the code core (syntax
+highlighting, symbols, code search, diffs): the Rust library behind it is not
+published, so the app's cargo build phase has nothing to build here.
 
 ```sh
 tuist generate --no-open
