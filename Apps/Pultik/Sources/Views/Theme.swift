@@ -135,6 +135,15 @@ extension Color {
                   blue: Double(hex & 0xFF) / 255,
                   opacity: opacity)
     }
+
+    /// A code host's `RRGGBB` label colour (`#` optional); nil when it is not one.
+    init?(labelHex text: String) {
+        let digits = text.hasPrefix("#") ? text.dropFirst() : Substring(text)
+        guard digits.count == 6, digits.allSatisfy(\.isHexDigit), let value = UInt32(digits, radix: 16) else {
+            return nil
+        }
+        self.init(hex: value)
+    }
 }
 
 /// The numbers behind a tile — a Home tile or a glance — so both sit on one

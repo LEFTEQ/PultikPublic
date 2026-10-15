@@ -22,6 +22,9 @@ let project = Project(
         .remote(url: "https://github.com/tree-sitter/tree-sitter-rust", requirement: .exact("0.24.2")),
         .remote(url: "https://github.com/tree-sitter/tree-sitter-bash", requirement: .exact("0.25.1")),
         .remote(url: "https://github.com/tree-sitter/tree-sitter-php", requirement: .exact("0.25.1")),
+        // Workbench WP4: every code theme from one definition file, shared
+        // with the Rust core (Packages/Theme/README.md).
+        .local(path: "../../Packages/Theme"),
     ],
     targets: [
         .target(
@@ -50,9 +53,9 @@ let project = Project(
             // The daemon is its own target — the app must not compile its
             // top-level main.swift (two `main`s in one binary).
             sources: [.glob("Sources/**", excluding: ["Sources/Helper/**"])],
-            // Folder references keep `Queries/<language>/` and `Themes/` as
-            // directories in the bundle (one highlights.scm per language).
-            resources: [.folderReference(path: "Resources/Queries"), .folderReference(path: "Resources/Themes")],
+            // A folder reference keeps `Queries/<language>/` as directories in
+            // the bundle (one highlights.scm per language).
+            resources: [.folderReference(path: "Resources/Queries")],
             scripts: [
                 // Ride the helper into Contents/MacOS, next to the app binary,
                 // which is exactly where HelperInstaller looks for it.
@@ -75,7 +78,7 @@ let project = Project(
                 .package(product: "TreeSitterHTML"), .package(product: "TreeSitterJSON"),
                 .package(product: "TreeSitterYAML"), .package(product: "TreeSitterMarkdown"),
                 .package(product: "TreeSitterRust"), .package(product: "TreeSitterBash"),
-                .package(product: "TreeSitterPHP"),
+                .package(product: "TreeSitterPHP"), .package(product: "CodeThemes"),
             ],
             settings: .settings(base: [
                 "CODE_SIGN_IDENTITY": "-",

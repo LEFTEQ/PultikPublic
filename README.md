@@ -11,8 +11,9 @@ generated files.
 
 ## Build
 
-Requires macOS 26+, Xcode, and Tuist. The app lives in `Apps/Pultik/`; the root
-`Workspace.swift` generates its workspace:
+Requires macOS 26+, Xcode, and Tuist. The app lives in `Apps/Pultik/`, its local
+code-theme package in `Packages/Theme/`; the root `Workspace.swift` generates the
+workspace:
 
 ```sh
 tuist generate --no-open
@@ -62,5 +63,7 @@ before installing it on a machine you depend on.
 ## Provenance
 
 The SMC bridge and helper retain their GenesisFanControl provenance headers.
+The code themes in `Packages/Theme` record each theme's source and licence;
+its `NOTICE.md` carries the MIT notices of the third-party palettes.
 Public visibility alone does not grant a license; no open-source license is
 declared until ownership and licensing of all included code are confirmed.
