@@ -11,7 +11,7 @@ import SwiftUI
 /// and fixed-shape, because an overflowing cell in a fixed frame makes SwiftUI
 /// wrap character-by-character and balloons the strip into a column of glyphs.
 struct PanelFooter: View {
-    @Environment(\.panelIsPresented) private var panelIsPresented
+    @Environment(\.animates) private var animates
     let store: StatusStore
     let eveOnline: Bool?
     var todoCount: Int = 0
@@ -62,7 +62,7 @@ struct PanelFooter: View {
     @ViewBuilder
     private var refreshState: some View {
         HStack(spacing: 5) {
-            if store.isRefreshing, panelIsPresented {
+            if store.isRefreshing, animates {
                 ProgressView().controlSize(.mini)
                 Text("Syncing")
             } else {

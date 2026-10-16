@@ -14,7 +14,6 @@ actor SentryClient {
     /// Interim: Hlídač owns per-deployment environments (contracts §5).
     static let prodEnvironments = ["production", "sk"]
     private let session: URLSession
-    private var cachedToken: String?
 
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
@@ -26,24 +25,18 @@ actor SentryClient {
         session = PollingSession.make(timeout: 10)
     }
 
-    /// Token: explicit setting first, else the SENTRY_AUTH_TOKEN line cached in
-    /// ~/.claude/.env (kept fresh by the my:sentry skill's loader).
-    private func token(preferred: String?) -> String? {
-        if let preferred, !preferred.isEmpty { return preferred }
-        if let cachedToken { return cachedToken }
-        let envFile = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".claude/.env")
-        guard let contents = try? String(contentsOf: envFile, encoding: .utf8) else { return nil }
-        for line in contents.split(separator: "\n") {
-            guard line.hasPrefix("SENTRY_AUTH_TOKEN=") else { continue }
-            let value = line.dropFirst("SENTRY_AUTH_TOKEN=".count)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
-            if !value.isEmpty {
-                cachedToken = value
-                return value
-            }
-        }
-        return nil
+    /// What a sweep, a search or the Integrations pane reports when the
+    /// keychain holds no token.
+    static let missingToken = MissingCredential(
+        what: "Sentry token",
+        whereToSet: "paste one into Settings ▸ Integrations ▸ Sentry (login keychain pultik-sentry; Onyx keeps the human copy)")
+
+    /// The token is the one `StatusStore.sentryToken` read from the login
+    /// keychain, and nothing else: secrets never come from plaintext files or
+    /// the environment, so a missing one is a diagnosis, not a fallback.
+    private func requireToken(_ settingsToken: String?) throws -> String {
+        guard let settingsToken, !settingsToken.isEmpty else { throw Self.missingToken }
+        return settingsToken
     }
 
     /// The half-open trial's single cheap request: the org endpoint with the
@@ -52,8 +45,8 @@ actor SentryClient {
     /// classified failure (nil = healthy) — a 401/403 must re-arm the pause
     /// as `.rejected`, not be flattened to "not answering".
     func probeHealth(settingsToken: String?) async -> ProbeFailure? {
-        guard let token = token(preferred: settingsToken) else {
-            return .classify(URLError(.userAuthenticationRequired))
+        guard let token = try? requireToken(settingsToken) else {
+            return .classify(Self.missingToken)
         }
         var request = URLRequest(url: base.appending(path: "api/0/organizations/\(org)/"))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -74,9 +67,7 @@ actor SentryClient {
 
     /// Unresolved production issues for one project, newest activity first.
     func unresolvedIssues(project: String, settingsToken: String?) async throws -> [SentryIssue] {
-        guard let token = token(preferred: settingsToken) else {
-            throw URLError(.userAuthenticationRequired)
-        }
+        let token = try requireToken(settingsToken)
         var components = URLComponents(
             url: base.appending(path: "api/0/projects/\(org)/\(project)/issues/"),
             resolvingAgainstBaseURL: false
@@ -122,9 +113,7 @@ actor SentryClient {
     }
 
     private func orgIssues(query: String, settingsToken: String?) async throws -> [SentryIssue] {
-        guard let token = token(preferred: settingsToken) else {
-            throw URLError(.userAuthenticationRequired)
-        }
+        let token = try requireToken(settingsToken)
         var components = URLComponents(
             url: base.appending(path: "api/0/organizations/\(org)/issues/"),
             resolvingAgainstBaseURL: false
@@ -151,9 +140,7 @@ actor SentryClient {
     /// range instead of statsPeriod.
     func archiveIssues(project: String, settingsToken: String?,
                        start: Date, end: Date) async throws -> [SentryIssue] {
-        guard let token = token(preferred: settingsToken) else {
-            throw URLError(.userAuthenticationRequired)
-        }
+        let token = try requireToken(settingsToken)
         let iso = ISO8601DateFormatter()
         var components = URLComponents(
             url: base.appending(path: "api/0/projects/\(org)/\(project)/issues/"),

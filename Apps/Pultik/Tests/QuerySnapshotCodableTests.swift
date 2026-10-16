@@ -212,6 +212,47 @@ final class QuerySnapshotCodableTests: XCTestCase {
         XCTAssertFalse(todos[1].hasContext)
     }
 
+    /// vt-7781: a timeline's 24 h snapshot (raw marks and hourly bins) and a
+    /// host's state with its topology survive the snapshot coder.
+    func testTimelineSnapshotRoundTrips() throws {
+        let job = CITimelineJob(id: "ci-jit-exampleapp-ci-0a1b2c3d", lane: "exampleapp-ci", backend: "docker", partition: "",
+                                jobId: "e50e9934", runId: 38_318_457_425, queuedAt: at, startedAt: at, completedAt: at,
+                                result: "failed", reservedMib: 3072, hardCapMib: 16384, peakMib: 245, refusals: 1,
+                                repo: "example-org/ExampleApp", repoOwn: true, name: "api", ghJobId: 115_055_639_642,
+                                runAttempt: 2, workflow: "CI", branch: "main", sha: "1cc6071", pr: 641, actor: "example-org",
+                                hosted: false)
+        let ci = TimelineSnapshot(
+            lens: .ci, raw: .ci(CITimelinePage(from: at, to: at, now: at, older: at, recordedSince: at, jobs: [job], bins: [])),
+            rawBytes: 640, hourly: .ci(CITimelinePage(from: at, to: at, now: at, jobs: [],
+                                                      bins: [CITimelineBin(lane: "exampleapp-ci", from: at, count: 3, failures: 1, cancelled: 0)])),
+            hourlyBytes: 90)
+        let decoded = try roundTrip(ci)
+        guard case let .ci(raw) = decoded.raw else { return XCTFail("a CI page") }
+        XCTAssertEqual(raw.jobs, [job])
+
+        let event = EstateTimelineEvent(id: "cl-build-server-docker-health-metrics-1792116900", at: at, box: "build-server",
+                                        kind: "cleanup", result: "ok", title: "docker-health-metrics", durationS: 1.5,
+                                        sizeBytes: 4096, location: "/var/lib/docker", surface: nil)
+        let estate = TimelineSnapshot(
+            lens: .estate,
+            raw: .estate(EstateTimelinePage(from: at, to: at, now: at, events: [event], buckets: [],
+                                            pins: [EstateTimelinePin(box: "web-server", from: at, sha: "d8a6f60", label: "pinned")],
+                                            schedules: [EstateTimelineSchedule(box: "build-server", unit: "memory-budget",
+                                                                               kind: "cleanup", nextAt: at, periodS: 30)])),
+            rawBytes: 300, hourly: nil, hourlyBytes: 0)
+        guard case let .estate(page) = try roundTrip(estate).raw else { return XCTFail("an estate page") }
+        XCTAssertEqual(page.events.first?.location, "/var/lib/docker")
+        XCTAssertEqual(page.schedules.first?.periodS, 30)
+
+        let topology = SemaforEstateTopology(schemaVersion: 1, note: "configured intent",
+                                             nodes: [.init(id: "box:build-server", kind: "box", label: "build-server",
+                                                           addresses: ["p2p": "wg-p2p"])],
+                                             edges: [.init(id: "deploy-exampleapp-prod", from: "app:build-server/deploy-gateway",
+                                                           to: "app:app-server/exampleapp-prod", kind: "deploy",
+                                                           direction: "one-way", targets: ["exampleapp-prod"])])
+        XCTAssertEqual(try roundTrip(SemaforHostState(topology: topology)).topology, topology)
+    }
+
     func testDevboxSnapshotRoundTrips() throws {
         let box = DevboxEndpoint(name: "a", sshAlias: "devops", host: "192.0.2.11", port: 2222, state: "drain", primary: false)
         let summary = DevboxOverviewSummary(

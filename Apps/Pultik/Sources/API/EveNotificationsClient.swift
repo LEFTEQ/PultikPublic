@@ -32,7 +32,7 @@ actor EveNotificationsClient {
         var request = URLRequest(url: base.appending(path: "eve/v1/notifications")
             .appending(queryItems: [URLQueryItem(name: "limit", value: "50")]))
         request.timeoutInterval = 10
-        EveAuth.apply(await EveAuth.shared.token(preferred: settingsToken), to: &request)
+        EveAuth.apply(settingsToken, to: &request)
         let data: Data
         do {
             let (body, response) = try await session.data(for: request)
@@ -40,7 +40,7 @@ actor EveNotificationsClient {
                 return .failed(.unreachable("no response"))
             }
             guard (200..<300).contains(http.statusCode) else {
-                return .failed(.classify(HTTPStatusError(status: http.statusCode)))
+                return .failed(EveAuth.failure(status: http.statusCode, token: settingsToken))
             }
             data = body
         } catch {

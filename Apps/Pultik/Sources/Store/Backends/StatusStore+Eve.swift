@@ -49,8 +49,8 @@ extension StatusStore {
         // One credential for the whole pass: both reads and the snapshot key,
         // so a token changed mid-flight never files one account's answer
         // under another.
-        let token = preferences.eveToken
-        let snapshotKey = await eveSnapshotKey(settingsToken: token)
+        let token = eveToken
+        let snapshotKey = eveSnapshotKey(settingsToken: token)
         await gated(.eve, probe: {
             await EveClient.shared.probeHealth(settingsToken: token)
         }) {

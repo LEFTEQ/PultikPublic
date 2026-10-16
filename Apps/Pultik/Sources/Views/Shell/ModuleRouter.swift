@@ -66,10 +66,13 @@ final class ModuleRouter {
         case let .text(value):
             text = value
             pendingToken = ""
+            // A canvas has no rows to filter: a filter naming a list's slice shows that list (D20).
+            if let module, view?.canvas != nil, let list = module.view(filtering: value) { showView(list) }
         case let .enter(target, filter, rest, opens):
-            // An alias's object lives on the module's first view (`.m`, `.f`: Machines).
+            // An alias's object lives on the module's first view (`.m`, `.f`: Machines);
+            // a filter naming a list's slice lands on that list (`.c failed`: Runs, D20).
             enter(target, filter: filter, select: opens, openDetail: opens != nil,
-                  view: opens == nil ? nil : target.views.first)
+                  view: opens == nil ? target.view(filtering: filter) : target.views.first)
             pendingToken = rest
         case let .global(value):
             leave(keeping: value)
@@ -112,6 +115,7 @@ final class ModuleRouter {
         selection = id ?? remembered[target]
         detailOpen = openDetail && selection != nil
         entered = false
+        canvasEntered = false
         tab = nil
         dropStack()
         clearMarks()
@@ -133,6 +137,7 @@ final class ModuleRouter {
         selection = nil
         detailOpen = false
         entered = false
+        canvasEntered = false
         dropStack()
         clearMarks()
     }
@@ -213,9 +218,28 @@ final class ModuleRouter {
         selection = viewSelections[Self.viewKey(module, next)]
         detailOpen = false
         entered = false
+        canvasEntered = false
         tab = nil
         dropStack()
         clearMarks()
+    }
+
+    // MARK: - Canvas views (vt-7727 D5)
+
+    /// ↵ entered the shown Timeline or Map: ←/→, − / =, N and ↵ are the
+    /// canvas's, and a mark's card slides over it. Esc leaves it with the
+    /// view still shown; another view, module or a summon past the place drop it.
+    private(set) var canvasEntered = false
+
+    func enterCanvas() {
+        guard view?.canvas != nil else { return }
+        canvasEntered = true
+    }
+
+    /// Esc inside the canvas: its cards go with it.
+    func leaveCanvas() {
+        canvasEntered = false
+        dropStack()
     }
 
     // MARK: - Marks (bulk actions D1)
@@ -360,8 +384,9 @@ final class ModuleRouter {
         activated = nil
     }
 
+    /// Over the open detail, or over the entered canvas (a mark's card).
     func push(_ card: DetailRef) {
-        guard detailOpen, stack.last != card else { return }
+        guard detailOpen || canvasEntered, stack.last != card else { return }
         focusBeneath.append(focus)
         stack.append(card)
         focus = nil
@@ -542,8 +567,9 @@ final class ModuleRouter {
         /// Inside a workbench, and on which tab (PR workbench D5).
         var entered = false
         var tab: String?
-        /// The module's view (vt-7727 D5).
+        /// The module's view (vt-7727 D5), and whether its canvas was entered.
         var view: ModuleView?
+        var canvasEntered = false
 
         static let home = Place()
     }
@@ -553,7 +579,7 @@ final class ModuleRouter {
         Place(module: module, filter: module == nil ? "" : text, selection: module == nil ? nil : selection,
               detailOpen: module == nil ? false : detailOpen, inspectorOpen: inspectorOpen,
               stack: module == nil ? [] : stack, entered: module == nil ? false : entered,
-              tab: module == nil ? nil : tab, view: view)
+              tab: module == nil ? nil : tab, view: view, canvasEntered: module == nil ? false : canvasEntered)
     }
 
     func restore(_ place: Place) {
@@ -567,7 +593,8 @@ final class ModuleRouter {
             pendingToken = ""
             selection = place.selection
             detailOpen = place.detailOpen && place.selection != nil
-            stack = detailOpen ? place.stack : []
+            canvasEntered = place.canvasEntered && view?.canvas != nil
+            stack = detailOpen || canvasEntered ? place.stack : []
             entered = detailOpen && place.entered
             tab = place.tab
         }
@@ -600,6 +627,9 @@ struct DetailRef: Hashable, Sendable {
         case run
         /// A file at a commit (code navigation, D2): `repo@sha:path#line`.
         case file
+        /// A mark on an entered canvas (vt-7727 D5): `<canvas slot>:<mark id>`.
+        /// A job's card becomes `RunCard` once Semafor's jobs feed it (vt-7781 WP6).
+        case mark
     }
 
     let kind: Kind

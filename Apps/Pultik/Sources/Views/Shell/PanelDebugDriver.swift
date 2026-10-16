@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import Timeline
 
 extension StatusPanelView {
     /// PanelDriver relay: the same state changes and key routing a typed
@@ -68,6 +69,113 @@ extension StatusPanelView {
             }
             let speed = Double(info["text"] as? String ?? "") ?? 5000
             canvas.runScrollBench(speed: CGFloat(speed)) { PanelDriver.write(state: $0, to: path) }
+        case "timeline-demo":
+            // The CI timeline fed a Debug set that holds it until `clear` (vt-7781 WP5): `small`,
+            // `busiest` (synthetic), or a recorded page's path (`Tests/Fixtures/semafor/*-ci-*.json`).
+            let stage = TimelineStage.shared
+            switch info["text"] as? String ?? "" {
+            case "clear": stage.debugFeed(.ciTimeline, nil)
+            case "small": stage.debugFeed(.ciTimeline, TimelineDemo.small(now: Date()))
+            case "", "busiest": stage.debugFeed(.ciTimeline, TimelineDemo.busiest(now: Date()))
+            case let path:
+                do {
+                    let fixture = try TimelineDemo.fixture(path)
+                    stage.debugFeed(.ciTimeline, fixture.feed)
+                    stage.debugZoom(.ciTimeline, to: fixture.day)
+                } catch {
+                    NSLog("pultik: timeline-demo could not read %@: %@", path, error.localizedDescription)
+                }
+            }
+        case "timeline-bench":
+            // AC 8: CI's Timeline on the recorded busiest day (`text` = "<s per phase> <fixture path>"),
+            // a scripted pan and pinch per display frame; the live feed comes back after it.
+            guard let path = info["path"] as? String else { return }
+            let parts = (info["text"] as? String ?? "").split(separator: " ", maxSplits: 1).map(String.init)
+            let seconds = parts.first.flatMap(Double.init) ?? 2
+            let stage = TimelineStage.shared
+            var day: ClosedRange<Date>?
+            if parts.count == 2 {
+                do {
+                    let fixture = try TimelineDemo.fixture(parts[1])
+                    stage.debugFeed(.ciTimeline, fixture.feed)
+                    day = fixture.day
+                } catch {
+                    return PanelDriver.write(state: ["error": "fixture: \(error.localizedDescription)"], to: path)
+                }
+            } else {
+                stage.debugFeed(.ciTimeline, TimelineDemo.busiest(now: Date()))
+            }
+            if router.module != .ci || router.view != .timeline { router.enter(.ci, view: .timeline) }
+            Task { @MainActor in
+                // The body swaps in once the strip's keys settle; the canvas attaches when it shows.
+                for _ in 0 ..< 60 {
+                    if let canvas = stage.canvas(.ciTimeline), canvas.attached, canvas.active { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                guard let canvas = stage.canvas(.ciTimeline) else {
+                    stage.debugFeed(.ciTimeline, nil)
+                    return PanelDriver.write(state: ["error": "no CI timeline canvas on screen"], to: path)
+                }
+                if let day { stage.debugZoom(.ciTimeline, to: day) } else { stage.perform(.now, on: .ciTimeline) }
+                // `mods` = "vsync": the surface presents in step with the display for this run, to
+                // compare with what ships (Immediate, AC 8's diagnosis).
+                let vsync = (info["mods"] as? String) == "vsync"
+                stage.debugVSync(.ciTimeline, vsync)
+                // Let the framed day build once before the clock starts.
+                try? await Task.sleep(for: .milliseconds(300))
+                canvas.runBench(seconds: seconds) { report in
+                    var report = report
+                    report["vsync"] = vsync
+                    report["drawablePx"] = stage.debugDrawableSize(.ciTimeline)
+                    stage.debugVSync(.ciTimeline, false)
+                    stage.debugFeed(.ciTimeline, nil)
+                    PanelDriver.write(state: report, to: path)
+                }
+            }
+        case "timeline-scrub":
+            // AC 10: the playhead dragged across the shown timeline's axis (CI's, Estate's or
+            // Backups') through the mouse's own entry (`scrub(x:release:)`) every 8 ms for
+            // `text` seconds, then released.
+            guard let path = info["path"] as? String else { return }
+            let seconds = Double(info["text"] as? String ?? "") ?? 2
+            let slot = shownCanvas ?? .ciTimeline
+            guard let lens = slot.lens, let canvas = TimelineStage.shared.canvas(slot), canvas.attached, canvas.active else {
+                return PanelDriver.write(state: ["error": "no timeline canvas on screen"], to: path)
+            }
+            let counter = switch lens {
+            case .ci: "ci/at"
+            case .estate: "estate/map?at"
+            case .backups: "estate/backups?at"
+            }
+            Task { @MainActor in
+                let stage = TimelineStage.shared
+                let before = SemaforClient.requests.snapshot[counter] ?? 0
+                stage.debugClearReplay(slot)
+                let left = Double(TimelineEngine.labelWidth) + 40
+                let right = Double(canvas.bounds.width) - 40
+                let steps = Int(seconds / 0.008)
+                for step in 0 ... steps {
+                    canvas.scrub(x: left + (right - left) * Double(step) / Double(max(steps, 1)), release: false)
+                    try? await Task.sleep(for: .milliseconds(8))
+                }
+                canvas.scrub(x: right - 3, release: true)
+                try? await Task.sleep(for: .milliseconds(600))
+                let log = stage.debugReplayLog(slot)
+                let gaps = zip(log.dropFirst(), log).map { $0.at.timeIntervalSince($1.at) * 1000 }
+                let iso = ISO8601DateFormatter()
+                iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                PanelDriver.write(state: [
+                    "seconds": seconds, "moves": steps + 1, "sent": log.count,
+                    "minGapMs": gaps.min() ?? 0, "flooredWhileMoving": log.dropLast().allSatisfy {
+                        $0.instant == ReplayClock.floored($0.instant)
+                    },
+                    "settledInstant": log.last.map { iso.string(from: $0.instant) } ?? NSNull(),
+                    "playhead": stage.debugState(slot)["playhead"] ?? NSNull(),
+                    "slot": slot.rawValue,
+                    // The lens's replay reads since the drag began (`ci/at`, `estate/map?at`, `estate/backups?at`).
+                    "replayReads": [counter: (SemaforClient.requests.snapshot[counter] ?? 0) - before],
+                ], to: path)
+            }
         case "home-toggle":
             let text = info["text"] as? String ?? ""
             let key = text == "fold" ? PRDigest<StatusStore.InboxPR>.foldKey : text
@@ -99,6 +207,12 @@ extension StatusPanelView {
                 "moduleItems": keyItems,
                 "detailOpen": detailShown,
                 "inspectorOpen": router.inspectorOpen,
+                // D20: the open detail's verbs, and what ⌘R would route to — read, never pressed.
+                "detailVerbs": detailShown ? moduleObjects.first { $0.id == router.selection }?.verbs
+                    .map { "\($0.title) \($0.kbd ?? "")" } ?? [] : [],
+                "commandR": KeyboardCoordinator.intent(for: KeyStroke(key: .character("r"), command: true), in: keyContext())
+                    .map { String(describing: $0) } ?? NSNull(),
+                "markable": moduleObjects.filter(\.markable).count,
                 // Stay in Pultík (WP8): the dwelled place a summon returns to, the card
                 // stack and the ⇥ focus, the warm bodies and their builds.
                 "place": Self.describe(place.dwelled),
@@ -125,6 +239,17 @@ extension StatusPanelView {
                 "prTabs": router.module == .prs && detailShown ? router.tabs : [],
                 "prTab": router.module == .prs && detailShown ? router.shownTab ?? NSNull() : NSNull(),
                 "verbKeys": router.verbKeys.sorted(),
+                // vt-7727 D5: the shown canvas view, entered or not, and its engine.
+                "canvasEntered": shownCanvas != nil && router.canvasEntered,
+                "canvas": shownCanvas.map { TimelineStage.shared.debugState($0) } ?? NSNull(),
+                // vt-7781 AC 10: what the data layer is asked to keep loaded, and the replay shown.
+                "timelineVisibility": store.timelineVisibility.map { visibility -> [String: Any] in
+                    ["lens": visibility.lens.rawValue, "from": PultikFormat.clock(visibility.range.lowerBound),
+                     "to": PultikFormat.clock(visibility.range.upperBound),
+                     "bucketS": visibility.density?.bucketS ?? NSNull()]
+                } ?? NSNull(),
+                "timelineReplay": store.timelineReplay.map { PultikFormat.clock($0.at) } ?? NSNull(),
+                "ciHost": store.ciSemaforHost ?? NSNull(),
                 "code": CodeCanvasView.active.map { canvas -> [String: Any] in
                     ["files": canvas.document.files.count, "lines": canvas.lineCount, "wraps": canvas.wraps,
                      "highlighted": canvas.highlightedFiles, "selection": canvas.hasSelection,
@@ -244,7 +369,7 @@ extension StatusPanelView {
     static func describe(_ place: ModuleRouter.Place) -> [String: Any] {
         ["module": place.module?.rawValue ?? "home", "filter": place.filter, "selection": place.selection ?? NSNull(),
          "detailOpen": place.detailOpen, "stack": place.stack.map(\.id), "entered": place.entered,
-         "tab": place.tab ?? NSNull(), "view": place.view?.rawValue ?? NSNull()]
+         "tab": place.tab ?? NSNull(), "view": place.view?.rawValue ?? NSNull(), "canvasEntered": place.canvasEntered]
     }
 
     /// A driver key through the same coordinator a real keystroke takes,

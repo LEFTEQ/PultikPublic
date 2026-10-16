@@ -8,12 +8,15 @@
 #   tools/panel-drive.sh size 1240x720             # pin the frame (AC 13's 1240/1600 pt captures); '' resets
 #   tools/panel-drive.sh query '<text>'            # set the palette text
 #   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V; makes the panel key)
-#   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|space|1-9|a|b|c|e|f|i|k|l|m|r|z (key 3 cmd = CI)
+#   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|space|1-9|a|b|c|e|f|i|k|l|m|n|r|z|minus|equal (key 3 cmd = CI)
 #   tools/panel-drive.sh key left "" 5            # the same key 5× at key-repeat speed (50 ms apart, in the app)
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window (+ any open popover) as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette + shell state as JSON (module, selection, detailOpen, strip…)
 #   tools/panel-drive.sh diff-fixture /tmp/big.diff # show a `git diff --full-index` file in the open PR's Files tab ('' clears)
 #   tools/panel-drive.sh scroll-bench [pt/s]       # the shown code canvas, top to bottom on the display link: frame p50/p99/max (AC 4)
+#   tools/panel-drive.sh timeline-demo [small|busiest|<page.json>|clear] # Debug: hold CI's timeline on a synthetic set or a recorded page; clear returns to Semafor's
+#   tools/panel-drive.sh timeline-bench [s/phase] [page.json] [vsync]  # CI's Timeline on the recorded busiest day (2,876 jobs): a scripted pan, then a pinch (2 s each): frame interval + cost p50/p95/p99/max, scene builds (vt-7781 AC 8)
+#   tools/panel-drive.sh timeline-scrub [s]        # drag the shown timeline's playhead (CI, Estate or Backups) along the axis for s seconds, then release: replay sends, min gap, settled instant, its /ci/at · /estate/map?at · /estate/backups?at reads (AC 10)
 #   tools/panel-drive.sh gutter 2:14[+]            # a gutter click on file 2's line 14 (+ = ⇧, extends): a review comment starts
 #   tools/panel-drive.sh pr-verb 'comment:Hi'      # a verb on the open PR through performPRVerb — THROWAWAY PRs ONLY
 #                                                  #   (inline:<path>:<line>:<text>, review:<event>:<text>, resolve, merge:<method>, close, reopen)
@@ -47,8 +50,14 @@ case "$cmd" in
       if out="$(toolkit displays resolve --role qa --app pultik)"; then PD_TEXT="$out"; else printf '%s\n' "$out" >&2; fi
     fi ;;
   close|github-pause|github-resume) ;;
-  query|size|clear-preview|clear-action|mac-stop|home-toggle|mark|diff-fixture|gutter) PD_TEXT="${1-}" ;;
+  query|size|clear-preview|clear-action|mac-stop|home-toggle|mark|diff-fixture|gutter|timeline-demo) PD_TEXT="${1-}" ;;
   scroll-bench) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-scroll-bench.json ;;
+  timeline-bench)
+    # The recorded busiest CI day (2026-10-13, build-server) unless another page is named.
+    fixture="${2:-$(cd "$(dirname "$0")/.." && pwd)/Apps/Pultik/Tests/Fixtures/semafor/build-server-ci-busiest-day.json}"
+    # A third argument `vsync` presents in step with the display for the run (Immediate, as shipped, otherwise).
+    PD_TEXT="${1:-2} $fixture"; PD_MODS="${3-}"; PD_PATH=/tmp/pultik-timeline-bench.json ;;
+  timeline-scrub) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-timeline-scrub.json ;;
   pr-verb) PD_TEXT="${1:?verb}"; PD_PATH=/tmp/pultik-pr-verb.json ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}"; PD_TEXT="${3-}" ;;
@@ -57,7 +66,7 @@ case "$cmd" in
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
   frame) ;;
   firing) PD_TEXT="${1-}" ;;
-  *) sed -n '2,28p' "$0"; exit 2 ;;
+  *) sed -n '2,34p' "$0"; exit 2 ;;
 esac
 
 post() {
@@ -74,7 +83,7 @@ post() {
 }
 
 case "$cmd" in
-  scroll-bench|pr-verb)
+  scroll-bench|pr-verb|timeline-bench|timeline-scrub)
     # The bench runs for seconds: a 5,000-line diff at 5,000 pt/s takes ~20.
     rm -f "$PD_PATH"
     post

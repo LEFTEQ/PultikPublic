@@ -240,7 +240,7 @@ final class ModuleRouterTests: XCTestCase {
 
         let router = ModuleRouter()
         router.enter(.ci)
-        XCTAssertEqual(router.view, .live, "a module opens on its first view")
+        XCTAssertEqual(router.view, .timeline, "a module opens on its first view")
         router.cycleView(1)
         XCTAssertEqual(router.view, .runs)
         router.cycleView(-1)
@@ -303,6 +303,157 @@ final class ModuleRouterTests: XCTestCase {
         place.presented(at: now.addingTimeInterval(60))
         XCTAssertEqual(place.router.module, .ci)
         XCTAssertEqual(place.router.view, .runs)
+    }
+
+    // MARK: - Timeline and Map (vt-7781 AC 7, vt-7727 D5)
+
+    private func stroke(_ key: KeyStroke.Key, shift: Bool = false, option: Bool = false,
+                        _ context: KeyContext) -> KeyIntent?
+    {
+        KeyboardCoordinator.intent(for: KeyStroke(key: key, shift: shift, option: option), in: context)
+    }
+
+    /// ⇥ reaches CI's Timeline first and Estate's Timeline and Map after
+    /// Machines; ↵ on either enters it, and only a canvas view is entered.
+    func testTabReachesTimelineAndMapAndEnterEntersThem() {
+        XCTAssertEqual(PanelModule.ci.views, [.timeline, .runs, .workflows, .failures, .fleet], "Live retired (WP6)")
+        let router = ModuleRouter()
+        router.enter(.estate)
+        var walked: [ModuleView?] = []
+        for _ in 0 ..< 4 {
+            router.cycleView(1)
+            walked.append(router.view)
+        }
+        XCTAssertEqual(walked, [.timeline, .map, .backups, .machines])
+        router.showView(.map)
+        XCTAssertEqual(intent(.tab, KeyContext(module: .estate, canvas: .map)), .view(1), "⇥ still switches views")
+        XCTAssertEqual(intent(.enter, KeyContext(module: .estate, canvas: .map)), .enterCanvas)
+        router.enterCanvas()
+        XCTAssertTrue(router.canvasEntered)
+        router.showView(.machines)
+        XCTAssertFalse(router.canvasEntered, "another view leaves the canvas")
+        router.enterCanvas()
+        XCTAssertFalse(router.canvasEntered, "a list has no canvas to enter")
+        router.showView(.backups)
+        router.enterCanvas()
+        XCTAssertTrue(router.canvasEntered, "Backups' timeline enters (WP7)")
+        router.enter(.ci)
+        XCTAssertEqual(router.view, .timeline)
+        XCTAssertEqual(intent(.enter, KeyContext(module: .ci, canvas: .timeline)), .enterCanvas)
+    }
+
+    /// Backups' timeline sits above its Pipelines table (vt-7781 WP7): ↵
+    /// enters it while no row is selected, a selected row's ↵ opens its
+    /// detail, and ↑ past the first row hands ↵ back to the canvas.
+    func testBackupsEnterIsTheCanvasUntilARowIsSelected() {
+        var context = KeyContext(module: .estate, items: ["backup:a/pg", "backup:a/vol"], canvas: .timeline)
+        XCTAssertEqual(intent(.enter, context), .enterCanvas)
+        XCTAssertEqual(intent(.down, context), .select("backup:a/pg"))
+        context.selection = "backup:a/pg"
+        XCTAssertEqual(intent(.enter, context), .openDetail("backup:a/pg"))
+        XCTAssertEqual(intent(.up, context), .select(nil))
+        context.selection = "backup:gone"
+        XCTAssertEqual(intent(.enter, context), .enterCanvas, "a selection the filter hides is no selection")
+    }
+
+    /// D20: `failed` is Runs' failed runs — `.c failed` lands on Runs, and
+    /// typing it on the Timeline (no rows to filter) shows them; on a list it
+    /// stays that list's filter.
+    func testFailedFilterShowsCIRuns() {
+        XCTAssertEqual(ModuleView.failedRuns("failed"), "")
+        XCTAssertEqual(ModuleView.failedRuns(" Failed exampleapp "), "exampleapp")
+        XCTAssertNil(ModuleView.failedRuns("failedx"))
+        XCTAssertNil(ModuleView.failedRuns("running"))
+        let router = ModuleRouter()
+        router.type(".c failed")
+        XCTAssertEqual(router.view, .runs)
+        XCTAssertEqual(router.text, "failed")
+        router.showView(.timeline)
+        router.type("faile")
+        XCTAssertEqual(router.view, .timeline)
+        router.type("failed")
+        XCTAssertEqual(router.view, .runs)
+        router.showView(.failures)
+        router.type("failed")
+        XCTAssertEqual(router.view, .failures, "a list keeps its own filter")
+        router.enter(.estate, view: .timeline)
+        router.type("failed")
+        XCTAssertEqual(router.view, .timeline, "only CI has a failed slice")
+    }
+
+    /// Entered, the keys are the timeline's: ←/→ outcomes, ⇧ every mark, ⌥
+    /// pan, − / = zoom, N now, ↵ the card; nothing else types, and ⌘ chords
+    /// keep their meaning. The map's arrows walk its nodes.
+    func testTheEnteredCanvasKeysAreItsIntents() {
+        let entered = KeyContext(module: .ci, canvas: .timeline, canvasEntered: true)
+        XCTAssertEqual(stroke(.left, entered), .canvas(.outcome(-1)))
+        XCTAssertEqual(stroke(.right, entered), .canvas(.outcome(1)))
+        XCTAssertEqual(stroke(.left, shift: true, entered), .canvas(.mark(-1)))
+        XCTAssertEqual(stroke(.right, shift: true, entered), .canvas(.mark(1)))
+        XCTAssertEqual(stroke(.left, option: true, entered), .canvas(.pan(-1)))
+        XCTAssertEqual(stroke(.right, option: true, entered), .canvas(.pan(1)))
+        XCTAssertEqual(intent(.character("-"), entered), .canvas(.zoom(-1)))
+        XCTAssertEqual(intent(.character("="), entered), .canvas(.zoom(1)))
+        XCTAssertEqual(intent(.character("n"), entered), .canvas(.now))
+        XCTAssertEqual(intent(.character("N"), entered), .canvas(.now))
+        XCTAssertEqual(intent(.enter, entered), .canvas(.open))
+        XCTAssertEqual(intent(.character("x"), entered), .ignore, "a letter never filters under the canvas")
+        XCTAssertEqual(intent(.character("3"), entered), .ignore)
+        XCTAssertEqual(intent(.backspace, entered), .ignore)
+        XCTAssertEqual(intent(.character("3"), command: true, entered), .module(.ci))
+
+        let map = KeyContext(module: .estate, canvas: .map, canvasEntered: true)
+        XCTAssertEqual(intent(.left, map), .canvas(.node(dx: -1, dy: 0)))
+        XCTAssertEqual(intent(.down, map), .canvas(.node(dx: 0, dy: 1)))
+        XCTAssertEqual(stroke(.right, option: true, map), .canvas(.pan(1)))
+    }
+
+    /// Esc peels the mark's card, then the entered canvas, and the view is
+    /// no layer: the next Esc leaves the module. Under a card the canvas
+    /// keys wait and the card keeps its own.
+    func testEscPeelsTheCardThenTheCanvasThenTheView() {
+        let card = DetailRef(kind: .mark, id: "ci.timeline:exampleapp-api-1#3")
+        let router = ModuleRouter()
+        router.enter(.ci)
+        router.push(card)
+        XCTAssertTrue(router.stack.isEmpty, "no card before the canvas is entered")
+        router.enterCanvas()
+        router.push(card)
+        XCTAssertEqual(router.stack, [card])
+
+        var context = KeyContext(module: .ci, card: card.id, canvas: .timeline, canvasEntered: true)
+        XCTAssertEqual(intent(.left, context), .ignore, "the canvas waits under its card")
+        XCTAssertEqual(intent(.down, context), .cardMove(1))
+        XCTAssertEqual(intent(.enter, context), .cardOpen)
+        XCTAssertEqual(intent(.enter, command: true, context), .openInBrowser(card.id), "⌘↵ is the card's page")
+        XCTAssertEqual(intent(.esc, context), .escape(.popCard))
+        router.pop()
+        context.card = nil
+        XCTAssertEqual(intent(.esc, context), .escape(.leaveCanvas))
+        let place = router.place
+        router.leaveCanvas()
+        XCTAssertFalse(router.canvasEntered)
+        XCTAssertEqual(router.view, .timeline, "the view stays")
+        context.canvasEntered = false
+        XCTAssertEqual(intent(.esc, context), .escape(.leaveModule), "the view is no layer")
+        router.restore(place)
+        XCTAssertTrue(router.canvasEntered, "a summon returns inside the canvas")
+    }
+
+    /// Until the canvas is entered N, −, = and digits type into the filter,
+    /// ⌥←/→ move the field's caret and ←/→ walk the strip.
+    func testCanvasKeysTypeIntoTheFilterUntilEntered() {
+        let shown = KeyContext(module: .ci, canvas: .timeline)
+        for key in ["n", "N", "-", "=", "1"] {
+            XCTAssertNil(intent(.character(key), shown), key)
+        }
+        XCTAssertNil(stroke(.left, option: true, shown))
+        XCTAssertEqual(intent(.right, shown), .module(PanelModule.ci.neighbour(1)))
+        let router = ModuleRouter()
+        router.enter(.ci)
+        router.type("n-=1")
+        XCTAssertEqual(router.module, .ci)
+        XCTAssertEqual(router.text, "n-=1")
     }
 
     /// AC 13: Settings ▸ Modules' order is the strip's — ⌘1–9 and ←/→ follow it.

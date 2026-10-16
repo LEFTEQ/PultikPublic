@@ -1,0 +1,25 @@
+[package]
+name = "canvas-text"
+description = "Text shaping and glyph rasterization (Core Text on macOS) into an atlas; a cell row's run shaping."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+canvas-draw.workspace = true
+# `code_view`: code-core's rows, highlights and diffs, coloured by a theme.
+code-core.workspace = true
+theme.workspace = true
+etagere.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-text.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

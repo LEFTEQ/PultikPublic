@@ -23,14 +23,14 @@ actor EveClient {
     func probeHealth(settingsToken: String?) async -> ProbeFailure? {
         var request = URLRequest(url: base.appending(path: "eve/v1/health"))
         request.timeoutInterval = 3
-        EveAuth.apply(await EveAuth.shared.token(preferred: settingsToken), to: &request)
+        EveAuth.apply(settingsToken, to: &request)
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .unreachable("no response")
             }
             guard http.statusCode == 200 else {
-                return .classify(HTTPStatusError(status: http.statusCode))
+                return EveAuth.failure(status: http.statusCode, token: settingsToken)
             }
             guard let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   body["ok"] as? Bool == true else {
@@ -55,7 +55,7 @@ actor EveClient {
                 URLQueryItem(name: "limit", value: "50"),
             ]))
         request.timeoutInterval = 10
-        EveAuth.apply(await EveAuth.shared.token(preferred: settingsToken), to: &request)
+        EveAuth.apply(settingsToken, to: &request)
         let data: Data
         do {
             let (body, response) = try await session.data(for: request)
@@ -63,7 +63,7 @@ actor EveClient {
                 return .failed(.unreachable("no response"))
             }
             guard (200..<300).contains(http.statusCode) else {
-                return .failed(.classify(HTTPStatusError(status: http.statusCode)))
+                return .failed(EveAuth.failure(status: http.statusCode, token: settingsToken))
             }
             data = body
         } catch {
@@ -88,7 +88,7 @@ actor EveClient {
         var request = URLRequest(url: base.appending(path: "eve/v1/sessions")
             .appending(queryItems: [URLQueryItem(name: "view", value: "approvals")]))
         request.timeoutInterval = 10
-        EveAuth.apply(await EveAuth.shared.token(preferred: settingsToken), to: &request)
+        EveAuth.apply(settingsToken, to: &request)
         let data: Data
         do {
             let (body, response) = try await session.data(for: request)
@@ -96,7 +96,7 @@ actor EveClient {
                 return .failed(.unreachable("no response"))
             }
             guard (200..<300).contains(http.statusCode) else {
-                return .failed(.classify(HTTPStatusError(status: http.statusCode)))
+                return .failed(EveAuth.failure(status: http.statusCode, token: settingsToken))
             }
             data = body
         } catch {
@@ -130,8 +130,8 @@ actor EveClient {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    // Resolved once for the whole exchange — create + stream.
-                    let token = await EveAuth.shared.token(preferred: settingsToken)
+                    // One token for the whole exchange — create + stream.
+                    let token = settingsToken
                     var create = URLRequest(url: base.appending(path: "eve/v1/session"))
                     create.httpMethod = "POST"
                     create.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -139,9 +139,11 @@ actor EveClient {
                     create.timeoutInterval = 15
                     EveAuth.apply(token, to: &create)
                     let (data, response) = try await session.data(for: create)
-                    guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true,
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    guard (200..<300).contains(status),
                           let created = try? JSONDecoder().decode(SessionCreated.self, from: data)
                     else {
+                        if EveAuth.isMissing(token, refusedWith: status) { throw EveAuth.missingToken }
                         throw URLError(.badServerResponse)
                     }
                     let sessionId = created.sessionId

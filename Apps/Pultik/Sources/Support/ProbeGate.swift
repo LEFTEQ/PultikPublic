@@ -85,6 +85,16 @@ struct HTTPStatusError: Error {
     let status: Int
 }
 
+/// A credential the app has no sanctioned place to read: names what is
+/// missing and where the human sets it, never a silent nil. No retry can
+/// conjure it, so it classifies as `.rejected`.
+struct MissingCredential: LocalizedError {
+    let what: String
+    let whereToSet: String
+
+    var errorDescription: String? { "no \(what): \(whereToSet)" }
+}
+
 extension ProbeFailure {
     /// Maps a thrown error onto the two classes. Anything unrecognised is
     /// treated as merely unreachable — the gentler ladder — because guessing
@@ -96,6 +106,7 @@ extension ProbeFailure {
             default: return .unreachable("HTTP \(http.status)")
             }
         }
+        if error is MissingCredential { return .rejected(error.localizedDescription) }
         if let url = error as? URLError {
             switch url.code {
             case .userAuthenticationRequired: return .rejected("no credential")
@@ -181,6 +192,9 @@ final class ProbeGate {
         let until: Date
         /// The far side refused us, as opposed to never answering.
         let rejected: Bool
+
+        /// A failure set it (not a trial's re-arm or a revived path).
+        var struck = false
 
         var id: String { target.rawValue }
         var remaining: TimeInterval { max(0, until.timeIntervalSinceNow) }
@@ -281,6 +295,12 @@ final class ProbeGate {
         case .rejected: rejected = true
         case .unreachable: rejected = false
         }
+        // While a failure's pause holds, only requests already in flight can
+        // fail (`verdict` holds every new one): a burst failing together is
+        // one strike, not one each — eight replay reads answering 502 at once
+        // walked the ladder from 2 min to the hour in 5 ms. A refusal still
+        // outranks an unreachable pause.
+        if let pause = pauses[target], pause.struck, pause.until > Date(), pause.rejected || !rejected { return }
         var count = (strikes[target] ?? 0) + 1
         // A refusal skips the gentle end of the ladder outright: those are the
         // attempts that get counted against us, so the second one must not
@@ -294,7 +314,8 @@ final class ProbeGate {
             target: target,
             reason: failure.reason,
             until: Date().addingTimeInterval(wait),
-            rejected: rejected
+            rejected: rejected,
+            struck: true
         )
         NSLog("pultik: probe %@ paused for %.0fs — %@", target.rawValue, wait, failure.reason)
     }

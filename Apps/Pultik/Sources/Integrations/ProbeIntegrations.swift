@@ -47,6 +47,11 @@ final class ProbeIntegration: Integration {
                 ? .error("refused: \(pause.reason)")
                 : .attention("paused \(wait)m — \(pause.reason)")
         }
+        // A blank token is said, never implied: the calls still go out
+        // mesh-only, and a refused one names the missing token (EveAuth).
+        if let token, token.read() == nil {
+            return .connected("no token — mesh-only calls; paste one below")
+        }
         return .connected("no recent failures")
     }
 
@@ -89,7 +94,7 @@ extension ProbeIntegration {
             target: .eve,
             token: TokenSlot(
                 placeholder: "evk_ token",
-                footnote: "Sent as a bearer token on every eve call once eve's RBAC gate is on. Blank falls back to PULTIK_EVE_TOKEN in ~/.claude/.env.",
+                footnote: "Stored in the login keychain (pultik-eve) — Onyx keeps the human copy. It is the only source, sent as a bearer on every eve call: blank means mesh-only calls, which an eve enforcing its RBAC gate refuses.",
                 read: { store.eveToken },
                 write: { store.setEveToken($0) }
             )

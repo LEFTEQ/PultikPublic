@@ -50,32 +50,65 @@ enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 
     /// The bodies ⇥/⇧⇥ cycle, in order; empty = the module has one
-    /// (vt-7727 D1, D5). Timeline joins CI first and Estate after Machines,
-    /// and Map after it, once the shared renderer lands (D12).
+    /// (vt-7727 D1, D5). Timeline is CI's first; it retired Live (vt-7781 WP6).
     var views: [ModuleView] {
         switch self {
-        case .ci: [.live, .runs, .workflows, .failures, .fleet]
-        case .estate: [.machines, .backups]
+        case .ci: [.timeline, .runs, .workflows, .failures, .fleet]
+        case .estate: [.machines, .timeline, .map, .backups]
         default: []
         }
+    }
+
+    /// The list a filter slices when the shown view has no rows to filter
+    /// (vt-7727 D20): CI's `failed` is Runs' failed runs, so `.c failed`
+    /// lands there and typing it on the Timeline shows them.
+    func view(filtering filter: String) -> ModuleView? {
+        self == .ci && ModuleView.failedRuns(filter) != nil ? .runs : nil
     }
 }
 
 /// One of a module's bodies (vt-7727 D1): Semafor's views, kept per module
 /// by `ModuleRouter` and restored with its place.
 enum ModuleView: String, Codable, Sendable {
-    case live, runs, workflows, failures, fleet
-    case machines, backups
+    case timeline, runs, workflows, failures, fleet
+    case machines, map, backups
 
     var title: String {
         switch self {
-        case .live: "Live"
+        case .timeline: "Timeline"
         case .runs: "Runs"
         case .workflows: "Workflows"
         case .failures: "Failures"
         case .fleet: "Fleet"
         case .machines: "Machines"
+        case .map: "Map"
         case .backups: "Backups"
         }
     }
+
+    /// The view holds a canvas the keys can enter (vt-7727 D5): ↵ enters it
+    /// and Esc leaves it. Backups' timeline sits above its Pipelines table,
+    /// so there ↵ enters it only while no row is selected. nil for the lists.
+    var canvas: CanvasKind? {
+        switch self {
+        case .timeline, .backups: .timeline
+        case .map: .map
+        default: nil
+        }
+    }
+
+    /// Runs' failed slice (vt-7727 D20): a filter whose first word is
+    /// `failed` lists GitHub's failed runs; the rest still filters them.
+    /// nil: any other filter.
+    static func failedRuns(_ filter: String) -> String? {
+        let words = filter.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1)
+        guard words.first?.lowercased() == "failed" else { return nil }
+        return words.count > 1 ? words[1].trimmingCharacters(in: .whitespaces) : ""
+    }
+}
+
+/// What an entered canvas does with its arrows (vt-7727 D5, D11): a
+/// timeline steps its outcomes, the map walks its nodes.
+enum CanvasKind: String, Sendable {
+    case timeline, map
 }
