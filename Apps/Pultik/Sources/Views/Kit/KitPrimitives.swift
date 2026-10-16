@@ -87,6 +87,9 @@ struct StatusDot: View {
     let tone: Color
     var style: Style = .solid
     var size: CGFloat = 7
+    /// Pulse and spin only on a displayed body of a presented panel: a hidden
+    /// warm body's repeating effect re-renders the panel every frame (`animates`).
+    @Environment(\.animates) private var animates
 
     var body: some View {
         switch style {
@@ -98,10 +101,15 @@ struct StatusDot: View {
             Image(systemName: "circle.fill")
                 .font(.system(size: size))
                 .foregroundStyle(tone)
-                .symbolEffect(.pulse, options: .repeating)
+                .symbolEffect(.pulse, options: .repeating, isActive: animates)
                 .frame(width: size, height: size)
         case .spin:
-            ProgressView().controlSize(.mini).tint(tone).frame(width: size + 3, height: size + 3)
+            if animates {
+                ProgressView().controlSize(.mini).tint(tone).frame(width: size + 3, height: size + 3)
+            } else {
+                Circle().trim(from: 0, to: 0.75).stroke(tone, lineWidth: 1.5)
+                    .frame(width: size, height: size).frame(width: size + 3, height: size + 3)
+            }
         }
     }
 }

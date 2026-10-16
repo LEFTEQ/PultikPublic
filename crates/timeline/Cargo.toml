@@ -1,0 +1,17 @@
+[package]
+name = "timeline"
+description = "The infinite, zoomable timeline (CI, Estate, Backups lenses) and the estate map, drawn on the canvas crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+canvas-draw.workspace = true
+canvas-text.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

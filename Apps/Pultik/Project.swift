@@ -1,18 +1,20 @@
 import ProjectDescription
 import ProjectDescriptionHelpers
 
-// ── Rust build seam (workbench WP3b) ───────────────────────────────────────────────────
+// ── Rust build seam (workbench WP3b, timelines phase 2) ─────────────────────────────────
 //
 // Highlighting, symbols, search and the diff model are crates/code-core, reached through its
-// C ABI (crates/code-core-ffi, include/code_core.h) and Packages/CodeCore's Swift wrappers.
-// CODE_CORE_CARGO_TARGET_DIR follows $CARGO_TARGET_DIR when xcodebuild inherits it, else
-// <repo>/target. CODE_CORE_LIB is the static library the app links: one slice per arch built.
-let codeCoreSettings: SettingsDictionary = [
-    "CODE_CORE_CARGO_TARGET_DIR": "$(CARGO_TARGET_DIR:default=$(SRCROOT)/../../target)",
-    "CODE_CORE_LIB": "$(DERIVED_FILE_DIR)/libcode_core_ffi.a",
+// C ABI (crates/code-core-ffi, include/code_core.h) and Packages/CodeCore's Swift wrappers;
+// the timelines are crates/timeline, through crates/timeline-ffi (include/timeline.h) and
+// Packages/Timeline. Both ABIs ship in ONE archive, crates/pultik-ffi (libpultik_ffi.a).
+// RUST_CARGO_TARGET_DIR follows $CARGO_TARGET_DIR when xcodebuild inherits it, else
+// <repo>/target. RUST_LIB is the static library the app links: one slice per arch built.
+let rustSettings: SettingsDictionary = [
+    "RUST_CARGO_TARGET_DIR": "$(CARGO_TARGET_DIR:default=$(SRCROOT)/../../target)",
+    "RUST_LIB": "$(DERIVED_FILE_DIR)/libpultik_ffi.a",
 ]
 
-/// Builds libcode_core_ffi for every arch in $ARCHS before Swift compiles (Debug: the active
+/// Builds libpultik_ffi for every arch in $ARCHS before Swift compiles (Debug: the active
 /// one; Release: arm64 and x86_64, since Pultík ships universal), then joins the slices. The
 /// host's arch builds without `--target`, so it shares <repo>/target/<profile> with every
 /// other cargo run. cargo does its own up-to-date check, so this runs every build. Release
@@ -27,12 +29,12 @@ let cargoBuild = TargetScript.pre(
       exit 1
     fi
     cd "$SRCROOT/../.."
-    export CARGO_TARGET_DIR="$CODE_CORE_CARGO_TARGET_DIR"
+    export CARGO_TARGET_DIR="$RUST_CARGO_TARGET_DIR"
     slices=""
     for arch in $ARCHS; do
       if [ "$arch" = "$(uname -m)" ]; then
-        cargo build -p code-core-ffi --profile "$CODE_CORE_CARGO_PROFILE"
-        slices="$slices $CARGO_TARGET_DIR/$CODE_CORE_CARGO_PROFILE_DIR/libcode_core_ffi.a"
+        cargo build -p pultik-ffi --profile "$RUST_CARGO_PROFILE"
+        slices="$slices $CARGO_TARGET_DIR/$RUST_CARGO_PROFILE_DIR/libpultik_ffi.a"
         continue
       fi
       case "$arch" in
@@ -40,13 +42,13 @@ let cargoBuild = TargetScript.pre(
         x86_64) triple=x86_64-apple-darwin ;;
         *) echo "error: no Rust target for $arch" >&2; exit 1 ;;
       esac
-      cargo build -p code-core-ffi --profile "$CODE_CORE_CARGO_PROFILE" --target "$triple"
-      slices="$slices $CARGO_TARGET_DIR/$triple/$CODE_CORE_CARGO_PROFILE_DIR/libcode_core_ffi.a"
+      cargo build -p pultik-ffi --profile "$RUST_CARGO_PROFILE" --target "$triple"
+      slices="$slices $CARGO_TARGET_DIR/$triple/$RUST_CARGO_PROFILE_DIR/libpultik_ffi.a"
     done
-    mkdir -p "$(dirname "$CODE_CORE_LIB")"
-    lipo -create $slices -output "$CODE_CORE_LIB"
+    mkdir -p "$(dirname "$RUST_LIB")"
+    lipo -create $slices -output "$RUST_LIB"
     """,
-    name: "Build code core (cargo)",
+    name: "Build the Rust core (cargo)",
     basedOnDependencyAnalysis: false
 )
 
@@ -59,6 +61,9 @@ let project = Project(
         // Workbench WP3b: highlighting, symbols, search and the diff model from the Rust
         // code core, over its C ABI (Packages/CodeCore/README.md).
         .local(path: "../../Packages/CodeCore"),
+        // Timelines phase 2: Semafor's timelines and the estate map on the Rust renderer, over
+        // their C ABI (Packages/Timeline/README.md).
+        .local(path: "../../Packages/Timeline"),
         // Workbench WP4: every code theme from one definition file, shared
         // with the Rust core (Packages/Theme/README.md).
         .local(path: "../../Packages/Theme"),
@@ -67,15 +72,15 @@ let project = Project(
         .local(path: "../../Packages/Links"),
     ],
     settings: .settings(
-        base: codeCoreSettings,
+        base: rustSettings,
         configurations: [
             .debug(name: .debug, settings: [
-                "CODE_CORE_CARGO_PROFILE": "dev",
-                "CODE_CORE_CARGO_PROFILE_DIR": "debug",
+                "RUST_CARGO_PROFILE": "dev",
+                "RUST_CARGO_PROFILE_DIR": "debug",
             ]),
             .release(name: .release, settings: [
-                "CODE_CORE_CARGO_PROFILE": "ffi-release",
-                "CODE_CORE_CARGO_PROFILE_DIR": "ffi-release",
+                "RUST_CARGO_PROFILE": "ffi-release",
+                "RUST_CARGO_PROFILE_DIR": "ffi-release",
             ]),
         ]
     ),
@@ -128,13 +133,23 @@ let project = Project(
             dependencies: [
                 .target(name: "PultikFanHelper"), .package(product: "Markdown"),
                 .package(product: "CodeCore"), .package(product: "CodeThemes"), .package(product: "Links"),
+                .package(product: "Timeline"),
             ],
             settings: .settings(base: [
                 "CODE_SIGN_IDENTITY": "-",
                 "CODE_SIGN_STYLE": "Automatic",
                 // The cargo phase writes to <repo>/target, outside Xcode's script sandbox.
                 "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
-                "OTHER_LDFLAGS": ["$(inherited)", "$(CODE_CORE_LIB)"],
+                // libpultik_ffi and what its Rust dependencies (wgpu on Metal, Core Text) need.
+                "OTHER_LDFLAGS": [
+                    "$(inherited)",
+                    "$(RUST_LIB)",
+                    "-framework", "Metal",
+                    "-framework", "QuartzCore",
+                    "-framework", "CoreText",
+                    "-framework", "CoreGraphics",
+                    "-framework", "IOSurface",
+                ],
             ])
         ),
         // Focused unit tests for pure logic (path repair, …). Not a UI lane:

@@ -176,24 +176,43 @@ extension StatusStore {
         }
     }
 
+    // MARK: - Keychain-backed tokens
+
+    /// A token kept in the login keychain (`service`/`token`), with the
+    /// plaintext copy an older build left in settings.json moved in on first
+    /// read. Only a genuinely absent item migrates: a locked or denied lookup
+    /// returns nil rather than the stale plaintext copy. A copy lingering
+    /// beside a keychain item (a migration whose save failed) is blanked on
+    /// every read until the save sticks. The value itself is never logged.
+    private func keychainToken(_ service: String, legacy: WritableKeyPath<Preferences, String?>,
+                               name: String) -> String? {
+        let stored: String?
+        do {
+            stored = try Keychain.lookup(service: service, account: "token")
+        } catch {
+            NSLog("pultik: %@ token keychain lookup failed: %@", name, error.localizedDescription)
+            return nil
+        }
+        if let stored {
+            if preferences[keyPath: legacy] != nil { mutate { $0[keyPath: legacy] = nil } }
+            return stored
+        }
+        guard let plaintext = preferences[keyPath: legacy] else { return nil }
+        if let failure = Keychain.write(service: service, account: "token", value: plaintext) {
+            NSLog("pultik: %@ token migration failed (%@) — keeping settings.json copy", name, failure)
+            return plaintext
+        }
+        mutate { $0[keyPath: legacy] = nil }
+        NSLog("pultik: %@ token migrated from settings.json to the keychain", name)
+        return plaintext
+    }
+
     // MARK: - Sentry settings
 
-    /// The Sentry token lives in the login keychain (service `pultik-sentry`).
-    /// A token found in settings.json — where it sat in plaintext before the
-    /// integrations hub — is migrated in and blanked on first read, so old
-    /// installs upgrade themselves without losing access mid-poll.
+    /// The Sentry token lives in the login keychain (service `pultik-sentry`);
+    /// a settings.json copy from before the integrations hub migrates in.
     var sentryToken: String? {
-        if let token = Keychain.read(service: "pultik-sentry", account: "token") {
-            return token
-        }
-        guard let legacy = preferences.sentryToken else { return nil }
-        if let failure = Keychain.write(service: "pultik-sentry", account: "token", value: legacy) {
-            NSLog("pultik: sentry token migration failed (%@) — keeping settings.json copy", failure)
-            return legacy
-        }
-        mutate { $0.sentryToken = nil }
-        NSLog("pultik: sentry token migrated from settings.json to the keychain")
-        return legacy
+        keychainToken("pultik-sentry", legacy: \.sentryToken, name: "sentry")
     }
 
     /// Read-only view for the Integrations pane (preferences itself stays
@@ -225,6 +244,9 @@ extension StatusStore {
             // copy go — it must not linger to shadow the keychain value.
             mutate { $0.sentryToken = nil }
         }
+        // A new token voids the breaker's verdict on the old one: a pause
+        // armed by a missing or refused token must not hold this one for 30 min.
+        if failure == nil { gate.succeeded(.sentry) }
         lastSentryRefresh = nil
         Task { await refresh() }
         return failure.map { "keychain refused the token: \($0)" }
@@ -232,17 +254,31 @@ extension StatusStore {
 
     // MARK: - eve settings
 
+    /// The eve token lives in the login keychain (service `pultik-eve`), the
+    /// same way as `sentryToken`.
     var eveToken: String? {
-        preferences.eveToken
+        keychainToken("pultik-eve", legacy: \.eveToken, name: "eve")
     }
 
-    /// nil on success, matching `setSentryToken` — settings.json writes have
-    /// no failure channel of their own, so this one is always nil today.
+    /// nil on success, or the keychain's complaint, exactly as `setSentryToken`.
     @discardableResult
     func setEveToken(_ token: String?) -> String? {
         let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        mutate { $0.eveToken = (trimmed?.isEmpty ?? true) ? nil : trimmed }
+        let failure: String? = if let trimmed, !trimmed.isEmpty {
+            Keychain.write(service: "pultik-eve", account: "token", value: trimmed)
+        } else {
+            Keychain.delete(service: "pultik-eve", account: "token")
+        }
+        if let failure {
+            // As for Sentry: a failed write or delete leaves the old
+            // credential live, so the legacy copy must not be blanked yet.
+            NSLog("pultik: eve token keychain write failed: %@", failure)
+        } else if preferences.eveToken != nil {
+            mutate { $0.eveToken = nil }
+        }
+        // A new token voids a pause armed by the missing or refused old one.
+        if failure == nil { gate.succeeded(.eve) }
         Task { await refresh() }
-        return nil
+        return failure.map { "keychain refused the token: \($0)" }
     }
 }

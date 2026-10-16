@@ -1,0 +1,29 @@
+[package]
+name = "code-core"
+description = "The code core: rope buffer, line index, viewport-first layout, tree-sitter highlighting, symbols, search, the diff model and the editing model (multi-cursor selections, undo, find and replace). Renderer-free and platform-free (workbench W13)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ropey.workspace = true
+unicode-width.workspace = true
+regex.workspace = true
+similar.workspace = true
+theme.workspace = true
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-html.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-yaml.workspace = true
+tree-sitter-md.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-php.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

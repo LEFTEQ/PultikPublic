@@ -28,7 +28,10 @@
         "hunk": "#262A2D",
         "header": "#24282B",
         "findMatch": "#E5A01A4D",
-        "border": "#FFFFFF14"
+        "border": "#FFFFFF14",
+        "error": "#E58A7F",
+        "warning": "#FFB86B",
+        "info": "#57C7C3"
       },
       "syntax": {
         "keyword": { "color": "#EAA35E" },
@@ -83,7 +86,10 @@
         "hunk": "#31363F",
         "header": "#2F333D",
         "findMatch": "#528BFF3D",
-        "border": "#ABB2BF26"
+        "border": "#ABB2BF26",
+        "error": "#E06C75",
+        "warning": "#E5C07B",
+        "info": "#61AFEF"
       },
       "syntax": {
         "keyword": { "color": "#C678DD" },
@@ -138,7 +144,10 @@
         "hunk": "#6E76811A",
         "header": "#161B22",
         "findMatch": "#9E6A03",
-        "border": "#30363D"
+        "border": "#30363D",
+        "error": "#F85149",
+        "warning": "#FFA657",
+        "info": "#79C0FF"
       },
       "syntax": {
         "keyword": { "color": "#FF7B72" },
@@ -193,7 +202,10 @@
         "hunk": "#F0F0F0",
         "header": "#F2F2F2",
         "findMatch": "#526FFF33",
-        "border": "#383A4233"
+        "border": "#383A4233",
+        "error": "#E45649",
+        "warning": "#CB7701",
+        "info": "#4078F2"
       },
       "syntax": {
         "keyword": { "color": "#A626A4" },
@@ -248,7 +260,10 @@
         "hunk": "#1111174A",
         "header": "#16161E",
         "findMatch": "#3D59A166",
-        "border": "#101014"
+        "border": "#101014",
+        "error": "#DB4B4B",
+        "warning": "#FF9E64",
+        "info": "#7AA2F7"
       },
       "syntax": {
         "keyword": { "color": "#BB9AF7" },

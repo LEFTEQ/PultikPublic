@@ -175,6 +175,10 @@ struct StatusPanelView: View {
     @State var topBarHeight: CGFloat = 0
     @State var centreChrome: CGFloat = 0
     var body: some View {
+        #if DEBUG
+        // A whole-panel update (vt-7781 AC 8): `timeline-bench` tells its slow frames from the engine's.
+        let _ = PanelBodyLog.mark()
+        #endif
         PanelShell(current: stripModule, scope: searchScope,
                    signals: ModuleSignals.make(store: store, fanStore: FanStore.shared,
                                                macHealth: MacHealthStore.shared),
@@ -498,6 +502,13 @@ struct StatusPanelView: View {
         let filter = inputs.filter
         let selected = inputs.selection
         let open: (String) -> Void = { clickRow($0) }
+        let shown = router.module == module
+        // A canvas view (vt-7727 D1): CI's or Estate's Timeline, Estate's Map.
+        if let slot = CanvasSlot(module: module, view: inputs.view), slot.fillsBody {
+            return CanvasPage(store: store, module: module, slot: slot, view: inputs.view, active: shown,
+                              entered: shown && router.canvasEntered, stack: inputs.stack,
+                              onView: { router.showView($0) }, onPop: { popCard() }, card: { cardView($0) })
+        }
         switch module {
         case .home:
             return nil
@@ -506,9 +517,8 @@ struct StatusPanelView: View {
         case .ci:
             let view = inputs.view
             let onView: (ModuleView) -> Void = { router.showView($0) }
+            // The Timeline is a canvas view (above); Live retired with it (vt-7781 WP6).
             switch view {
-            case .runs:
-                return CIRunsPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView, onOpen: open)
             case .workflows:
                 return CIWorkflowsPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView,
                                        onOpen: open)
@@ -518,7 +528,7 @@ struct StatusPanelView: View {
             case .fleet:
                 return CIFleetPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView, onOpen: open)
             default:
-                return CIPage(store: store, filter: filter, selectedID: selected, view: view, onView: onView)
+                return CIRunsPage(store: store, filter: filter, selectedID: selected, view: .runs, onView: onView, onOpen: open)
             }
         case .prod:
             return ProdMatrixPage(store: store, filter: filter, selectedID: selected, onOpen: open)
@@ -531,8 +541,11 @@ struct StatusPanelView: View {
                                 selectedID: selected, onOpen: open)
         case .estate:
             if inputs.view == .backups {
-                return BackupsPage(store: store, filter: filter, selectedID: selected, view: inputs.view,
-                                   onView: { router.showView($0) }, onOpen: open)
+                // Its timeline sits above the live table (vt-7781 WP7).
+                return BackupsPage(store: store, filter: filter, selectedID: selected, view: inputs.view, active: shown,
+                                   entered: shown && router.canvasEntered, stack: inputs.stack,
+                                   onView: { router.showView($0) }, onOpen: open, onPop: { popCard() },
+                                   card: { cardView($0) })
             }
             let mac = MacHealthPage(health: MacHealthStore.shared, fansShown: store.isSectionVisible("fans"),
                                     filter: filter, selectedID: selected, onOpen: open)
@@ -582,6 +595,8 @@ struct StatusPanelView: View {
     func warmBody(_ module: PanelModule, @ViewBuilder _ content: () -> some View) -> some View {
         let shown = warmth.displayed == module
         return content()
+            // A hidden body's pulses and spinners stop: they would re-render the panel every frame.
+            .environment(\.bodyShown, shown)
             .opacity(shown ? 1 : 0)
             .allowsHitTesting(shown)
             .accessibilityHidden(!shown)
@@ -598,6 +613,8 @@ struct StatusPanelView: View {
         case .file:
             guard let file = CodeFileRef(ref.id) else { return AnyView(EmptyView()) }
             return AnyView(FileCard(store: store, file: file))
+        case .mark:
+            return AnyView(MarkCard(store: store, ref: ref))
         }
     }
 
@@ -708,7 +725,7 @@ struct StatusPanelView: View {
             noteExpanded: global && expandedNoteID != nil,
             focusTargets: shown || bulk ? router.focusTargets : [],
             focus: shown || bulk ? router.focus : nil,
-            card: shown ? router.stack.last?.id : nil,
+            card: shown || router.canvasEntered ? router.stack.last?.id : nil,
             markable: global ? [] : markableIDs,
             bulk: bulk,
             bulkConfirm: bulk && router.confirming != nil,
@@ -717,8 +734,15 @@ struct StatusPanelView: View {
             codeShown: codeShown,
             codeSelection: codeShown && CodeCanvasView.active?.hasSelection == true,
             composing: shown && router.composing,
-            verbConfirm: shown && router.verbConfirm
+            verbConfirm: shown && router.verbConfirm,
+            canvas: shownCanvas == nil ? nil : router.view?.canvas,
+            canvasEntered: shownCanvas != nil && router.canvasEntered
         )
+    }
+
+    /// The entered module shows a canvas view (vt-7727 D5): its keys reach its engine.
+    var shownCanvas: CanvasSlot? {
+        router.module.flatMap { CanvasSlot(module: $0, view: router.view) }
     }
 
     /// A PR's Files changed tab is on screen: its code canvas takes ⌥Z and ⌘C.
@@ -856,6 +880,14 @@ struct StatusPanelView: View {
             router.requestCode(.search)
         case let .codeNavigation(references):
             router.requestCode(references ? .references : .definition)
+        case .enterCanvas:
+            withAnimation(Theme.Motion.focus(reduceMotion)) { router.enterCanvas() }
+        case let .canvas(move):
+            // The shown view's engine runs it; ↵ answers the selected mark's card.
+            guard let slot = shownCanvas else { return false }
+            if let card = TimelineStage.shared.perform(move, on: slot) {
+                withAnimation(Theme.Motion.push(reduceMotion)) { router.push(card) }
+            }
         case .ignore:
             break
         }
@@ -883,6 +915,8 @@ struct StatusPanelView: View {
             popCard()
         case .leaveDetail:
             router.leaveDetail()
+        case .leaveCanvas:
+            withAnimation(Theme.Motion.focus(reduceMotion)) { router.leaveCanvas() }
         case .cancelConfirm:
             router.confirm(nil)
         case .clearMarks:
@@ -920,6 +954,10 @@ extension StatusPanelView {
             return CIRunRef(key: card.id).flatMap { store.cachedCIRun($0) }.flatMap { URL(string: $0.run.url) }
         case .file:
             return CodeFileRef(card.id).flatMap { store.codeHost.fileURL(repo: $0.repo, sha: $0.sha, path: $0.path, line: $0.line) }
+        case .mark:
+            // A map app's is Semafor's app page; a timeline mark has none (a Semafor job's is its run's, WP6).
+            guard let named = CanvasSlot.mark(of: card), named.slot == .estateMap else { return nil }
+            return EstateMapCard.url(named.mark, store: store)
         }
     }
 }

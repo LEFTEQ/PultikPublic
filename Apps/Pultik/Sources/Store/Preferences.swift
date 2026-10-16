@@ -14,13 +14,11 @@ struct Preferences: Codable {
     /// after a bundle-id change the auto-enable must run once more, while a
     /// manual opt-out in Settings is still never silently re-enabled.
     var loginItemConfiguredFor: String?
-    /// Sentry API token override; when nil the SENTRY_AUTH_TOKEN cached in
-    /// ~/.claude/.env is used.
+    /// Legacy plaintext Sentry token: `StatusStore.sentryToken` moves it into
+    /// the login keychain (`pultik-sentry`) and blanks it on first read.
     var sentryToken: String?
-    /// eve `evk_` API token override; when nil the PULTIK_EVE_TOKEN cached in
-    /// ~/.claude/.env is used. (PULTIK_-prefixed on purpose: that file is
-    /// sourced by Claude sessions, where a bare EVE_TOKEN would override the
-    /// eve CLI's own.)
+    /// Legacy plaintext eve `evk_` token: `StatusStore.eveToken` moves it into
+    /// the login keychain (`pultik-eve`) and blanks it on first read.
     var eveToken: String?
     /// Sentry project slugs polled for production issues.
     var sentryProjects: [String] = Preferences.defaultSentryProjects

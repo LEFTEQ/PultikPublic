@@ -56,6 +56,8 @@ public enum PaletteRole: String, CaseIterable, Sendable {
     case findMatch
     /// Hairlines: under a file header, between panes.
     case border
+    /// A language server's diagnostics: the squiggle and the gutter mark.
+    case error, warning, info
 }
 
 /// What a highlighted run means. Each app maps its highlighter's kinds here.

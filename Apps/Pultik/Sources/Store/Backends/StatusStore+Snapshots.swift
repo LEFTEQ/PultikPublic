@@ -53,6 +53,11 @@ extension StatusStore {
         static let devbox = QueryResource<DevboxState>(name: "devbox.estate", schema: 2, staleAfter: 180)
         /// One host's Semafor views, keyed by its base URL (vt-7727 D10).
         static let semafor = QueryResource<SemaforHostState>(name: "semafor.views", staleAfter: 180)
+        // Each host × lens's newest 24 h of timeline (`semafor.timeline.<lens>`,
+        // keyed by the host's base URL, vt-7781 D10) is
+        // `TimelinePages.snapshotResource`: it writes them, and restores one
+        // on its key's first ask — never here at launch, which would cost
+        // their memory before any timeline shows.
     }
 
     // MARK: Keys
@@ -67,8 +72,8 @@ extension StatusStore {
         QueryKey(resource: Snapshots.github.name, identity: identity, scope: slugs.joined(separator: ","))
     }
 
-    func eveSnapshotKey(settingsToken: String?) async -> QueryKey {
-        let token = await EveAuth.shared.token(preferred: settingsToken) ?? ""
+    func eveSnapshotKey(settingsToken: String?) -> QueryKey {
+        let token = settingsToken ?? ""
         return QueryKey(resource: Snapshots.eve.name, identity: QueryKey.digest("eve\u{0}\(token)"))
     }
 
@@ -130,7 +135,7 @@ extension StatusStore {
     }
 
     private func restoreEve() async {
-        if let snapshot = await QueryRepository.shared.restore(Snapshots.eve, key: await eveSnapshotKey(settingsToken: preferences.eveToken)),
+        if let snapshot = await QueryRepository.shared.restore(Snapshots.eve, key: eveSnapshotKey(settingsToken: eveToken)),
            eveSessions.isEmpty, eveAlerts.isEmpty, eveApprovals.isEmpty {
             eveSessions = snapshot.value.sessions
             eveApprovals = snapshot.value.approvals

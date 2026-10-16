@@ -222,6 +222,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.panel?.discardContent()
                 self.panel = nil
             }
+            // Timeline pages go with the tree that drew them (vt-7781 D10),
+            // and the canvases' engines with their GPU devices.
+            self.store.releaseTimelines()
+            TimelineStage.shared.release()
             // Return freed view allocations to macOS instead of retaining
             // tens of MiB of empty allocator pages until memory pressure.
             // Highlight runs go with the code canvas that drew them.
@@ -359,6 +363,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "badgeAlertCount": store.badgeAlertCount,
             "badgeAlertCritical": store.badgeAlertCritical,
             "unseenFiringCount": store.unseenFiringCount,
+            // vt-7781 D10: the canvases' engines live only until the tree's release.
+            "timelineEngines": TimelineStage.shared.debugEngines,
         ], to: path)
     }
 

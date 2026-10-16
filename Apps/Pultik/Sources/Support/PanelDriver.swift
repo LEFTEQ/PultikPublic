@@ -14,7 +14,7 @@ import ScreenCaptureKit
 /// Commands (userInfo `cmd`): `open`, `close`, `size` (`text` = WxH, empty
 /// resets), `query` (`text`), `paste`
 /// (the clipboard through the field editor), `key`
-/// (`key` = enter|tab|up|down|left|right|esc|backspace|1–9|i|v, `mods` = comma
+/// (`key` = enter|tab|up|down|left|right|esc|backspace|1–9|i|v|n|minus|equal, `mods` = comma
 /// list of cmd|opt|shift|ctrl), `capture` (`path` → PNG), `state` (`path` → JSON of
 /// the palette state the view reports), `firing` (`text` = comma list of
 /// made-up alert names, `warning:Name` for a warning, empty clears).
@@ -65,7 +65,7 @@ enum PanelDriver {
         case "github-resume":
             ProbeGate.shared.succeeded(.github)
         case "query", "key", "paste", "state", "clear-preview", "clear-action", "mac-stop", "home-toggle", "mark",
-             "diff-fixture", "scroll-bench", "gutter", "pr-verb":
+             "diff-fixture", "scroll-bench", "gutter", "pr-verb", "timeline-demo", "timeline-bench", "timeline-scrub":
             NotificationCenter.default.post(name: paletteNotification, object: nil, userInfo: info)
         default:
             NSLog("pultik: debug driver ignored %@", String(describing: info))
@@ -98,6 +98,10 @@ enum PanelDriver {
         case "b": (code, chars) = (11, "b")
         case "f": (code, chars) = (3, "f")
         case "z": (code, chars) = (6, "z")
+        // An entered canvas's keys (vt-7727 D5): N now, − / = zoom.
+        case "n": (code, chars) = (45, "n")
+        case "minus", "-": (code, chars) = (27, "-")
+        case "equal", "=": (code, chars) = (24, "=")
         // ANSI key codes of the top-row digits — ⌘1–9 switch modules.
         case "1": (code, chars) = (18, "1")
         case "2": (code, chars) = (19, "2")

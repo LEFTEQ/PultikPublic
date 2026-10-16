@@ -78,6 +78,8 @@ actor SemaforClient {
     /// Each repo's job outcomes over Semafor's window (7 d) — `/api/v1/repos/health`.
     /// Read on a CI run's explicit selection (WP6), never polled; nil off-mesh.
     func repoHealth(at base: URL) async throws -> [SemaforRepoHealth] {
+        // Counted like every read (vt-7781 AC 9: none while hidden).
+        Self.requests.add("repos/health")
         let (data, response) = try await session.data(from: base.appending(path: "api/v1/repos/health"))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw URLError(.badServerResponse) }
@@ -89,43 +91,106 @@ actor SemaforClient {
     /// One read of Semafor's v1: the decoded value, or the failure the
     /// host's breaker backs off on. Only the Semafor lane calls these, and
     /// only while a view that draws them is on screen (D10).
-    private func read<Value>(_ base: URL, _ path: String, _ query: [URLQueryItem] = [],
+    private func read<Value>(_ base: URL, _ path: String, _ query: [URLQueryItem] = [], counter: String? = nil,
                              _ decode: (Data) throws -> Value) async -> (value: Value?, failure: ProbeFailure?)
+    {
+        let (value, _, failure) = await readSized(base, path, query, counter: counter ?? path, decode)
+        return (value, failure)
+    }
+
+    /// `read` with the answer's size in bytes (the JSON as received, after
+    /// gzip) — what `TimelinePages`' byte LRU counts. `counter` names the
+    /// request in `requests`: the timeline's edge, pages and bins apart.
+    private func readSized<Value>(_ base: URL, _ path: String, _ query: [URLQueryItem], counter: String,
+                                  _ decode: (Data) throws -> Value) async
+        -> (value: Value?, bytes: Int, failure: ProbeFailure?)
     {
         var components = URLComponents(url: base.appending(path: "api/v1/" + path), resolvingAgainstBaseURL: false)
         if !query.isEmpty { components?.queryItems = query }
-        guard let url = components?.url else { return (nil, .unreachable("bad semafor url")) }
+        guard let url = components?.url else { return (nil, 0, .unreachable("bad semafor url")) }
         let data: Data
         let response: URLResponse
         do {
-            Self.requests.add(path)
+            Self.requests.add(counter)
             (data, response) = try await session.data(from: url)
         } catch {
-            return (nil, .classify(error))
+            return (nil, 0, .classify(error))
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             let why = "semafor \(path) answered \(status)"
-            return (nil, [401, 403, 429].contains(status) ? .rejected(why) : .unreachable(why))
+            return (nil, 0, [401, 403, 429].contains(status) ? .rejected(why) : .unreachable(why))
         }
         do {
-            return (try decode(data), nil)
+            return (try decode(data), data.count, nil)
         } catch {
             NSLog("pultik: semafor %@ unreadable — %@", path, String(describing: error))
-            return (nil, .unreachable("semafor \(path) payload unreadable"))
+            return (nil, 0, .unreachable("semafor \(path) payload unreadable"))
         }
     }
 
-    func estateMap(at base: URL) async -> (value: SemaforEstateMap?, failure: ProbeFailure?) {
-        await read(base, "estate/map") { try SemaforTime.decoder().decode(SemaforEstateMap.self, from: $0) }
+    /// The estate now, or (`instant`) replayed at that moment.
+    func estateMap(at base: URL, instant: Date? = nil) async -> (value: SemaforEstateMap?, failure: ProbeFailure?) {
+        await read(base, "estate/map", instant.map { [URLQueryItem(name: "at", value: SemaforTime.replayString($0))] } ?? [],
+                   counter: instant == nil ? nil : "estate/map?at") {
+            try SemaforTime.decoder().decode(SemaforEstateMap.self, from: $0)
+        }
     }
 
     func findings(at base: URL) async -> (value: [SemaforFinding]?, failure: ProbeFailure?) {
         await read(base, "estate/findings", [], SemaforFinding.decode)
     }
 
-    func backups(at base: URL) async -> (value: SemaforBackups?, failure: ProbeFailure?) {
-        await read(base, "estate/backups") { try SemaforTime.decoder().decode(SemaforBackups.self, from: $0) }
+    /// The backups now, or (`instant`) replayed at that moment: ages from
+    /// it, `schedule` nil (timer facts are live only).
+    func backups(at base: URL, instant: Date? = nil) async -> (value: SemaforBackups?, failure: ProbeFailure?) {
+        await read(base, "estate/backups", instant.map { [URLQueryItem(name: "at", value: SemaforTime.replayString($0))] } ?? [],
+                   counter: instant == nil ? nil : "estate/backups?at") {
+            try SemaforTime.decoder().decode(SemaforBackups.self, from: $0)
+        }
+    }
+
+    /// How the boxes, the key box and the backup storage connect — the
+    /// embedded manifest, the same until Semafor redeploys.
+    func topology(at base: URL) async -> (value: SemaforEstateTopology?, failure: ProbeFailure?) {
+        await read(base, "estate/topology") { try SemaforTime.decoder().decode(SemaforEstateTopology.self, from: $0) }
+    }
+
+    // MARK: - History (vt-7781 WP4, `TimelinePages`)
+
+    /// `before` and the `span` of seconds before it, plus `bucket` seconds
+    /// for bins (no bucket = raw items).
+    private static func window(before: Date, span: Int, bucket: Int?) -> [URLQueryItem] {
+        [URLQueryItem(name: "before", value: SemaforTime.string(before)),
+         URLQueryItem(name: "span", value: "\(span)")]
+            + (bucket.map { [URLQueryItem(name: "bucket", value: "\($0)")] } ?? [])
+    }
+
+    /// One `/ci/timeline` page; `counter` tells the edge, pages and bins apart.
+    func ciTimeline(at base: URL, before: Date, span: Int, bucket: Int?, counter: String)
+        async -> (value: CITimelinePage?, bytes: Int, failure: ProbeFailure?)
+    {
+        await readSized(base, "ci/timeline", Self.window(before: before, span: span, bucket: bucket), counter: counter) {
+            try SemaforTime.decoder().decode(CITimelinePage.self, from: $0)
+        }
+    }
+
+    /// One `/estate/timeline` page, the default view or `view=backups`.
+    func estateTimeline(at base: URL, view: EstateTimelineView, before: Date, span: Int, bucket: Int?, counter: String)
+        async -> (value: EstateTimelinePage?, bytes: Int, failure: ProbeFailure?)
+    {
+        var query = Self.window(before: before, span: span, bucket: bucket)
+        if view == .backups { query.append(URLQueryItem(name: "view", value: "backups")) }
+        return await readSized(base, "estate/timeline", query, counter: counter) {
+            try SemaforTime.decoder().decode(EstateTimelinePage.self, from: $0)
+        }
+    }
+
+    /// Every lane at a past instant, from the job records (CI's replay).
+    func ciAt(at base: URL, instant: Date) async -> (value: SemaforCIAt?, failure: ProbeFailure?) {
+        await read(base, "ci/at", [URLQueryItem(name: "t", value: SemaforTime.replayString(instant))]) {
+            try SemaforTime.decoder().decode(SemaforCIAt.self, from: $0)
+        }
     }
 
     func lanes(at base: URL) async -> (value: [SemaforCILane]?, failure: ProbeFailure?) {

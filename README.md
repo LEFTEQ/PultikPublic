@@ -11,15 +11,29 @@ generated files.
 
 ## Build
 
-Requires macOS 26+, Xcode, and Tuist. The app lives in `Apps/Pultik/`, its local
-code-theme package in `Packages/Theme/`; the root `Workspace.swift` generates the
-workspace. `Packages/CodeCore/` is only the Swift face of the code core (syntax
-highlighting, symbols, code search, diffs): the Rust library behind it is not
-published, so the app's cargo build phase has nothing to build here.
+Requires macOS 26+, Xcode, Tuist and rustup: `rust-toolchain.toml` pins the Rust
+toolchain and its macOS targets, which rustup installs on first use. Nothing else:
+no Zig, no system libraries. The app lives in `Apps/Pultik/`; the root
+`Workspace.swift` generates the workspace. Its local packages are `Packages/Theme`
+(code themes), `Packages/Links` (deep links), and `Packages/CodeCore` and
+`Packages/Timeline`, the Swift faces of the Rust core in `crates/`: syntax
+highlighting, symbols, code search and diffs (`code-core`), and the zoomable
+timelines and estate map on a wgpu renderer (`timeline`, `canvas-*`). The app's
+cargo build phase compiles that core into one static library, `libpultik_ffi.a`
+(`crates/pultik-ffi`), before Swift compiles, so the first build takes a few
+minutes longer.
 
 ```sh
 tuist generate --no-open
 xcodebuild -workspace Pultik.xcworkspace -scheme Pultik -configuration Debug build
+```
+
+The Rust core builds and tests on its own, on macOS or Linux, at the versions
+`Cargo.lock` pins:
+
+```sh
+cargo build --locked -p pultik-ffi
+cargo test --locked -p timeline -p canvas-draw
 ```
 
 The optional Go CLI builds separately with Go 1.26+:
@@ -46,8 +60,7 @@ PR search keeps bounded metadata in `~/Library/Caches/Pultik/GitHub/`, separated
 by credential identity. Saved matches render before network work and remain available
 during throttling; query results and confirmed number misses suppress repeat requests.
 Recent history warms gradually, so an unseen historical PR still needs a first fetch.
-Requests share a paced queue with foreground priority. Run the focused Foundation
-contracts with `bash tools/test-foundation.sh` without launching a native app host.
+Requests share a paced queue with foreground priority.
 
 Native Debug checks use `tools/panel-drive.sh`. Its `open [screen]` command and
 the `PULTIK_OPEN_PANEL=<delay-seconds>` launch hook (with `-ToolkitScreen <name>`)
@@ -56,9 +69,9 @@ use the named screen when it is connected, falling back to the focused screen;
 `frame` reports the monitor name and bounds.
 Ordinary hotkey and menu-bar summons continue to follow the user's screen.
 
-The current implementation persists optional Sentry/Eve token overrides in that
-local JSON file; do not commit or share it. An empty override falls back to the
-existing local credential sources. The public tree contains no runtime settings.
+The Sentry and Eve tokens live only in the login keychain (`pultik-sentry`,
+`pultik-eve`); an older plaintext copy in that local JSON file moves there on
+first read. Do not commit or share that file. The public tree contains no runtime settings.
 Fan control needs the privileged helper and explicit elevation. Build and review
 before installing it on a machine you depend on.
 

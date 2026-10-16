@@ -216,24 +216,12 @@ final class SentryIntegration: Integration {
 
     init(store: StatusStore) { self.store = store }
 
-    /// Mirror of SentryClient's fallback chain, readable synchronously (the
-    /// client is an actor): keychain/settings via the store, else the
-    /// SENTRY_AUTH_TOKEN line cached in ~/.claude/.env.
-    private var hasToken: Bool {
-        if store.sentryToken != nil { return true }
-        let envFile = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".claude/.env")
-        guard let contents = try? String(contentsOf: envFile, encoding: .utf8) else { return false }
-        return contents.split(separator: "\n").contains {
-            $0.hasPrefix("SENTRY_AUTH_TOKEN=") && $0.count > "SENTRY_AUTH_TOKEN=".count + 1
-        }
-    }
-
     var status: IntegrationStatus {
         if isTesting { return .testing }
         if let testVerdict { return testVerdict }
-        guard hasToken else {
-            return .notConfigured("no token — set one below or via SENTRY_AUTH_TOKEN")
+        // The keychain is the only source: no plaintext file, no environment.
+        guard store.sentryToken != nil else {
+            return .notConfigured("no token — paste one below; Onyx keeps the human copy")
         }
         if let pause = ProbeGate.shared.pauses[.sentry], pause.until > Date() {
             return pause.rejected
@@ -267,7 +255,7 @@ final class SentryIntegration: Integration {
     private var tokenSlot: TokenSlot {
         TokenSlot(
             placeholder: "API token",
-            footnote: "Stored in the login keychain (pultik-sentry) — Onyx keeps the human copy. Blank falls back to SENTRY_AUTH_TOKEN in ~/.claude/.env. Projects list lives in settings.json.",
+            footnote: "Stored in the login keychain (pultik-sentry) — Onyx keeps the human copy. It is the only source: blank means no Sentry sweep from this Mac. Projects list lives in settings.json.",
             read: { [store] in store.sentryToken },
             write: { [weak self] value in
                 guard let self else { return nil }

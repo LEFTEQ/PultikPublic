@@ -17,7 +17,7 @@ struct KeyStroke: Equatable {
     let key: Key
     var command = false
     var shift = false
-    /// An ⌥ chord the panel owns (⌥Z); other ⌥ keys stay the system's.
+    /// An ⌥ chord the panel owns (⌥Z, ⌥←/→); other ⌥ keys stay the system's.
     var option = false
 }
 
@@ -77,17 +77,42 @@ struct KeyContext {
     /// A verb's confirm (merge, close) is open: only ↵ inside it runs the
     /// verb, Esc cancels it, and no letter reaches another verb (D5).
     var verbConfirm = false
+    /// The shown view is a canvas, a Timeline or the Map (vt-7727 D5): ↵
+    /// enters it. nil while a list is shown.
+    var canvas: CanvasKind?
+    /// ↵ entered that canvas: its keys are the canvas's (`canvasIntent`), and
+    /// none of them reaches the filter.
+    var canvasEntered = false
 }
 
 /// One peel of Esc (copilot shell layered Esc): note edit → expanded note →
 /// eve → the detail's focus ring → the top card (stay in Pultík D3) → the
-/// entered workbench (PR workbench D5) → the bulk confirm → the marks and the
-/// bulk pane (bulk actions D1) → the field's text (completion, path card,
-/// filter) → detail → selection → page → module → Home → close. It never
-/// closes the panel while a layer remains.
+/// entered workbench (PR workbench D5) → the entered canvas (vt-7727 D5) →
+/// the bulk confirm → the marks and the bulk pane (bulk actions D1) → the
+/// field's text (completion, path card, filter) → detail → selection → page
+/// → module → Home → close. It never closes the panel while a layer remains.
 enum EscStep: String, Equatable {
-    case cancelNoteEdit, closeComposer, blurText, foldNote, dismissEve, clearFocus, popCard, leaveDetail, cancelConfirm,
-         clearMarks, clearText, closeDetail, clearSelection, closePage, leaveModule, close
+    case cancelNoteEdit, closeComposer, blurText, foldNote, dismissEve, clearFocus, popCard, leaveDetail, leaveCanvas,
+         cancelConfirm, clearMarks, clearText, closeDetail, clearSelection, closePage, leaveModule, close
+}
+
+/// A key inside an entered canvas (vt-7727 D5, D11). The panel runs it on
+/// the shown view's engine; the sign is the direction (−1 back, +1 on).
+enum CanvasMove: Equatable, Sendable {
+    /// ←/→ on a timeline: the finished outcome before or after.
+    case outcome(Int)
+    /// ⇧←/→ on a timeline: every mark, by (start, id).
+    case mark(Int)
+    /// ⌥←/→: a fifth of the screen.
+    case pan(Int)
+    /// − / =: one level out or in.
+    case zoom(Int)
+    /// N: back to now, the playhead following it.
+    case now
+    /// An arrow on the map: the nearest node that way.
+    case node(dx: Int, dy: Int)
+    /// ↵: the selected mark's card.
+    case open
 }
 
 /// What a keystroke means; the panel performs it.
@@ -160,6 +185,10 @@ enum KeyIntent: Equatable {
     case codeSearch
     /// F12 / ⇧F12 on the canvas's word: its definition, or its references (D2).
     case codeNavigation(references: Bool)
+    /// ↵ on a Timeline or Map view: the canvas takes the keys (vt-7727 D5).
+    case enterCanvas
+    /// A key inside the entered canvas.
+    case canvas(CanvasMove)
     /// Consumed, nothing to do: ⇥ on a row with nothing to triage.
     case ignore
 }
@@ -176,6 +205,19 @@ enum KeyboardCoordinator {
         if context.textViewFocused, stroke.key != .esc { return nil }
         if context.verbConfirm, stroke.key != .esc {
             return stroke.key == .enter && !stroke.command ? .submitComposer : .ignore
+        }
+        // A canvas view (vt-7727 D5): ↵ enters it, and once entered its keys
+        // are the canvas's, never the filter's. ⌘ chords keep their meaning.
+        // Backups' timeline sits above its table: a selected row's ↵ is the
+        // row's detail, so ↑ past the first row hands ↵ to the canvas.
+        if let canvas = context.canvas, context.fieldFocused, !stroke.command {
+            if context.canvasEntered {
+                if let intent = canvasIntent(for: stroke, kind: canvas, card: context.card != nil) { return intent }
+            } else if stroke.key == .enter, !context.bulk,
+                      !(context.selection.map(context.items.contains) ?? false)
+            {
+                return .enterCanvas
+            }
         }
         let index = context.selection.flatMap { context.items.firstIndex(of: $0) }
         switch stroke.key {
@@ -216,12 +258,14 @@ enum KeyboardCoordinator {
             else { return nil }
             let tail = context.pendingToken.first.map { key.lowercased() == String($0) } ?? false
             return tail || key == " " ? .swallowToken(key) : nil
-        case .left where context.entered && context.card == nil, .right where context.entered && context.card == nil:
+        case .left where context.entered && context.card == nil && !stroke.option,
+             .right where context.entered && context.card == nil && !stroke.option:
             return .tab(stroke.key == .right ? 1 : -1)
         case .left, .right:
             // An empty field has no caret to move: ←/→ walk the strip, wrapping.
-            // With text (or a picker, path card or page up) they stay the field's.
-            guard context.fieldFocused, context.text.isEmpty, !stroke.command, !stroke.shift,
+            // With text (or a picker, path card or page up) they stay the field's,
+            // and so does ⌥←/→ outside an entered canvas.
+            guard context.fieldFocused, context.text.isEmpty, !stroke.command, !stroke.shift, !stroke.option,
                   !context.pathCard, !context.completion, !context.page, !context.eve, !context.noteEditing
             else { return nil }
             return .module((context.module ?? .home).neighbour(stroke.key == .right ? 1 : -1, in: context.order))
@@ -273,6 +317,8 @@ enum KeyboardCoordinator {
             // Inside a PR with nothing ringed ↵ has nothing to open.
             if !stroke.command, context.entered { return .ignore }
             if stroke.command, context.notesDraft { return .createNote }
+            // ⌘↵ under a card is the card's page, also over a canvas, which has no row.
+            if stroke.command, let card = context.card { return .openInBrowser(card) }
             if context.pathCard, context.selection == nil { return .runPathVerb }
             if let index {
                 let id = context.items[index]
@@ -300,6 +346,42 @@ enum KeyboardCoordinator {
         module == .prs || module == .sessions
     }
 
+    /// An entered canvas's keys (vt-7727 D5, D11): ←/→ step a timeline's
+    /// outcomes (⇧ every mark) or walk the map's nodes with ↑/↓, ⌥←/→ pan,
+    /// − / = zoom, N is now and ↵ opens the selected mark's card. Any other
+    /// key is swallowed: nothing types into the filter under the canvas. A
+    /// card over it owns ↑/↓, ⇥ and ↵. nil hands the stroke on (Esc peels).
+    static func canvasIntent(for stroke: KeyStroke, kind: CanvasKind, card: Bool) -> KeyIntent? {
+        if card {
+            switch stroke.key {
+            case .up, .down, .tab, .enter, .esc: return nil
+            default: return .ignore
+            }
+        }
+        switch stroke.key {
+        case .left, .right:
+            let sign = stroke.key == .right ? 1 : -1
+            if stroke.option { return .canvas(.pan(sign)) }
+            if kind == .map { return .canvas(.node(dx: sign, dy: 0)) }
+            return .canvas(stroke.shift ? .mark(sign) : .outcome(sign))
+        case .up, .down:
+            return kind == .map ? .canvas(.node(dx: 0, dy: stroke.key == .down ? 1 : -1)) : .ignore
+        case .enter:
+            return .canvas(.open)
+        case let .character(key):
+            switch key {
+            case "n", "N": return .canvas(.now)
+            case "-", "−", "_": return .canvas(.zoom(-1))
+            case "=", "+": return .canvas(.zoom(1))
+            default: return .ignore
+            }
+        case .tab, .backspace, .f12:
+            return .ignore
+        case .esc:
+            return nil
+        }
+    }
+
     /// The next layer Esc peels.
     static func escape(_ context: KeyContext) -> EscStep {
         if context.noteEditing { return .cancelNoteEdit }
@@ -311,6 +393,7 @@ enum KeyboardCoordinator {
         if context.focus != nil { return .clearFocus }
         if context.card != nil { return .popCard }
         if context.entered { return .leaveDetail }
+        if context.canvasEntered { return .leaveCanvas }
         // A confirm closes first; marks peel before the filter that may have narrowed them.
         if context.bulk, context.bulkConfirm { return .cancelConfirm }
         if context.bulk { return .clearMarks }
@@ -336,10 +419,16 @@ extension KeyStroke {
         switch event.keyCode {
         case 125: key = .down
         case 126: key = .up
-        // Plain ←/→ only: ⌥ and ⌃ arrows stay the field's and the system's.
+        // ⌃ arrows stay the system's. ⌥←/→ keep the modifier: an entered
+        // canvas pans with them, and the table hands them back to the field
+        // everywhere else (vt-7727 D5).
         case 123 where !flags.contains(.option) && !flags.contains(.control),
              124 where !flags.contains(.option) && !flags.contains(.control):
             key = event.keyCode == 123 ? .left : .right
+        case 123 where !flags.contains(.control), 124 where !flags.contains(.control):
+            self.init(key: event.keyCode == 123 ? .left : .right, command: command, shift: flags.contains(.shift),
+                      option: true)
+            return
         case 36, 76: key = .enter
         case 111: key = .f12
         case 48: key = .tab

@@ -101,6 +101,21 @@ final class StatusStore {
     /// A run's needs graph and critical path, read on selection, by
     /// `"<host>/<run id>"`.
     var semaforRunDetails: [String: SemaforRunDetail] = [:]
+    /// Semafor's paged history behind the timelines (vt-7781 WP4), read only
+    /// while a timeline is on screen; purged at the panel's tree release.
+    @ObservationIgnored lazy var timelinePages = TimelinePages(source: semaforTimelineSource,
+                                                                repository: QueryRepository.shared)
+    /// What the timeline on screen shows — its view sets it; nil = none.
+    @ObservationIgnored var timelineVisibility: TimelineVisibility?
+    @ObservationIgnored var timelineLoad: Task<Void, Never>?
+    @ObservationIgnored var timelineLoadAgain = false
+    /// The playhead's answers at an instant, by host; nil while live.
+    var timelineReplay: TimelineReplay?
+    /// Bumped by each return to live: an answer read before it never lands.
+    @ObservationIgnored var timelineReplayAsk: UInt64 = 0
+    /// One replay read in flight; the newest instant asked meanwhile goes next.
+    @ObservationIgnored var timelineReplayInFlight = false
+    @ObservationIgnored var timelineReplayNext: (lens: TimelineLens, at: Date)?
     /// A machine's per-core load and 24 h CPU, read when its detail opens
     /// (vt-7727 D9), by `ServerMetrics.id`.
     var machineHistory: [String: MachineHistory] = [:]
@@ -139,6 +154,9 @@ final class StatusStore {
     @ObservationIgnored var visibleModule: PanelModule?
     /// Its view (vt-7727 D5): which Semafor reads the lane makes.
     @ObservationIgnored var visibleView: ModuleView?
+    /// When the module or its view last changed: a read made "on entering"
+    /// is due only while older than this (vt-7781 D10).
+    @ObservationIgnored var visibleSince = Date.distantPast
     var globalError: String?
 
     let client = GitHubClient()
@@ -375,6 +393,7 @@ final class StatusStore {
         let before = Self.lanes.map(visibleCadence)
         visibleModule = module
         visibleView = view
+        visibleSince = Date()
         if Self.lanes.map(visibleCadence) != before { schedule.nudge() }
         if module != nil { kickSemafor() }
     }

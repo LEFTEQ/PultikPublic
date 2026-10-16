@@ -1,0 +1,15 @@
+[package]
+name = "pultik-ffi"
+description = "libpultik_ffi: the one Rust archive Pultík links, code-core-ffi and timeline-ffi as rlibs (their headers are code_core.h and timeline.h)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+code-core-ffi.workspace = true
+timeline-ffi.workspace = true

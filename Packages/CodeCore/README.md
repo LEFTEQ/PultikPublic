@@ -12,7 +12,8 @@ package wraps that ABI in Swift values and owns every allocation it hands back.
   status and frees the error message. Every result is freed with its `*_free` before the
   wrapper returns.
 
-The package links nothing. Its host links `libcode_core_ffi.a`: Pultík's `Project.swift`
+The package links nothing. Its host links `libpultik_ffi.a` (code-core-ffi inside Pultík's one
+Rust archive, `crates/pultik-ffi`): Pultík's `Project.swift`
 builds it with a cargo phase (`dev` for Debug, `ffi-release` for Release; one slice per arch,
 joined by `lipo`) and passes it in `OTHER_LDFLAGS`. `tools/test-foundation.sh` builds and links it
 for the Foundation harness.

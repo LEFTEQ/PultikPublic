@@ -1,0 +1,30 @@
+[package]
+name = "canvas-gpu"
+description = "The one renderer: wgpu device, CAMetalLayer surfaces, instanced pipelines (SDF rects, glyphs, cells, images)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+canvas-draw.workspace = true
+canvas-text.workspace = true
+bytemuck.workspace = true
+lyon_tessellation.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Only the backends we ship: Metal on Apple, Vulkan (+ lavapipe in CI) and GL elsewhere.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal"] }
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "gles"] }
+
+[dev-dependencies]
+# tests/diff_view.rs lays out a code block as an editor does ...
+code-core.workspace = true
+# ... and colours a diff by the house theme.
+theme.workspace = true
+png = "0.18.1"
