@@ -20,6 +20,8 @@
 //! - [`search`]: the identifier under a column, the line matcher and `git grep` records.
 //! - [`diff`]: unified lines, hunks, word diffs, side-by-side rows, a change set's rows and
 //!   their wrap layout.
+//! - [`merge`]: the three-way merge — git's line merge, then tree-sitter resolvers for the
+//!   conflicts it leaves — as regions tiling the base, both sides and the result.
 //!
 //! The public API is plain data (indices, byte ranges, owned strings) so a C ABI can carry
 //! it to Pultík unchanged. Columns: a tab runs to the next multiple of [`TAB`], wide chars and emoji take two,
@@ -31,6 +33,7 @@ pub mod diff;
 pub mod editor;
 pub mod layout;
 pub mod lines;
+pub mod merge;
 pub mod search;
 pub mod search_replace;
 pub mod symbols;

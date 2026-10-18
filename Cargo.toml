@@ -30,6 +30,7 @@ canvas-text = { path = "crates/canvas-text" }
 code-core = { path = "crates/code-core" }
 code-core-ffi = { path = "crates/code-core-ffi" }
 etagere = "0.3.0"
+imara-diff = { default-features = false, version = "0.2.0" }
 lyon_tessellation = "1.0.22"
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"

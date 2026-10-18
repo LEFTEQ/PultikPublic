@@ -13,6 +13,7 @@ use canvas_gpu::{Gpu, Target};
 use canvas_text::TextSystem;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 
 struct Shared {
     gpu: Gpu,
@@ -24,7 +25,12 @@ struct Shared {
 }
 
 thread_local! {
-    static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) };
+    /// The thread's device. Its own end (the thread's, the process quitting) never drops it: a
+    /// thread's thread-locals go last-registered first and the first attach registers this one
+    /// before anything draws, so wgpu's own (its lock tracing, in debug builds) are gone by then,
+    /// and the device's drop reaching them aborted every quit. A release still drops it (`None`).
+    static SHARED: RefCell<ManuallyDrop<Option<Shared>>> =
+        const { RefCell::new(ManuallyDrop::new(None)) };
     static BUILDS: Cell<u32> = const { Cell::new(0) };
 }
 
@@ -60,7 +66,7 @@ impl Surface {
             if shared.is_none() {
                 let gpu = Gpu::new().map_err(|e| Failure::Engine(e.to_string()))?;
                 BUILDS.set(BUILDS.get() + 1);
-                *shared = Some(Shared {
+                **shared = Some(Shared {
                     gpu,
                     text: TextSystem::new(),
                     attached: 0,
@@ -120,10 +126,10 @@ impl Drop for Surface {
         // The target goes before the device it was made on.
         drop(self.target.take());
         SHARED.with_borrow_mut(|shared| {
-            if let Some(s) = shared {
+            if let Some(s) = shared.as_mut() {
                 s.attached = s.attached.saturating_sub(1);
                 if s.attached == 0 && s.release {
-                    *shared = None;
+                    **shared = None;
                 }
             }
         });
@@ -134,9 +140,9 @@ impl Drop for Surface {
 /// is attached, else with the last detach. The next attach builds them again.
 #[unsafe(no_mangle)]
 pub extern "C" fn canvas_surface_release() {
-    SHARED.with_borrow_mut(|shared| match shared {
+    SHARED.with_borrow_mut(|shared| match shared.as_mut() {
         Some(s) if s.attached > 0 => s.release = true,
-        _ => *shared = None,
+        _ => **shared = None,
     });
 }
 
@@ -150,5 +156,56 @@ pub extern "C" fn canvas_surface_builds() -> u32 {
 /// The shared device exists now.
 #[unsafe(no_mangle)]
 pub extern "C" fn canvas_surface_live() -> bool {
-    SHARED.with_borrow(Option::is_some)
+    SHARED.with_borrow(|shared| shared.is_some())
+}
+
+#[cfg(all(test, target_vendor = "apple"))]
+mod tests {
+    use super::*;
+    use canvas_draw::{DisplayList, Op, Path, PathOp, Point, Rgba, TextRun};
+    use std::sync::Arc;
+
+    /// A thread that ends with its device alive and drawn with (the process quitting) ends
+    /// cleanly: its thread-locals' destructors never drop the device.
+    #[test]
+    fn a_thread_ends_with_its_drawn_device_alive() {
+        let ended = std::thread::spawn(|| {
+            // The slot first, as an attach touches it before anything draws.
+            SHARED.with_borrow(|_| ());
+            let gpu = Gpu::new().expect("a Metal device");
+            let mut text = TextSystem::new();
+            let mut off = gpu.offscreen(canvas_gpu::Viewport {
+                width_px: 200,
+                height_px: 100,
+                scale: 2.0,
+            });
+            let mut dl = DisplayList::new(Rgba::new(0.0, 0.0, 0.0, 1.0));
+            let white = Rgba::new(1.0, 1.0, 1.0, 1.0);
+            dl.ops.push(Op::Text(TextRun::new(
+                "fn main() {}",
+                Point::new(4.0, 4.0),
+                12.0,
+                white,
+            )));
+            let mut path = Path::new();
+            path.move_to(Point::new(0.0, 0.0))
+                .line_to(Point::new(50.0, 40.0))
+                .line_to(Point::new(0.0, 40.0))
+                .close();
+            dl.ops.push(Op::Path(PathOp::fill(Arc::new(path), white)));
+            gpu.render_offscreen(&mut off, &dl, &mut text)
+                .expect("a frame");
+            drop(off);
+            SHARED.with_borrow_mut(|shared| {
+                **shared = Some(Shared {
+                    gpu,
+                    text,
+                    attached: 0,
+                    release: false,
+                })
+            });
+        })
+        .join();
+        assert!(ended.is_ok());
+    }
 }

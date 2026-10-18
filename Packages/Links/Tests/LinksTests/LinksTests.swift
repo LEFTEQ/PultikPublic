@@ -93,4 +93,15 @@ final class LinksTests: XCTestCase {
         XCTAssertNil(SessionLink(scheme: "agentshell", session: String(repeating: "a", count: 257)))
         XCTAssertNotNil(SessionLink(scheme: "agentshell", session: String(repeating: "a", count: 256)))
     }
+
+    func testMergeLinkRoundTripsAPullRequestAndRefusesAnythingElse() throws {
+        let link = try XCTUnwrap(MergeLink(scheme: "AgentShell", repo: "acme/web.app", number: 42))
+        XCTAssertEqual(link.url.absoluteString, "agentshell://merge/acme/web.app/42")
+        XCTAssertEqual(MergeLink(link.url, scheme: "agentshell"), link)
+        XCTAssertNil(MergeLink(scheme: "agentshell", repo: "acme", number: 42))
+        XCTAssertNil(MergeLink(scheme: "agentshell", repo: "acme/web/app", number: 42))
+        XCTAssertNil(MergeLink(scheme: "agentshell", repo: "acme/web", number: 0))
+        XCTAssertNil(MergeLink(url("agentshell://merge/acme/web"), scheme: "agentshell"))
+        XCTAssertNil(MergeLink(url("agentshell://session/acme/web/42"), scheme: "agentshell"))
+    }
 }

@@ -2,7 +2,8 @@
 //! calls. Swift owns the data, paging, polling, cards, chrome and every key; it hands this crate
 //! plain data and gestures, and each engine owns its layout, hit testing, camera and drawing (on
 //! the canvas crates, into the host's `CAMetalLayer`): the timeline here (`canvas_timeline_*`),
-//! the estate map in [`map`] (`canvas_map_*`) and the diff in [`diff`] (`canvas_diff_*`), all on
+//! the estate map in [`map`] (`canvas_map_*`), the diff in [`diff`] (`canvas_diff_*`) and the merge in
+//! [`merge`] (`canvas_merge_*`), all on
 //! [`surface`]'s one shared device (`canvas_surface_*`). `include/canvas.h` is generated from
 //! this crate by cbindgen (`cargo xtask canvas-header`, `--check` for drift).
 //!
@@ -28,6 +29,7 @@ use timeline::scene::Hit;
 
 pub mod diff;
 pub mod map;
+pub mod merge;
 pub mod surface;
 use surface::Surface;
 use timeline::{Bin, Lens, Palette, Step, Timeline};

@@ -12,6 +12,7 @@ ropey.workspace = true
 unicode-width.workspace = true
 regex.workspace = true
 similar.workspace = true
+imara-diff.workspace = true
 theme.workspace = true
 tree-sitter.workspace = true
 tree-sitter-go.workspace = true

@@ -125,11 +125,68 @@
 
 #define CANVAS_TIMELINE_HIT_FRAME 7
 
+// A pane, left to right (the base is shown on demand).
+#define CANVAS_MERGE_PANE_BASE 0
+
+#define CANVAS_MERGE_PANE_OURS 1
+
+#define CANVAS_MERGE_PANE_RESULT 2
+
+#define CANVAS_MERGE_PANE_THEIRS 3
+
+// What a region of the result is (`code_core::merge::RegionKind`).
+#define CANVAS_MERGE_REGION_UNCHANGED 0
+
+#define CANVAS_MERGE_REGION_OURS 1
+
+#define CANVAS_MERGE_REGION_THEIRS 2
+
+#define CANVAS_MERGE_REGION_BOTH 3
+
+#define CANVAS_MERGE_REGION_RESOLVED 4
+
+#define CANVAS_MERGE_REGION_CONFLICT 5
+
+// How a resolver merged a conflict (`ResolutionKind`); NONE on every other region.
+#define CANVAS_MERGE_RESOLUTION_NONE 0
+
+#define CANVAS_MERGE_RESOLUTION_IMPORTS 1
+
+#define CANVAS_MERGE_RESOLUTION_BOTH_ADDED 2
+
+#define CANVAS_MERGE_RESOLUTION_LINES 3
+
+#define CANVAS_MERGE_RESOLUTION_WORDS 4
+
+#define CANVAS_MERGE_RESOLUTION_REORDERED 5
+
+// What a past merge's commit took where it differs from the engine (`Committed`).
+#define CANVAS_MERGE_COMMITTED_NONE 0
+
+#define CANVAS_MERGE_COMMITTED_OURS 1
+
+#define CANVAS_MERGE_COMMITTED_THEIRS 2
+
+#define CANVAS_MERGE_COMMITTED_BASE 3
+
+#define CANVAS_MERGE_COMMITTED_HAND 4
+
+#define CANVAS_MERGE_HIT_NONE 0
+
+#define CANVAS_MERGE_HIT_HEADER 1
+
+#define CANVAS_MERGE_HIT_LINE 2
+
+#define CANVAS_MERGE_HIT_RIBBON 3
+
 // One diff on screen.
 typedef struct CanvasDiff CanvasDiff;
 
 // One map on screen.
 typedef struct CanvasMap CanvasMap;
+
+// One merge on screen.
+typedef struct CanvasMerge CanvasMerge;
 
 // One timeline on screen.
 typedef struct CanvasTimeline CanvasTimeline;
@@ -407,6 +464,50 @@ typedef struct CanvasMapCopy {
   struct CanvasStr location;
   double age_s;
 } CanvasMapCopy;
+
+// One region: its kind, how it was resolved or committed, and its lines (0-based,
+// end-exclusive) in each text.
+typedef struct CanvasMergeRegion {
+  // A CANVAS_MERGE_REGION_*.
+  uint8_t kind;
+  // A CANVAS_MERGE_RESOLUTION_*.
+  uint8_t resolution;
+  // A CANVAS_MERGE_COMMITTED_*.
+  uint8_t committed;
+  uint32_t base_start;
+  uint32_t base_end;
+  uint32_t ours_start;
+  uint32_t ours_end;
+  uint32_t theirs_start;
+  uint32_t theirs_end;
+  uint32_t result_start;
+  uint32_t result_end;
+} CanvasMergeRegion;
+
+// What a point is over: a CANVAS_MERGE_HIT_* `kind`, its pane (header and line hits), the
+// line, and the region (-1: none).
+typedef struct CanvasMergeHit {
+  uint8_t kind;
+  uint8_t pane;
+  uint32_t line;
+  int64_t region;
+} CanvasMergeHit;
+
+// Where the merge is: its regions, the conflicts left and the resolutions, the region ⇥ is
+// on (-1: none), the scroll and the layout's height in points, the panes with highlights, and
+// whether the base pane shows.
+typedef struct CanvasMergeState {
+  uint32_t regions;
+  uint32_t conflicts;
+  uint32_t resolved;
+  // Regions a past merge's commit decided differently from the engine.
+  uint32_t committed;
+  int64_t current;
+  double top;
+  double height;
+  uint32_t highlighted;
+  bool shows_base;
+} CanvasMergeState;
 
 #define CANVAS_OK 0
 
@@ -954,6 +1055,183 @@ CanvasStatus canvas_map_hit(struct CanvasMap *h,
 // # Safety
 // `h` is a live map; `out` is valid for a write.
 CanvasStatus canvas_map_frame(struct CanvasMap *h, struct CanvasFrameReport *out, char **error);
+
+// A new merge at `font_size` points in code theme `theme`, with the host's `accent`: empty
+// until canvas_merge_set_file. Free it with canvas_merge_free.
+//
+// # Safety
+// `theme` is valid for the call; `out` is valid; `error` is null or valid for a write.
+CanvasStatus canvas_merge_new(struct CanvasStr theme,
+                              struct CanvasRgba accent,
+                              float font_size,
+                              struct CanvasMerge **out,
+                              char **error);
+
+// Free a merge (detaching it first).
+//
+// # Safety
+// `h` is null or a handle from canvas_merge_new, not used afterwards.
+void canvas_merge_free(struct CanvasMerge *h);
+
+// Draw into `layer` (a `CAMetalLayer *`), `width` × `height` points at `scale`, on the shared
+// device.
+//
+// # Safety
+// `h` is a live merge; `layer` is a valid CAMetalLayer that outlives the attachment.
+CanvasStatus canvas_merge_attach(struct CanvasMerge *h,
+                                 void *layer,
+                                 double width,
+                                 double height,
+                                 double scale,
+                                 char **error);
+
+// Stop drawing into the layer; the merge, the scroll and the shared device stay.
+//
+// # Safety
+// `h` is null or a live merge.
+void canvas_merge_detach(struct CanvasMerge *h);
+
+// The surface is now `width` × `height` points at `scale`; the stretch at the centre stays.
+//
+// # Safety
+// `h` is null or a live merge.
+void canvas_merge_resize(struct CanvasMerge *h, double width, double height, double scale);
+
+// One file's merge: `ours` and `theirs` over `base`, the language read from `path`; a past
+// merge passes what its commit committed (`has_committed`), so the result pane is that text
+// and each region says what the commit took. Highlights, the ⇥ region and the scroll reset.
+//
+// # Safety
+// The strings are valid for the call.
+CanvasStatus canvas_merge_set_file(struct CanvasMerge *h,
+                                   struct CanvasStr path,
+                                   struct CanvasStr base,
+                                   struct CanvasStr ours,
+                                   struct CanvasStr theirs,
+                                   struct CanvasStr committed,
+                                   bool has_committed,
+                                   char **error);
+
+// The panes' titles, four in CANVAS_MERGE_PANE_* order.
+//
+// # Safety
+// `labels` is valid for four strings, each valid for the call.
+CanvasStatus canvas_merge_set_labels(struct CanvasMerge *h,
+                                     const struct CanvasStr *labels,
+                                     char **error);
+
+// One pane's (CANVAS_MERGE_PANE_*) highlights: `line_count + 1` entries of `line_starts` index
+// each line's runs in `runs` (UTF-16 units from the line's start, as Swift's `LineTokens`
+// holds them). Ask canvas_merge_result for the result pane's text to highlight.
+//
+// # Safety
+// `runs` and `line_starts` are null with a zero count, or valid for theirs, for the call.
+CanvasStatus canvas_merge_set_tokens(struct CanvasMerge *h,
+                                     uint8_t pane_code,
+                                     const struct CanvasDiffRun *runs,
+                                     size_t run_count,
+                                     const uint32_t *line_starts,
+                                     size_t line_start_count,
+                                     char **error);
+
+// Draw in code theme `theme` with the host's `accent`.
+//
+// # Safety
+// `h` is a live merge; `theme` is valid for the call.
+CanvasStatus canvas_merge_set_theme(struct CanvasMerge *h,
+                                    struct CanvasStr theme,
+                                    struct CanvasRgba accent,
+                                    char **error);
+
+// Show the merge base as a fourth pane at the left; the stretch at the centre stays.
+//
+// # Safety
+// `h` is null or a live merge.
+void canvas_merge_set_shows_base(struct CanvasMerge *h, bool shows);
+
+// Two fingers moved the content by (`dx`, `dy`) points: positive scrolls toward the end. It
+// stops a key's jump.
+//
+// # Safety
+// `h` is null or a live merge.
+void canvas_merge_scroll(struct CanvasMerge *h, double dx, double dy);
+
+// A key's scroll (a CANVAS_DIFF_STEP_*) toward the end (`sign` > 0) or the top, eased unless
+// `animated` is false (Reduce Motion).
+//
+// # Safety
+// `h` is null or a live merge.
+void canvas_merge_step(struct CanvasMerge *h, uint8_t step, int8_t sign, bool animated);
+
+// ⇥ (`forward`) or ⇧⇥: the next conflict or resolution (wrapping), revealed a third of the
+// way down, eased unless not `animated`; its index, or -1 when the merge has none.
+//
+// # Safety
+// `h` is null or a live merge.
+int64_t canvas_merge_next(struct CanvasMerge *h, bool forward, bool animated);
+
+// Region `region` becomes the one ⇥ is on (-1: none), and is revealed when `reveal`.
+//
+// # Safety
+// `h` is null or a live merge.
+void canvas_merge_select(struct CanvasMerge *h, int64_t region, bool reveal, bool animated);
+
+// Region `index` into `out`; false past the last.
+//
+// # Safety
+// `h` is null or a live merge; `out` is valid for a write.
+bool canvas_merge_region(struct CanvasMerge *h, uint32_t index, struct CanvasMergeRegion *out);
+
+// Why region `index` reads as it does, in Pultík's words; null past the last. Free it with
+// canvas_string_free.
+//
+// # Safety
+// `h` is null or a live merge.
+char *canvas_merge_region_reason(struct CanvasMerge *h, uint32_t index);
+
+// The result pane's text (the merged file, or a past merge's commit), for the host to
+// highlight. Free it with canvas_string_free.
+//
+// # Safety
+// `h` is null or a live merge.
+char *canvas_merge_result(struct CanvasMerge *h);
+
+// One file's merge counted without a view: the conflicts left and the regions resolved, for
+// a file list. Takes no handle, so any thread may call it.
+//
+// # Safety
+// The strings are valid for the call; `conflicts` and `resolved` are valid for a write.
+CanvasStatus canvas_merge_summary(struct CanvasStr path,
+                                  struct CanvasStr base,
+                                  struct CanvasStr ours,
+                                  struct CanvasStr theirs,
+                                  uint32_t *conflicts,
+                                  uint32_t *resolved,
+                                  char **error);
+
+// What view point (`x`, `y`) is over.
+//
+// # Safety
+// `h` is null or a live merge.
+struct CanvasMergeHit canvas_merge_hit(struct CanvasMerge *h, double x, double y);
+
+// Each shown pane's title and lines in view (the panel driver's reading). Free it with
+// canvas_string_free.
+//
+// # Safety
+// `h` is null or a live merge.
+char *canvas_merge_visible_text(struct CanvasMerge *h);
+
+// # Safety
+// `h` is null or a live merge.
+struct CanvasMergeState canvas_merge_state(struct CanvasMerge *h);
+
+// Draw a frame if anything changed (or a key's jump is in flight). Call it from the display
+// link while it reports `animating`, and after any input.
+//
+// # Safety
+// `h` is a live merge; `out` is valid for a write.
+CanvasStatus canvas_merge_frame(struct CanvasMerge *h, struct CanvasFrameReport *out, char **error);
 
 // Drop the shared device and text system (the panel's 30 s tree release): now when no surface
 // is attached, else with the last detach. The next attach builds them again.

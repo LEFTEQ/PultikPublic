@@ -143,6 +143,76 @@ actor GitMirror {
                                  lineLimit: ChangeSet.mirrorLineLimit, byteBudget: ChangeSet.mirrorByteBudget)
     }
 
+    // MARK: - Merges
+
+    /// A merge's inputs (vt-7968): `ours` and `theirs`' merge base and every file both changed
+    /// since it, each side's text (and `commit`'s, a past merge's) from one batched read — the
+    /// blobs the mirror lacks come in one fetch first. Nothing but fetched objects is written:
+    /// the merge itself is the Rust engine's, never `git merge`'s.
+    func merge(_ repo: String, ours: String, theirs: String, commit: String?, password: String?) async throws
+        -> MergePreview {
+        let local = Invocation(environment: Self.localOnly)
+        let base = String(decoding: try await run(repo, ["merge-base", ours, theirs], password: nil, options: local).stdout,
+                          as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty else { throw Failure.missing("a merge base of \(ours) and \(theirs)") }
+        var changed: [Set<String>] = []
+        for side in [ours, theirs] {
+            let names = try await run(repo, ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+                                             "-z", base, side], password: nil, options: local).stdout
+            changed.append(Set(names.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }))
+        }
+        let paths = changed[0].intersection(changed[1]).sorted()
+        let revs = [base, ours, theirs] + (commit.map { [$0] } ?? [])
+        guard !paths.isEmpty else {
+            return MergePreview(ours: ours, theirs: theirs, base: base, commit: commit, files: [], skipped: [])
+        }
+        // Each side's blob of each path, from its tree (no blob read): absent where the side has none.
+        var blobs: [[String: String]] = []
+        for rev in revs {
+            let listed = try await run(repo, ["ls-tree", "-z", "--full-tree", rev, "--"] + paths, password: nil,
+                                       options: local).stdout
+            var ids: [String: String] = [:]
+            for entry in listed.split(separator: 0) {
+                let text = String(decoding: entry, as: UTF8.self)
+                guard let tab = text.firstIndex(of: "\t") else { continue }
+                let fields = text[..<tab].split(separator: " ")
+                if fields.count == 3, fields[1] == "blob" { ids[String(text[text.index(after: tab)...])] = String(fields[2]) }
+            }
+            blobs.append(ids)
+        }
+        let wanted = Array(Set(blobs.flatMap(\.values)))
+        try await fetchMissing(repo, wanted, password: password)
+        let contents = try await run(repo, ["cat-file", "--batch"], password: nil,
+                                     options: Invocation(input: Data(wanted.map { "\($0)\n" }.joined().utf8),
+                                                         environment: Self.localOnly)).stdout
+        let byID = Self.parse(batch: contents)
+        touch(repo)
+        var files: [MergeFile] = []
+        var skipped: [String] = []
+        for path in paths {
+            let datas = blobs.map { $0[path].flatMap { byID[$0] } ?? Data() }
+            guard datas.allSatisfy({ $0.count <= Self.mergeFileLimit && !$0.contains(0) }) else {
+                skipped.append(path)
+                continue
+            }
+            let texts = datas.map { String(decoding: $0, as: UTF8.self) }
+            files.append(MergeFile(path: path, base: texts[0], ours: texts[1], theirs: texts[2],
+                                   committed: commit == nil ? nil : texts[3]))
+        }
+        return MergePreview(ours: ours, theirs: theirs, base: base, commit: commit, files: files, skipped: skipped)
+    }
+
+    /// A merge commit's two parents; nil for any other commit.
+    func parents(_ repo: String, of sha: String) async throws -> (ours: String, theirs: String)? {
+        let listed = try await run(repo, ["rev-list", "--no-walk", "--parents", "-n", "1", sha], password: nil,
+                                   options: Invocation(environment: Self.localOnly)).stdout
+        let ids = String(decoding: listed, as: UTF8.self).split(whereSeparator: \.isWhitespace).map(String.init)
+        return ids.count == 3 ? (ids[1], ids[2]) : nil
+    }
+
+    /// The largest side of a merged file the canvas draws.
+    private static let mergeFileLimit = 1 << 20
+
     private static let diffArguments = ["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
                                         "--find-renames", "--full-index", "--unified=3", "--src-prefix=a/",
                                         "--dst-prefix=b/"]

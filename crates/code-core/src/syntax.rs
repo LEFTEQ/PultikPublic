@@ -561,6 +561,15 @@ fn new_parser(grammar: Grammar) -> Result<Parser, SyntaxError> {
     Ok(parser)
 }
 
+/// `text` parsed whole as `language` (its main grammar): what the merge's structural resolvers
+/// read and check a merged file with.
+pub(crate) fn tree(text: &str, language: Language) -> Result<tree_sitter::Tree, SyntaxError> {
+    let grammar = language.grammar();
+    new_parser(grammar)?
+        .parse(text, None)
+        .ok_or(SyntaxError::Parse(grammar.name()))
+}
+
 /// A highlighted run: bytes `start..end`, never across a line end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {

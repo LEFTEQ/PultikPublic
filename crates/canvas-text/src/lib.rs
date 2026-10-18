@@ -23,6 +23,7 @@ mod code;
 pub mod code_view;
 pub mod diff_view;
 pub mod editor_view;
+pub mod merge_view;
 pub mod sprite;
 pub mod term;
 

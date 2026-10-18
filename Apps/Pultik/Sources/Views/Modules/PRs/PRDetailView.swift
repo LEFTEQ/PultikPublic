@@ -2,13 +2,14 @@ import SwiftUI
 
 /// The workbench's tabs (PR workbench D5), in ←/→ order.
 enum PRTab: String, CaseIterable {
-    case overview, commits, files, checks
+    case overview, commits, files, merge, checks
 
     var title: String {
         switch self {
         case .overview: "Overview"
         case .commits: "Commits"
         case .files: "Files changed"
+        case .merge: "Merge"
         case .checks: "Checks"
         }
     }
@@ -75,6 +76,8 @@ struct PRWorkbench: View {
     @State private var commitsFailure: String?
     @State private var scopedCommit: ChangeCommit?
     @State private var scopedFiles: ChangeSet?
+    /// A merge commit ↵ picked in Commits: the Merge tab shows its own merge (vt-7968).
+    @State private var mergeCommit: ChangeCommit?
 
     #if DEBUG
     /// The sections the open workbench draws, for the panel driver (`prSections`).
@@ -223,6 +226,7 @@ struct PRWorkbench: View {
         case .overview: return openThreads(conversation).map { "thread:\($0.id)" }
         case .commits: return PRCommitsTab.focusTargets(commits)
         case .files: return PRFilesTab.focusTargets(files)
+        case .merge: return PRMergeTab.focusTargets()
         case .checks: return badges.filter { $0.run != nil }.map(\.id)
         }
     }
@@ -233,6 +237,8 @@ struct PRWorkbench: View {
             case .overview: DetailTabs.Tab(id: tab.rawValue, title: tab.title)
             case .commits: DetailTabs.Tab(id: tab.rawValue, title: tab.title, count: commits?.count)
             case .files: DetailTabs.Tab(id: tab.rawValue, title: tab.title, count: conversation?.changedFiles)
+            case .merge: DetailTabs.Tab(id: tab.rawValue, title: tab.title,
+                                        alarming: conversation?.state == .open && conversation?.mergeable == .conflicting)
             case .checks: DetailTabs.Tab(id: tab.rawValue, title: tab.title, count: conversation == nil ? nil : badges.count,
                                          alarming: badges.contains { $0.outcome == .failed })
             }
@@ -259,6 +265,8 @@ struct PRWorkbench: View {
                            }) {
                     attempt += 1
                 }
+            case .merge:
+                PRMergeTab(store: store, pr: conversation, commit: mergeCommit, active: active) { mergeCommit = nil }
             case .checks: checks(conversation, badges: badges, active: active)
             }
         } else if let failure {
@@ -327,7 +335,13 @@ struct PRWorkbench: View {
 
     /// ↵ on a commit (WP5): Files changed shows that commit's own diff until
     /// the scope is cleared; nil returns to the whole PR.
+    /// A merge commit opens its own merge in the Merge tab instead (vt-7968).
     private func scope(_ commit: ChangeCommit?) {
+        if let commit, commit.parents.count > 1 {
+            mergeCommit = commit
+            withAnimation(Theme.Motion.tab(reduceMotion)) { router.selectTab(PRTab.merge.rawValue) }
+            return
+        }
         scopedCommit = commit
         scopedFiles = nil
         guard let commit else { return }
@@ -763,7 +777,7 @@ struct PRWorkbench: View {
                 .buttonStyle(.plain)
             }
             if pr.state == .open, pr.mergeable == .conflicting {
-                Chip("conflicts", .danger, symbol: "exclamationmark.triangle")
+                rollChip(Chip("conflicts", .danger, symbol: "exclamationmark.triangle"), to: .merge)
             }
             if let failure { Chip("not refreshed", .dashed, symbol: "clock").help(failure) }
             Spacer(minLength: 0)

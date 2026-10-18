@@ -19,7 +19,8 @@ final class GitHubPRDetailTests: XCTestCase {
               "body": "Fixes the cooldown.", "state": "OPEN", "isDraft": false,
               "createdAt": "2026-10-02T09:00:00Z", "updatedAt": "2026-10-10T14:00:00Z", "mergedAt": null,
               "author": {"login": "lukas"}, "baseRefName": "main", "headRefName": "feat/pool",
-              "baseRefOid": "base1", "headRefOid": "head1", "additions": 120, "deletions": 30, "changedFiles": 4,
+              "baseRefOid": "base1", "headRefOid": "head1", "baseRef": {"target": {"oid": "tip1"}},
+              "additions": 120, "deletions": 30, "changedFiles": 4,
               "mergeable": "MERGEABLE", "reviewDecision": "CHANGES_REQUESTED",
               "reviewRequests": {"nodes": [{"requestedReviewer": {"login": "eve-bot"}},
                                            {"requestedReviewer": {"name": "core"}}, {"requestedReviewer": null}]},
@@ -63,6 +64,7 @@ final class GitHubPRDetailTests: XCTestCase {
         XCTAssertEqual(pr.reviewVerdict, .changesRequested)
         XCTAssertEqual(pr.ref.key, "gh:o/eve#412")
         XCTAssertEqual([pr.baseSHA, pr.headSHA], ["base1", "head1"])
+        XCTAssertEqual(pr.baseTipSHA, "tip1", "the merge preview's ours: the base branch now")
     }
 
     func testQuotaExhaustionAndAMissingPullRequestNeverDecodeAsAnEmptyPR() {

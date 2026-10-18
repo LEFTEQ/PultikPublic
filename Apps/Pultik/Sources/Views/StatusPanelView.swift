@@ -733,6 +733,7 @@ struct StatusPanelView: View {
             verbKeys: shown && router.entered ? router.verbKeys : [],
             codeShown: codeShown,
             codeSelection: codeShown && CodeCanvasView.active?.hasSelection == true,
+            mergeShown: mergeShown,
             composing: shown && router.composing,
             verbConfirm: shown && router.verbConfirm,
             canvas: shownCanvas == nil ? nil : router.view?.canvas,
@@ -748,6 +749,11 @@ struct StatusPanelView: View {
     /// A PR's Files changed tab is on screen: its code canvas takes ⌥Z and ⌘C.
     var codeShown: Bool {
         router.module == .prs && detailShown && router.stack.isEmpty && router.shownTab == PRTab.files.rawValue
+    }
+
+    /// A PR's Merge tab is on screen (vt-7968): its canvas takes ⇥ and ⌥B.
+    var mergeShown: Bool {
+        router.module == .prs && detailShown && router.stack.isEmpty && router.shownTab == PRTab.merge.rawValue
     }
 
     /// Performs what the coordinator decided; false lets the key through to
@@ -872,6 +878,10 @@ struct StatusPanelView: View {
             CodePreferences.shared.toggleWraps()
         case .toggleSplit:
             CodePreferences.shared.toggleSplit()
+        case let .mergeNext(step):
+            router.mergeNext(forward: step > 0)
+        case .toggleMergeBase:
+            router.mergeShowsBase.toggle()
         case .copyCode:
             return CodeCanvasView.active?.copySelection() ?? false
         case .submitComposer:

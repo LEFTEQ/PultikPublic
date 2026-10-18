@@ -37,7 +37,7 @@ enum GitHubPRDetail {
         fragment PRFields on PullRequest {
           number title url body state isDraft createdAt updatedAt mergedAt
           author { login }
-          baseRefName headRefName baseRefOid headRefOid
+          baseRefName headRefName baseRefOid headRefOid baseRef { target { oid } }
           additions deletions changedFiles mergeable reviewDecision
           reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
           latestOpinionatedReviews(first: 20) { nodes { author { login } state submittedAt } }
@@ -134,7 +134,8 @@ enum GitHubPRDetail {
             ref: ChangeRequestRef(repo: ref.repo, number: pr.number), title: pr.title, url: pr.url, body: pr.body,
             state: state, isDraft: pr.isDraft, author: pr.author?.login, createdAt: pr.createdAt,
             updatedAt: pr.updatedAt, mergedAt: pr.mergedAt, baseRef: pr.baseRefName, headRef: pr.headRefName,
-            baseSHA: pr.baseRefOid, headSHA: pr.headRefOid, additions: pr.additions, deletions: pr.deletions,
+            baseSHA: pr.baseRefOid, headSHA: pr.headRefOid, baseTipSHA: pr.baseRef?.target?.oid,
+            additions: pr.additions, deletions: pr.deletions,
             changedFiles: pr.changedFiles, mergeable: mergeable, decision: pr.reviewDecision.flatMap(verdict),
             reviews: pr.latestOpinionatedReviews.nodes.compactMap { $0 }.map {
                 ChangeRequest.Review(author: $0.author?.login ?? "ghost", verdict: verdict($0.state) ?? .commented,
@@ -518,6 +519,15 @@ enum GitHubPRDetail {
         let nodes: [Node?]
     }
 
+    /// A ref's commit (`baseRef { target { oid } }`).
+    private struct RefNode: Decodable {
+        struct Target: Decodable {
+            let oid: String
+        }
+
+        let target: Target?
+    }
+
     private struct Actor: Decodable {
         let login: String
     }
@@ -537,6 +547,8 @@ enum GitHubPRDetail {
         let headRefName: String
         let baseRefOid: String
         let headRefOid: String
+        /// The base branch now; nil once it is deleted.
+        let baseRef: RefNode?
         let additions: Int
         let deletions: Int
         let changedFiles: Int

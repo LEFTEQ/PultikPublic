@@ -95,6 +95,43 @@ extension StatusStore {
             try await GitMirror.shared.commitChangeSet(repo, sha: sha, password: try await host.gitPassword(identity: identity))
         }
     }
+
+    /// An open pull request's merge preview (vt-7968): the base branch's tip — the
+    /// conversation's `baseTipSHA`, else the branch as just fetched — merged with the head.
+    /// Read when the Merge tab opens, never polled; the merge itself is the Rust engine's.
+    func mergePreview(_ request: ChangeRequest) async throws -> MergePreview {
+        let host = codeHost
+        let identity = try await host.identity()
+        let repo = request.ref.repo
+        let password = try await host.gitPassword(identity: identity)
+        let mirror = GitMirror.shared
+        try await mirror.prepare(repo, remote: host.remoteURL(repo: repo))
+        // Only a commit the mirror lacks (or a tip the conversation never named) costs a fetch:
+        // the Files changed read has usually brought both.
+        let wanted = [request.headSHA] + [request.baseTipSHA].compactMap { $0 }
+        var lacking = request.baseTipSHA == nil
+        for sha in wanted where !(await mirror.hasCommit(repo, sha)) { lacking = true }
+        if lacking {
+            try await mirror.fetch(repo, refspecs: ["+refs/pull/\(request.number)/head:refs/pull/\(request.number)/head",
+                                                    "+refs/heads/\(request.baseRef):refs/remotes/origin/\(request.baseRef)"],
+                                   password: password)
+            for sha in wanted where !(await mirror.hasCommit(repo, sha)) {
+                try await mirror.fetch(repo, refspecs: [sha], password: password)
+            }
+        }
+        let ours = request.baseTipSHA ?? "refs/remotes/origin/\(request.baseRef)"
+        return try await mirror.merge(repo, ours: ours, theirs: request.headSHA, commit: nil, password: password)
+    }
+
+    /// A merge commit's own merge (vt-7968): its two parents merged again, beside what it
+    /// committed; nil when `sha` is not a merge commit.
+    func mergeCommitPreview(_ repo: String, sha: String) async throws -> MergePreview? {
+        let host = codeHost
+        let identity = try await host.identity()
+        let password = try await host.gitPassword(identity: identity)
+        guard let (ours, theirs) = try await GitMirror.shared.parents(repo, of: sha) else { return nil }
+        return try await GitMirror.shared.merge(repo, ours: ours, theirs: theirs, commit: sha, password: password)
+    }
 }
 
 struct CodeSourceTooLarge: Error, LocalizedError {

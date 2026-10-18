@@ -460,6 +460,10 @@ final class ModuleRouter {
     /// The latest scroll the keys asked for; the shown tab's scroller applies
     /// each serial once.
     private(set) var scrollRequest: ScrollRequest?
+    /// The latest ⇥ / ⇧⇥ on a PR's Merge tab (vt-7968); its canvas applies each serial once.
+    private(set) var mergeStep: MergeStepRequest?
+    /// The Merge tab shows the merge base as a fourth pane (⌥B).
+    var mergeShowsBase = false
     /// A verb asked for by its letter, or ⌘K's menu; the workbench takes it.
     private(set) var verbRequest: VerbRequest?
 
@@ -512,6 +516,10 @@ final class ModuleRouter {
 
     func scroll(_ amount: ScrollAmount) {
         scrollRequest = ScrollRequest(amount: amount, serial: (scrollRequest?.serial ?? 0) &+ 1)
+    }
+
+    func mergeNext(forward: Bool) {
+        mergeStep = MergeStepRequest(forward: forward, serial: (mergeStep?.serial ?? 0) &+ 1)
     }
 
     /// `key` is the verb's letter, or `VerbRequest.menu` for ⌘K.
@@ -665,6 +673,11 @@ enum ScrollAmount: Equatable, Sendable {
 
 struct ScrollRequest: Equatable, Sendable {
     let amount: ScrollAmount
+    let serial: Int
+}
+
+struct MergeStepRequest: Equatable, Sendable {
+    let forward: Bool
     let serial: Int
 }
 

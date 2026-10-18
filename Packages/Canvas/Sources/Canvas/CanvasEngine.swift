@@ -6,7 +6,7 @@ import QuartzCore
 /// configure), a Rust panic was caught at the boundary (`panicked`), or an argument was unusable.
 public struct CanvasError: Error, LocalizedError, Equatable, Sendable {
     /// The engine that refused, as its message names it.
-    public enum Engine: String, Sendable { case timeline, map, diff }
+    public enum Engine: String, Sendable { case timeline, map, diff, merge }
     public enum Kind: String, Sendable { case failed, panicked, invalid }
 
     public let engine: Engine
