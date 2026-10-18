@@ -1,3 +1,6 @@
+#if !SWIFT_PACKAGE
+import AppKit
+#endif
 import XCTest
 @testable import Pultik
 
@@ -660,4 +663,26 @@ final class ModuleRouterTests: XCTestCase {
         router.clearMarks()
         XCTAssertNil(router.confirming)
     }
+
+    #if !SWIFT_PACKAGE
+    /// A chord's letter is the layout's own: on QWERTZ the key labelled Z is
+    /// the US Y key (code 16), and ⌥Z still unwraps. The Czech number row
+    /// types `+ěščřžýáí`, no letter, so ⌘1 stays on the key under the finger.
+    func testChordsReadTheLayoutsLetterAndDigitsTheirKey() throws {
+        var code = KeyContext()
+        code.codeShown = true
+        let qwertzZ = try XCTUnwrap(Self.event(keyCode: 16, characters: "z", [.option]))
+        XCTAssertEqual(KeyStroke(qwertzZ).flatMap { KeyboardCoordinator.intent(for: $0, in: code) }, .toggleWrap)
+        let czechOne = try XCTUnwrap(Self.event(keyCode: 18, characters: "+", [.command]))
+        let one = KeyboardCoordinator.intent(for: KeyStroke(key: .character("1"), command: true), in: KeyContext())
+        XCTAssertNotNil(one)
+        XCTAssertEqual(KeyStroke(czechOne).flatMap { KeyboardCoordinator.intent(for: $0, in: KeyContext()) }, one)
+    }
+
+    private static func event(keyCode: UInt16, characters: String, _ flags: NSEvent.ModifierFlags) -> NSEvent? {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+                         context: nil, characters: characters, charactersIgnoringModifiers: characters,
+                         isARepeat: false, keyCode: keyCode)
+    }
+    #endif
 }

@@ -117,7 +117,8 @@ fn span(img: &[u8], w: u32, y: u32, c: usize) -> Option<(u32, u32)> {
     Some((*lit.first()?, *lit.last()?))
 }
 
-/// The x extent of every bright pixel in rows `ys`.
+/// The x extent of every bright pixel in rows `ys` (its one reader is macOS-only).
+#[cfg(target_os = "macos")]
 fn ink(img: &[u8], w: u32, ys: std::ops::Range<u32>) -> Option<(u32, u32)> {
     let xs: Vec<u32> = ys
         .flat_map(|y| {

@@ -103,8 +103,9 @@ struct CodeSourceTooLarge: Error, LocalizedError {
 }
 
 /// The code canvas's preferences: long lines wrap under the gutter until ⌥Z
-/// turns it off (PR workbench D9, `codeUnwrapped`), and the code theme
-/// (workbench WP4, `codeTheme`), both persisted in settings.json.
+/// turns it off (PR workbench D9, `codeUnwrapped`), inline or side by side
+/// (⌥S, `codeSplit`), and the code theme (workbench WP4, `codeTheme`), all
+/// persisted in settings.json.
 @MainActor
 @Observable
 final class CodePreferences {
@@ -124,6 +125,16 @@ final class CodePreferences {
         wraps.toggle()
         let unwrapped = !wraps
         Preferences.update { $0.codeUnwrapped = unwrapped ? true : nil }
+    }
+
+    /// ⌥S: a PR's Files changed lays out side by side, like GitHub's split
+    /// diff (`codeSplit`); a file card stays inline (a whole file has no old side).
+    private(set) var split = Preferences.load().codeSplit == true
+
+    func toggleSplit() {
+        split.toggle()
+        let split = split
+        Preferences.update { $0.codeSplit = split ? true : nil }
     }
 
     /// Settings ▸ Code: switches every code surface now and saves the pick.

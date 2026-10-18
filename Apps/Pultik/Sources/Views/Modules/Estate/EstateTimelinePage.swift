@@ -1,5 +1,5 @@
+import Canvas
 import SwiftUI
-import Timeline
 
 /// Estate's and Backups' timelines on Semafor's estate history (vt-7781
 /// WP7, vt-7727 D1, D6): every host's window, each box from the Semafor

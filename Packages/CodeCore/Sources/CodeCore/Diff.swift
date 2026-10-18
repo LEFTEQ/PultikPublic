@@ -48,8 +48,9 @@ public struct DiffLine: Equatable, Sendable {
     }
 }
 
-/// A change set as rows (the core's `DiffDocument`): each file's header, then (unless it is
-/// folded) its lines, or why it has none. The notes are data; the app words them.
+/// A change set's files as the core reads them (its `DiffDocument`): each file's drawn lines,
+/// its language and whether it starts folded. The rows, their layout and the notes' words are
+/// the diff engine's (`crates/canvas-ffi`, Pultík's `Packages/Canvas`), not Swift's.
 public struct DiffRows: Sendable {
     /// One file of the change set, as far as its rows need it.
     public struct Input: Sendable {
@@ -70,37 +71,9 @@ public struct DiffRows: Sendable {
         public let lines: [DiffLine]
         public let language: SyntaxLanguage?
         public let collapsed: Bool
-        /// Each line's place in its side's patch-only text; nil where it is not that side's.
-        public let oldFragment: [Int?]
-        public let newFragment: [Int?]
-    }
-
-    /// Why a file shows a note row.
-    public enum Note: Equatable, Sendable {
-        case pastBudget, noDiff, folded(lines: Int, generated: Bool), cutHere, hostListsFirst(files: Int)
-    }
-
-    public enum Row: Equatable, Sendable {
-        case header(file: Int)
-        case line(file: Int, index: Int)
-        case note(file: Int, Note)
-        /// The space between two files.
-        case gap
-    }
-
-    /// What a layout reads: each row's kind and width.
-    public struct Shape: Sendable {
-        let kinds: [UInt8]
-        let columns: [UInt32]
     }
 
     public let files: [File]
-    public let rows: [Row]
-    /// Each row's drawn width in columns: the wrap model's input.
-    public let columns: [Int]
-    /// The gutter's figure width, shared by every file so the code column lines up.
-    public let digits: Int
-    public let shape: Shape
 
     /// `inputs` in drawn order; `truncated` when the host stopped listing before the last
     /// file; `toggled` the paths whose fold the reader flipped.
@@ -125,157 +98,13 @@ public struct DiffRows: Sendable {
             NSLog("code-core: a change set's rows: %@", error.localizedDescription)
         }
         guard let document = out?.pointee else {
-            self.init(files: [], rows: [], columns: [], digits: 3)
+            files = []
             return
         }
-        let files = Core.buffer(document.files, document.file_count).map { file in
+        files = Core.buffer(document.files, document.file_count).map { file in
             File(lines: DiffLine.lines(Core.buffer(file.lines, file.line_count)),
-                 language: SyntaxLanguage(code: file.language), collapsed: file.collapsed,
-                 oldFragment: Core.buffer(file.old_fragment, file.line_count).map(Core.number),
-                 newFragment: Core.buffer(file.new_fragment, file.line_count).map(Core.number))
+                 language: SyntaxLanguage(code: file.language), collapsed: file.collapsed)
         }
-        let rows = Core.buffer(document.rows, document.row_count).map(Self.row)
-        let columns = Core.buffer(document.columns, document.row_count).map(Int.init)
-        self.init(files: files, rows: rows, columns: columns, digits: Int(document.digits))
-    }
-
-    private init(files: [File], rows: [Row], columns: [Int], digits: Int) {
-        self.files = files
-        self.rows = rows
-        self.columns = columns
-        self.digits = digits
-        shape = Shape(kinds: rows.map(Self.kind), columns: columns.map { UInt32(clamping: $0) })
-    }
-
-    private static func row(_ row: CodeCoreDocRow) -> Row {
-        let file = Int(row.file)
-        switch Int32(row.kind) {
-        case CODE_CORE_ROW_HEADER: return .header(file: file)
-        case CODE_CORE_ROW_LINE: return .line(file: file, index: Int(row.index))
-        case CODE_CORE_ROW_NOTE:
-            let note: Note = switch Int32(row.note) {
-            case CODE_CORE_NOTE_PAST_BUDGET: .pastBudget
-            case CODE_CORE_NOTE_FOLDED: .folded(lines: Int(row.count), generated: row.generated)
-            case CODE_CORE_NOTE_CUT_HERE: .cutHere
-            case CODE_CORE_NOTE_HOST_LISTS_FIRST: .hostListsFirst(files: Int(row.count))
-            default: .noDiff
-            }
-            return .note(file: file, note)
-        default: return .gap
-        }
-    }
-
-    private static func kind(_ row: Row) -> UInt8 {
-        let kind: Int32 = switch row {
-        case .header: CODE_CORE_ROW_HEADER
-        case .line: CODE_CORE_ROW_LINE
-        case .note: CODE_CORE_ROW_NOTE
-        case .gap: CODE_CORE_ROW_GAP
-        }
-        return UInt8(kind)
-    }
-}
-
-/// Rows laid out at one width: each row's height (a wrapped line is several visual rows)
-/// and the running offsets a binary search finds the rows on screen with. The heights are
-/// the core's; finding rows is a search over them, here, because it runs every frame.
-public struct DiffLayout: Sendable {
-    /// Row heights and the code column's place, in points; a fresh value holds the core's
-    /// defaults.
-    public struct Metrics: Equatable, Sendable {
-        public var lineHeight: CGFloat
-        public var headerHeight: CGFloat
-        public var gapHeight: CGFloat
-        public var noteHeight: CGFloat
-        public var advance: CGFloat
-        /// The code column's left edge: the gutter and the ± marker.
-        public var codeX: CGFloat
-
-        public init() {
-            let core = Self.defaults
-            lineHeight = core.line_height
-            headerHeight = core.header_height
-            gapHeight = core.gap_height
-            noteHeight = core.note_height
-            advance = core.advance
-            codeX = core.code_x
-        }
-
-        private static let defaults: CodeCoreDiffMetrics = Core.answer(
-            "the default metrics",
-            fallback: CodeCoreDiffMetrics(line_height: 18, header_height: 30, gap_height: 12, note_height: 24,
-                                          advance: 7.2, code_x: 0)
-        ) {
-            var metrics = CodeCoreDiffMetrics()
-            try Core.call { code_core_diff_metrics_default(&metrics, $0) }
-            return metrics
-        }
-
-        var core: CodeCoreDiffMetrics {
-            CodeCoreDiffMetrics(line_height: lineHeight, header_height: headerHeight, gap_height: gapHeight,
-                                note_height: noteHeight, advance: advance, code_x: codeX)
-        }
-    }
-
-    public let metrics: Metrics
-    /// Columns per visual row; nil = no wrapping.
-    public let wrapColumns: Int?
-    /// Visual rows per row (1 for headers, notes and gaps).
-    public let visualRows: [Int]
-    /// `offsets[i]` is row i's top; the last is the height.
-    public let offsets: [CGFloat]
-
-    public init(_ shape: DiffRows.Shape, width: CGFloat, wraps: Bool, metrics: Metrics) {
-        self.metrics = metrics
-        var out: UnsafeMutablePointer<CodeCoreDiffLayout>?
-        defer { code_core_diff_layout_free(out) }
-        do {
-            try shape.kinds.withUnsafeBufferPointer { kinds in
-                try shape.columns.withUnsafeBufferPointer { columns in
-                    try Core.call {
-                        code_core_diff_layout(kinds.baseAddress, columns.baseAddress, kinds.count, Double(width), wraps,
-                                              metrics.core, &out, $0)
-                    }
-                }
-            }
-        } catch {
-            NSLog("code-core: laying rows out: %@", error.localizedDescription)
-        }
-        guard let layout = out?.pointee else {
-            wrapColumns = nil
-            visualRows = Array(repeating: 1, count: shape.kinds.count)
-            offsets = Array(repeating: 0, count: shape.kinds.count + 1)
-            return
-        }
-        wrapColumns = layout.wrap_columns > 0 ? Int(layout.wrap_columns) : nil
-        visualRows = Core.buffer(layout.visual_rows, layout.row_count).map(Int.init)
-        offsets = Core.buffer(layout.offsets, layout.row_count + 1).map { CGFloat($0) }
-    }
-
-    public var height: CGFloat { offsets.last ?? 0 }
-
-    public func frame(_ row: Int) -> (y: CGFloat, height: CGFloat) {
-        (offsets[row], offsets[row + 1] - offsets[row])
-    }
-
-    /// The row whose span holds `y` (clamped to the document).
-    public func row(at y: CGFloat) -> Int {
-        let count = offsets.count - 1
-        guard count > 0 else { return 0 }
-        var low = 0
-        var high = count - 1
-        while low < high {
-            let mid = (low + high + 1) / 2
-            if offsets[mid] <= y { low = mid } else { high = mid - 1 }
-        }
-        return low
-    }
-
-    /// The rows intersecting `minY ..< maxY`.
-    public func rows(from minY: CGFloat, to maxY: CGFloat) -> Range<Int> {
-        let count = offsets.count - 1
-        guard count > 0 else { return 0 ..< 0 }
-        return row(at: max(0, minY)) ..< min(count, row(at: maxY) + 1)
     }
 }
 

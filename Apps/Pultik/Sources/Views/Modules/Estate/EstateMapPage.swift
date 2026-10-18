@@ -1,5 +1,5 @@
+import Canvas
 import SwiftUI
-import Timeline
 
 /// Above Estate's Map (vt-7781 WP8, vt-7727 D11): what the map holds and
 /// the feed. The estate it draws is every host's topology (read with the

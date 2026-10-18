@@ -1,17 +1,6 @@
-import CTimeline
+import CCanvas
 import Foundation
 import QuartzCore
-
-/// Why the engine did not answer: it refused (`failed`: no GPU adapter, a surface it could not
-/// configure), a Rust panic was caught at the boundary (`panicked`), or an argument was unusable.
-public struct TimelineError: Error, LocalizedError, Equatable, Sendable {
-    public enum Kind: String, Sendable { case failed, panicked, invalid }
-
-    public let kind: Kind
-    public let message: String
-
-    public var errorDescription: String? { "timeline (\(kind.rawValue)): \(message)" }
-}
 
 /// A straight-alpha sRGB colour in `0...1`.
 public struct TimelineColor: Equatable, Sendable {
@@ -21,7 +10,7 @@ public struct TimelineColor: Equatable, Sendable {
         (self.red, self.green, self.blue, self.alpha) = (red, green, blue, alpha)
     }
 
-    var c: TimelineRgba { TimelineRgba(r: red, g: green, b: blue, a: alpha) }
+    var c: CanvasRgba { CanvasRgba(r: red, g: green, b: blue, a: alpha) }
 }
 
 /// One timeline on screen: the data Swift loaded, its gestures and keys in; Rust lays it out,
@@ -32,8 +21,8 @@ public final class TimelineEngine {
     public enum Lens: UInt8, Sendable { case ci = 0, estate, backups }
 
     /// The axis strip's height and the label column's width, points.
-    public static let axisHeight = CGFloat(TIMELINE_AXIS_PT)
-    public static let labelWidth = CGFloat(TIMELINE_LABEL_W)
+    public static let axisHeight = CGFloat(CANVAS_TIMELINE_AXIS_PT)
+    public static let labelWidth = CGFloat(CANVAS_TIMELINE_LABEL_W)
 
     /// The host's status tokens: colour means status (D4), never a repository.
     public struct Palette: Equatable, Sendable {
@@ -48,8 +37,8 @@ public final class TimelineEngine {
             (self.data, self.ok, self.danger, self.warning, self.accent) = (data, ok, danger, warning, accent)
         }
 
-        var c: TimelinePalette {
-            TimelinePalette(
+        var c: CanvasTimelinePalette {
+            CanvasTimelinePalette(
                 background: background.c, band: band.c, foreground: foreground.c, muted: muted.c,
                 grid: grid.c, data: data.c, ok: ok.c, danger: danger.c, warning: warning.c,
                 accent: accent.c
@@ -153,36 +142,38 @@ public final class TimelineEngine {
     public init(lens: Lens, palette: Palette, now: Date) throws {
         var palette = palette.c
         var out: OpaquePointer?
-        try Self.call { timeline_new(lens.rawValue, &palette, now.ms, &out, $0) }
-        guard let out else { throw TimelineError(kind: .invalid, message: "no handle") }
+        try CanvasError.call(.timeline) { canvas_timeline_new(lens.rawValue, &palette, now.ms, &out, $0) }
+        guard let out else { throw CanvasError(engine: .timeline, kind: .invalid, message: "no handle") }
         handle = out
     }
 
-    deinit { timeline_free(handle) }
+    deinit { canvas_timeline_free(handle) }
 
     /// Draw into `layer`: creates the GPU device (the first show).
     public func attach(layer: CAMetalLayer, size: CGSize, scale: CGFloat) throws {
         let raw = Unmanaged.passUnretained(layer).toOpaque()
-        try Self.call {
-            timeline_attach(handle, raw, Double(size.width), Double(size.height), Double(scale), $0)
+        try CanvasError.call(.timeline) {
+            canvas_timeline_attach(handle, raw, Double(size.width), Double(size.height), Double(scale), $0)
         }
     }
 
     /// Release the GPU device (the panel's tree release); the data stays.
-    public func detach() { timeline_detach(handle) }
+    public func detach() { canvas_timeline_detach(handle) }
 
     /// Present in step with the display (the default) or as soon as a frame is done.
-    public func setVSync(_ vsync: Bool) { timeline_set_vsync(handle, vsync) }
+    public func setVSync(_ vsync: Bool) { canvas_timeline_set_vsync(handle, vsync) }
 
     public func resize(size: CGSize, scale: CGFloat) throws {
-        try Self.call { timeline_resize(handle, Double(size.width), Double(size.height), Double(scale), $0) }
+        try CanvasError.call(.timeline) {
+            canvas_timeline_resize(handle, Double(size.width), Double(size.height), Double(scale), $0)
+        }
     }
 
-    public func setNow(_ now: Date) { timeline_set_now(handle, now.ms) }
+    public func setNow(_ now: Date) { canvas_timeline_set_now(handle, now.ms) }
 
     public func setPalette(_ palette: Palette) {
         var palette = palette.c
-        timeline_set_palette(handle, &palette)
+        canvas_timeline_set_palette(handle, &palette)
     }
 
     public func setJobs(_ jobs: [Job]) throws {
@@ -190,14 +181,14 @@ public final class TimelineEngine {
         let texts = jobs.map { j in [arena.add(j.id), arena.add(j.lane), arena.add(j.repo), arena.add(j.name)] }
         try arena.with { base in
             var c = zip(jobs, texts).map { j, t in
-                TimelineCiJob(
+                CanvasTimelineCiJob(
                     id: t[0].at(base), lane: t[1].at(base), repo: t[2].at(base), name: t[3].at(base),
                     queued_at: j.queuedAt.ms, started_at: j.startedAt?.ms ?? .nan,
                     completed_at: j.completedAt?.ms ?? .nan, result: j.result.rawValue,
                     peak_mib: j.peakMiB ?? .max, reserved_mib: j.reservedMiB ?? .max
                 )
             }
-            try Self.call { timeline_set_ci_jobs(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_ci_jobs(handle, &c, c.count, $0) }
         }
     }
 
@@ -206,9 +197,9 @@ public final class TimelineEngine {
         let rows = bins.map { arena.add($0.row) }
         try arena.with { base in
             var c = zip(bins, rows).map { b, r in
-                TimelineBin(row: r.at(base), from: b.from.ms, width: b.width * 1000, count: b.count, failures: b.failures)
+                CanvasTimelineBin(row: r.at(base), from: b.from.ms, width: b.width * 1000, count: b.count, failures: b.failures)
             }
-            try Self.call { timeline_set_bins(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_bins(handle, &c, c.count, $0) }
         }
     }
 
@@ -220,74 +211,74 @@ public final class TimelineEngine {
             let clear = TimelineColor(red: 0, green: 0, blue: 0, alpha: 0)
             let rows = zip(groups, keys).flatMap { g, k in
                 zip(g.rows, k.2).map { r, t in
-                    TimelineRow(key: t.0.at(base), label: t.1.at(base), tint: (r.tint ?? clear).c, has_tint: r.tint != nil)
+                    CanvasTimelineRow(key: t.0.at(base), label: t.1.at(base), tint: (r.tint ?? clear).c, has_tint: r.tint != nil)
                 }
             }
             try rows.withUnsafeBufferPointer { all in
                 var start = 0
-                var c: [TimelineGroup] = []
+                var c: [CanvasTimelineGroup] = []
                 for (g, k) in zip(groups, keys) {
                     let first = all.baseAddress.map { $0 + start }
-                    c.append(TimelineGroup(key: k.0.at(base), label: k.1.at(base), rows: g.rows.isEmpty ? nil : first, row_count: g.rows.count))
+                    c.append(CanvasTimelineGroup(key: k.0.at(base), label: k.1.at(base), rows: g.rows.isEmpty ? nil : first, row_count: g.rows.count))
                     start += g.rows.count
                 }
-                try Self.call { timeline_set_groups(handle, &c, c.count, $0) }
+                try CanvasError.call(.timeline) { canvas_timeline_set_groups(handle, &c, c.count, $0) }
             }
         }
     }
 
     /// Show `range` across a quarter of the lanes (a cluster or a band opened by a click).
     public func zoom(to range: ClosedRange<Date>) {
-        timeline_zoom_to(handle, range.lowerBound.ms, range.upperBound.ms)
+        canvas_timeline_zoom_to(handle, range.lowerBound.ms, range.upperBound.ms)
     }
 
     /// Two fingers moved the content by (`dx`, `dy`) points.
-    public func scroll(dx: Double, dy: Double) { timeline_scroll(handle, dx, dy) }
+    public func scroll(dx: Double, dy: Double) { canvas_timeline_scroll(handle, dx, dy) }
 
     /// A pinch by `factor` around view point `x` (nil: the lanes' centre).
-    public func magnify(factor: Double, x: Double?) { timeline_magnify(handle, factor, x ?? .nan) }
+    public func magnify(factor: Double, x: Double?) { canvas_timeline_magnify(handle, factor, x ?? .nan) }
 
     public func perform(_ intent: Intent) throws {
-        try Self.call { timeline_key(handle, intent.rawValue, $0) }
+        try CanvasError.call(.timeline) { canvas_timeline_key(handle, intent.rawValue, $0) }
     }
 
     public func select(_ id: String?) throws {
         let text = id ?? ""
         var bytes = Array(text.utf8)
         try bytes.withUnsafeMutableBufferPointer { buffer in
-            let s = TimelineStr(ptr: UnsafePointer(buffer.baseAddress), len: buffer.count)
-            try Self.call { timeline_select(handle, s, $0) }
+            let s = CanvasStr(ptr: UnsafePointer(buffer.baseAddress), len: buffer.count)
+            try CanvasError.call(.timeline) { canvas_timeline_select(handle, s, $0) }
         }
     }
 
     public var selected: String? {
-        guard let raw = timeline_selected(handle) else { return nil }
-        defer { timeline_string_free(raw) }
+        guard let raw = canvas_timeline_selected(handle) else { return nil }
+        defer { canvas_string_free(raw) }
         return String(cString: raw)
     }
 
     /// The playhead dragged to view point `x` (nil: back to now); `release` snaps it.
     public func playhead(x: Double?, release: Bool) {
-        timeline_playhead(handle, x ?? .nan, release)
+        canvas_timeline_playhead(handle, x ?? .nan, release)
     }
 
     public func hit(x: Double, y: Double) throws -> Hit {
-        var out = TimelineHit(kind: 0, id: nil, from: .nan, to: .nan)
-        try Self.call { timeline_hit(handle, x, y, &out, $0) }
-        defer { timeline_string_free(out.id) }
+        var out = CanvasTimelineHit(kind: 0, id: nil, from: .nan, to: .nan)
+        try CanvasError.call(.timeline) { canvas_timeline_hit(handle, x, y, &out, $0) }
+        defer { canvas_string_free(out.id) }
         let id = out.id.map { String(cString: $0) }
         switch Int32(out.kind) {
-        case TIMELINE_HIT_MARK: return id.map { .mark(id: $0) } ?? .none
-        case TIMELINE_HIT_CLUSTER: return .cluster(from: Date(ms: out.from), to: Date(ms: out.to))
-        case TIMELINE_HIT_RAIL: return .rail(from: Date(ms: out.from))
-        case TIMELINE_HIT_BAND:
+        case CANVAS_TIMELINE_HIT_MARK: return id.map { .mark(id: $0) } ?? .none
+        case CANVAS_TIMELINE_HIT_CLUSTER: return .cluster(from: Date(ms: out.from), to: Date(ms: out.to))
+        case CANVAS_TIMELINE_HIT_RAIL: return .rail(from: Date(ms: out.from))
+        case CANVAS_TIMELINE_HIT_BAND:
             return .band(key: id ?? "", from: Date(ms: out.from), to: out.to.isFinite ? Date(ms: out.to) : nil)
         default: return .none
         }
     }
 
     public var state: State {
-        let s = timeline_state(handle)
+        let s = canvas_timeline_state(handle)
         return State(
             t0: Date(ms: s.t0), span: s.span / 1000,
             wanted: Date(ms: s.wanted_from)...Date(ms: max(s.wanted_from, s.wanted_to)),
@@ -298,27 +289,12 @@ public final class TimelineEngine {
 
     /// Draw a frame if anything changed; call it from the display link while `animating`.
     public func frame() throws -> Frame {
-        var out = TimelineFrame(built: false, presented: false, animating: false, next_due_ms: .nan)
-        try Self.call { timeline_frame(handle, &out, $0) }
+        var out = CanvasFrameReport(built: false, presented: false, animating: false, next_due_ms: .nan)
+        try CanvasError.call(.timeline) { canvas_timeline_frame(handle, &out, $0) }
         return Frame(
             built: out.built, presented: out.presented, animating: out.animating,
             nextDue: out.next_due_ms.isFinite ? out.next_due_ms / 1000 : nil
         )
-    }
-
-    /// Run one C call; throw what it reports, freeing its message.
-    static func call(_ body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> TimelineStatus) throws {
-        var message: UnsafeMutablePointer<CChar>?
-        let status = body(&message)
-        defer { timeline_string_free(message) }
-        guard status != TIMELINE_OK else { return }
-        let text = message.map { String(cString: $0) } ?? "no message"
-        let kind: TimelineError.Kind = switch status {
-        case TIMELINE_FAILED: .failed
-        case TIMELINE_PANICKED: .panicked
-        default: .invalid
-        }
-        throw TimelineError(kind: kind, message: text)
     }
 }
 
@@ -326,8 +302,8 @@ public final class TimelineEngine {
 struct TextArena {
     struct Slice {
         let offset, count: Int
-        func at(_ base: UnsafePointer<UInt8>?) -> TimelineStr {
-            TimelineStr(ptr: count > 0 ? base.map { $0 + offset } : nil, len: count)
+        func at(_ base: UnsafePointer<UInt8>?) -> CanvasStr {
+            CanvasStr(ptr: count > 0 ? base.map { $0 + offset } : nil, len: count)
         }
     }
 

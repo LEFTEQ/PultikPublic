@@ -175,6 +175,8 @@ enum KeyIntent: Equatable {
     case verbMenu
     /// ⌥Z on a code canvas: long lines wrap ↔ run past the edge (D9).
     case toggleWrap
+    /// ⌥S on a PR's Files changed: inline ↔ side by side.
+    case toggleSplit
     /// ⌘C with code selected on the canvas.
     case copyCode
     /// ⌘↵ in an open workbench composer.
@@ -246,7 +248,8 @@ enum KeyboardCoordinator {
             default: return nil
             }
         case let .character(key) where stroke.option:
-            return key == "z" && context.codeShown ? .toggleWrap : nil
+            guard context.codeShown else { return nil }
+            return key == "z" ? .toggleWrap : key == "s" ? .toggleSplit : nil
         // Inside a PR letters are its verbs and never refilter the list
         // under it (D5); space pages. A letter with no verb is swallowed.
         case let .character(key) where context.entered && context.fieldFocused:
@@ -410,8 +413,9 @@ enum KeyboardCoordinator {
 // (which defines SWIFT_PACKAGE) without the panel types it reaches.
 #if !SWIFT_PACKAGE
 extension KeyStroke {
-    /// ⌘ chords read the physical key, so ⌘1–9 work on a Czech layout
-    /// (whose top row types `+ěščřžýáí`); typed text reads what it types.
+    /// A ⌘ or ⌥ chord's letter is the layout's own (⌥Z on QWERTZ), its digit
+    /// the physical key, so ⌘1–9 work on a Czech layout (whose top row types
+    /// `+ěščřžýáí`); typed text reads what it types.
     init?(_ event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let command = flags.contains(.command)
@@ -436,9 +440,9 @@ extension KeyStroke {
         case 51: key = .backspace
         default:
             if command {
-                guard let chord = Self.chordKeys[event.keyCode] else { return nil }
+                guard let chord = Self.chord(event, in: Self.chordKeys) else { return nil }
                 key = .character(chord)
-            } else if flags.contains(.option), let chord = Self.optionKeys[event.keyCode] {
+            } else if flags.contains(.option), let chord = Self.chord(event, in: Self.optionKeys) {
                 self.init(key: .character(chord), shift: flags.contains(.shift), option: true)
                 return
             } else {
@@ -456,8 +460,21 @@ extension KeyStroke {
         34: "i", 9: "v", 8: "c", 15: "r", 0: "a", 40: "k", 11: "b", 3: "f",
     ]
 
-    /// ANSI key codes of the ⌥ chords the panel owns (⌥Z: wrap).
-    private static let optionKeys: [UInt16: String] = [6: "z"]
+    /// ANSI key codes of the ⌥ chords the panel owns (⌥Z: wrap, ⌥S: side by side).
+    private static let optionKeys: [UInt16: String] = [6: "z", 1: "s"]
+
+    /// A chord's letter as the layout types it, when that is an ASCII letter
+    /// (on QWERTZ the key labelled Z is the US Y key, code 16): a letter no
+    /// chord names is none. Otherwise the US key under the finger in `keys`:
+    /// a non-Latin layout, and the Czech number row (`+ěščřžýáí`), whose
+    /// ⌘1–9 stay on their key codes.
+    private static func chord(_ event: NSEvent, in keys: [UInt16: String]) -> String? {
+        if let typed = event.charactersIgnoringModifiers?.lowercased(), typed.count == 1,
+           let scalar = typed.unicodeScalars.first, scalar.isASCII, scalar.properties.isAlphabetic {
+            return keys.values.contains(typed) ? typed : nil
+        }
+        return keys[event.keyCode]
+    }
 }
 
 extension KeyboardCoordinator {

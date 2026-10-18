@@ -1,5 +1,5 @@
+import Canvas
 import SwiftUI
-import Timeline
 
 /// CI's Timeline on Semafor's jobs (vt-7781 WP6, vt-7727 D1, D6, D14): the
 /// chip host's fleet lanes by organisation and the GitHub-hosted lanes once,

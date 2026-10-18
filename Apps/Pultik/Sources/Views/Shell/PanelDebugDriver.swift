@@ -1,6 +1,6 @@
 #if DEBUG
+import Canvas
 import SwiftUI
-import Timeline
 
 extension StatusPanelView {
     /// PanelDriver relay: the same state changes and key routing a typed
@@ -123,7 +123,7 @@ extension StatusPanelView {
                 stage.debugVSync(.ciTimeline, vsync)
                 // Let the framed day build once before the clock starts.
                 try? await Task.sleep(for: .milliseconds(300))
-                canvas.runBench(seconds: seconds) { report in
+                canvas.runBench(.ciTimeline, seconds: seconds) { report in
                     var report = report
                     report["vsync"] = vsync
                     report["drawablePx"] = stage.debugDrawableSize(.ciTimeline)
@@ -242,6 +242,9 @@ extension StatusPanelView {
                 // vt-7727 D5: the shown canvas view, entered or not, and its engine.
                 "canvasEntered": shownCanvas != nil && router.canvasEntered,
                 "canvas": shownCanvas.map { TimelineStage.shared.debugState($0) } ?? NSNull(),
+                // PR diff D2 (AC 13): the shared GPU device, built once per process until the 30 s release.
+                "canvasDeviceBuilds": CanvasSurface.builds,
+                "canvasDeviceLive": CanvasSurface.live,
                 // vt-7781 AC 10: what the data layer is asked to keep loaded, and the replay shown.
                 "timelineVisibility": store.timelineVisibility.map { visibility -> [String: Any] in
                     ["lens": visibility.lens.rawValue, "from": PultikFormat.clock(visibility.range.lowerBound),
@@ -250,10 +253,19 @@ extension StatusPanelView {
                 } ?? NSNull(),
                 "timelineReplay": store.timelineReplay.map { PultikFormat.clock($0.at) } ?? NSNull(),
                 "ciHost": store.ciSemaforHost ?? NSNull(),
+                // The diff engine's own state (PR diff WP6): its scroll and height in points, and
+                // the frames and scenes its surface drew.
                 "code": CodeCanvasView.active.map { canvas -> [String: Any] in
-                    ["files": canvas.document.files.count, "lines": canvas.lineCount, "wraps": canvas.wraps,
-                     "highlighted": canvas.highlightedFiles, "selection": canvas.hasSelection,
-                     "language": canvas.document.files.first?.language?.rawValue ?? NSNull()]
+                    let state = canvas.engine?.state
+                    return ["files": canvas.document.files.count, "lines": state?.lines ?? 0,
+                            "wraps": state?.wraps ?? canvas.wraps, "split": state?.split ?? canvas.split,
+                            "highlighted": state?.highlighted ?? 0,
+                            "selection": state?.hasSelection ?? false,
+                            "language": canvas.document.files.first?.language?.rawValue ?? NSNull(),
+                            "top": state?.top ?? 0, "height": state?.height ?? 0,
+                            "topFile": state?.topFile ?? NSNull(),
+                            "canvasFrames": canvas.surface.frames, "canvasBuilds": canvas.surface.builds,
+                            "canvasFailure": canvas.surface.failure ?? NSNull()]
                 } ?? NSNull(),
                 "ciWatch": store.ciWatchTarget.map { target -> [String: Any] in
                     ["request": target.request.key, "runs": target.runs.map(\.key).sorted(),
