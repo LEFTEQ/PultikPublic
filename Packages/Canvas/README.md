@@ -21,7 +21,11 @@ one C module, `CCanvas`.
   `DiffEngine` (the PR diff, inline or side by side, and the definition card:
   `canvas_text::diff_view`, which owns the layout, the scroll, the sticky header, the
   selection (inline only) and the word hits; Swift hands it the change set, each side's
-  highlight runs, the theme id and the decor). Swift hands it data,
+  highlight runs, the theme id and the decor) and `MergeEngine` (one file's three-way merge,
+  WebStorm's ours · result · theirs with the base on demand: `code_core::merge` merges it and
+  `canvas_text::merge_view` lays the panes out, scrolls them in step, draws the ribbons and
+  walks ⇥; Swift hands it the file's texts, a past merge's commit, each pane's runs and the
+  panes' titles). Swift hands it data,
   gestures and key intents; Rust owns layout, hit testing, the camera and drawing. By default
   the host turns a press into the engine's click, pan or playhead scrub. An engine that
   handles the pointer itself answers `mouse(_:)`: a `.down` it takes makes the press its own

@@ -37,6 +37,16 @@ enum SessionShell {
         NSWorkspace.shared.open(url)
     }
 
+    /// Asks `shell` to resolve pull request `number` of `repo`'s merge (the merge preview's
+    /// "Resolve in …", vt-7968 M3): Pultík's preview is read only.
+    static func resolveMerge(repo: String, number: Int, in shell: Shell) {
+        guard let url = MergeLink(scheme: shell.scheme, repo: repo, number: number)?.url else {
+            NSLog("pultik: no merge link for %@#%d", repo, number)
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
     private static func lookUp() -> Shell? {
         guard let scheme = Bundle.main.object(forInfoDictionaryKey: schemeKey) as? String,
               let probe = SessionLink(scheme: scheme, session: "probe")?.url,

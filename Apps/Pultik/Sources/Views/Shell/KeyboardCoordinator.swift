@@ -71,6 +71,8 @@ struct KeyContext {
     /// A code canvas is the shown tab (⌥Z wraps it), and holds a selection (⌘C).
     var codeShown = false
     var codeSelection = false
+    /// A PR's Merge tab is shown (vt-7968): ⇥ walks its conflicts and resolutions, ⌥B shows the base.
+    var mergeShown = false
     /// A workbench composer (a comment, a review comment) is open: ⌘↵
     /// submits it and Esc closes it before anything else peels.
     var composing = false
@@ -177,6 +179,10 @@ enum KeyIntent: Equatable {
     case toggleWrap
     /// ⌥S on a PR's Files changed: inline ↔ side by side.
     case toggleSplit
+    /// ⇥ / ⇧⇥ on a PR's Merge tab: the next conflict or resolution, across its files (vt-7968).
+    case mergeNext(Int)
+    /// ⌥B on a PR's Merge tab: the merge base as a fourth pane.
+    case toggleMergeBase
     /// ⌘C with code selected on the canvas.
     case copyCode
     /// ⌘↵ in an open workbench composer.
@@ -248,6 +254,7 @@ enum KeyboardCoordinator {
             default: return nil
             }
         case let .character(key) where stroke.option:
+            if context.mergeShown, key == "b" { return .toggleMergeBase }
             guard context.codeShown else { return nil }
             return key == "z" ? .toggleWrap : key == "s" ? .toggleSplit : nil
         // Inside a PR letters are its verbs and never refilter the list
@@ -293,6 +300,7 @@ enum KeyboardCoordinator {
             return .select(index == 0 ? nil : context.items[index - 1])
         case .tab:
             if context.card != nil { return .cardColumn(stroke.shift ? -1 : 1) }
+            if context.mergeShown { return .mergeNext(stroke.shift ? -1 : 1) }
             if context.detailOpen || context.bulk, !context.focusTargets.isEmpty { return .focus(stroke.shift ? -1 : 1) }
             // A module's views (D5): what ⇥ means in it once no detail ring
             // or card claims it; a view's rows have nothing to triage.
@@ -460,8 +468,8 @@ extension KeyStroke {
         34: "i", 9: "v", 8: "c", 15: "r", 0: "a", 40: "k", 11: "b", 3: "f",
     ]
 
-    /// ANSI key codes of the ⌥ chords the panel owns (⌥Z: wrap, ⌥S: side by side).
-    private static let optionKeys: [UInt16: String] = [6: "z", 1: "s"]
+    /// ANSI key codes of the ⌥ chords the panel owns (⌥Z: wrap, ⌥S: side by side, ⌥B: the merge base).
+    private static let optionKeys: [UInt16: String] = [6: "z", 1: "s", 11: "b"]
 
     /// A chord's letter as the layout types it, when that is an ASCII letter
     /// (on QWERTZ the key labelled Z is the US Y key, code 16): a letter no

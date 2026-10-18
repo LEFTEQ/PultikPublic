@@ -36,6 +36,10 @@ struct ChangeRequest: Codable, Sendable, Equatable {
     /// names one diff for good.
     let baseSHA: String
     let headSHA: String
+    /// The base branch's tip when the conversation was read (GitHub's `baseRef.target.oid`):
+    /// the merge preview's ours (vt-7968). Not `baseSHA`, which the host moves only when the
+    /// head is pushed; nil from a host or a warm copy that never read it.
+    var baseTipSHA: String? = nil
     let additions: Int
     let deletions: Int
     let changedFiles: Int

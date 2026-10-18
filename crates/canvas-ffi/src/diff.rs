@@ -47,9 +47,9 @@ pub const CANVAS_DIFF_STEP_PAGE: u8 = 1;
 pub const CANVAS_DIFF_STEP_EDGE: u8 = 2;
 
 /// How long a key's jump eases (the CoreText canvas's 0.14 s).
-const GLIDE: Duration = Duration::from_millis(140);
+pub(crate) const GLIDE: Duration = Duration::from_millis(140);
 /// The line height Pultík's code reads at, whatever the font's own: 18 pt (D9, docs/specs/2026-10-15-pr-workbench-decisions.md).
-const LINE_HEIGHT: f32 = 18.0;
+pub(crate) const LINE_HEIGHT: f32 = 18.0;
 
 /// One file of the change set: what its rows and header need.
 #[repr(C)]
@@ -151,7 +151,7 @@ unsafe fn diff<'a>(h: *mut CanvasDiff) -> Result<&'a mut CanvasDiff, Failure> {
     unsafe { h.as_mut() }.ok_or(Failure::Invalid("a null diff handle"))
 }
 
-fn colors(id: &str) -> Result<CodeColors, Failure> {
+pub(crate) fn colors(id: &str) -> Result<CodeColors, Failure> {
     let theme = theme::by_id(id).ok_or(Failure::Invalid("an unknown code theme"))?;
     Ok(CodeColors::new(theme))
 }
@@ -187,7 +187,11 @@ fn words(note: FileNote) -> String {
 
 /// The code cell at the shared text system's mono font and `font_size`: its advance (whole
 /// device pixels at `scale`), Pultík's line height.
-fn metrics(text: &mut canvas_text::TextSystem, font_size: f32, scale: f64) -> DiffMetrics {
+pub(crate) fn metrics(
+    text: &mut canvas_text::TextSystem,
+    font_size: f32,
+    scale: f64,
+) -> DiffMetrics {
     text.set_term_font(None, font_size);
     let scale = scale.max(1.0) as f32;
     let (w, _) = text.term_metrics().cell_px(font_size * scale);
@@ -195,7 +199,7 @@ fn metrics(text: &mut canvas_text::TextSystem, font_size: f32, scale: f64) -> Di
 }
 
 /// Byte `units` UTF-16 units into `line`, at a char boundary.
-fn byte_of(line: &str, units: u32) -> u32 {
+pub(crate) fn byte_of(line: &str, units: u32) -> u32 {
     let mut seen = 0;
     for (at, c) in line.char_indices() {
         if seen >= units {

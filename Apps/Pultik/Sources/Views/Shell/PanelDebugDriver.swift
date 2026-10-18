@@ -267,6 +267,19 @@ extension StatusPanelView {
                             "canvasFrames": canvas.surface.frames, "canvasBuilds": canvas.surface.builds,
                             "canvasFailure": canvas.surface.failure ?? NSNull()]
                 } ?? NSNull(),
+                // The merge engine's own state (vt-7968): its regions, ⇥'s region and why, the
+                // panes' lines in view.
+                "merge": MergeCanvasView.active.map { canvas -> [String: Any] in
+                    let state = canvas.state
+                    return ["regions": state?.regions ?? 0, "conflicts": state?.conflicts ?? 0,
+                            "resolved": state?.resolved ?? 0, "committed": state?.committed ?? 0,
+                            "current": state?.current ?? NSNull(),
+                            "reason": state?.current.flatMap { canvas.reason(region: $0) } ?? NSNull(),
+                            "showsBase": state?.showsBase ?? false, "highlighted": state?.highlighted ?? 0,
+                            "top": state?.top ?? 0, "height": state?.height ?? 0, "visible": canvas.visibleText,
+                            "canvasFrames": canvas.surface.frames, "canvasBuilds": canvas.surface.builds,
+                            "canvasFailure": canvas.surface.failure ?? NSNull()]
+                } ?? NSNull(),
                 "ciWatch": store.ciWatchTarget.map { target -> [String: Any] in
                     ["request": target.request.key, "runs": target.runs.map(\.key).sorted(),
                      "live": store.ciLive.map { $0.jobs.mapValues { $0.map(\.name) }.reduce(into: [String: [String]]()) {
