@@ -1,4 +1,4 @@
-import CTimeline
+import CCanvas
 import Foundation
 import QuartzCore
 
@@ -70,29 +70,29 @@ public final class MapEngine {
     public init(palette: TimelineEngine.Palette) throws {
         var palette = palette.c
         var out: OpaquePointer?
-        try TimelineEngine.call { timeline_map_new(&palette, &out, $0) }
-        guard let out else { throw TimelineError(kind: .invalid, message: "no map handle") }
+        try CanvasError.call(.map) { canvas_map_new(&palette, &out, $0) }
+        guard let out else { throw CanvasError(engine: .map, kind: .invalid, message: "no map handle") }
         handle = out
     }
 
-    deinit { timeline_map_free(handle) }
+    deinit { canvas_map_free(handle) }
 
     public func attach(layer: CAMetalLayer, size: CGSize, scale: CGFloat) throws {
         let raw = Unmanaged.passUnretained(layer).toOpaque()
-        try TimelineEngine.call {
-            timeline_map_attach(handle, raw, Double(size.width), Double(size.height), Double(scale), $0)
+        try CanvasError.call(.map) {
+            canvas_map_attach(handle, raw, Double(size.width), Double(size.height), Double(scale), $0)
         }
     }
 
-    public func detach() { timeline_map_detach(handle) }
+    public func detach() { canvas_map_detach(handle) }
 
     public func resize(size: CGSize, scale: CGFloat) {
-        timeline_map_resize(handle, Double(size.width), Double(size.height), Double(scale))
+        canvas_map_resize(handle, Double(size.width), Double(size.height), Double(scale))
     }
 
     public func setPalette(_ palette: TimelineEngine.Palette) {
         var palette = palette.c
-        timeline_map_set_palette(handle, &palette)
+        canvas_map_set_palette(handle, &palette)
     }
 
     /// Replace the estate. `copies` nil: the backups did not load.
@@ -113,17 +113,17 @@ public final class MapEngine {
         try a.with { base in
             // Every nested array flattened into one, each owner pointing at its run of it.
             let apps = zip(boxes, boxText).flatMap { _, t in
-                t.1.map { TimelineMapApp(name: $0[0].at(base), sync: $0[1].at(base), health: $0[2].at(base), note: $0[3].at(base)) }
+                t.1.map { CanvasMapApp(name: $0[0].at(base), sync: $0[1].at(base), health: $0[2].at(base), note: $0[3].at(base)) }
             }
             let rollouts = zip(boxes, boxText).flatMap { b, t in
-                zip(b.rollouts, t.2).map { r, s in TimelineMapRollout(gateway: r.gateway, target: s[0].at(base), app: s[1].at(base)) }
+                zip(b.rollouts, t.2).map { r, s in CanvasMapRollout(gateway: r.gateway, target: s[0].at(base), app: s[1].at(base)) }
             }
             let targets = edgeText.flatMap { $0.1.map { $0.at(base) } }
             var cNodes = nodeText.map {
-                TimelineMapNode(id: $0[0].at(base), kind: $0[1].at(base), label: $0[2].at(base), detail: $0[3].at(base), place: $0[4].at(base))
+                CanvasMapNode(id: $0[0].at(base), kind: $0[1].at(base), label: $0[2].at(base), detail: $0[3].at(base), place: $0[4].at(base))
             }
             var cCopies = zip(copies ?? [], copyText).map { c, t in
-                TimelineMapCopy(
+                CanvasMapCopy(
                     box_name: t[0].at(base), pipeline: t[1].at(base), place: t[2].at(base), state: t[3].at(base),
                     location: t[4].at(base), age_s: c.age ?? .nan
                 )
@@ -132,9 +132,9 @@ public final class MapEngine {
                 try rollouts.withUnsafeBufferPointer { rollP in
                     try targets.withUnsafeBufferPointer { targP in
                         var (ai, ri, ti) = (0, 0, 0)
-                        var cBoxes: [TimelineMapBox] = []
+                        var cBoxes: [CanvasMapBox] = []
                         for (b, t) in zip(boxes, boxText) {
-                            cBoxes.append(TimelineMapBox(
+                            cBoxes.append(CanvasMapBox(
                                 name: t.0[0].at(base), sync: t.0[1].at(base), addr: t.0[2].at(base), line: t.0[3].at(base),
                                 apps: b.apps.isEmpty ? nil : appsP.baseAddress.map { $0 + ai }, app_count: b.apps.count,
                                 rollouts: b.rollouts.isEmpty ? nil : rollP.baseAddress.map { $0 + ri }, rollout_count: b.rollouts.count
@@ -142,18 +142,18 @@ public final class MapEngine {
                             ai += b.apps.count
                             ri += b.rollouts.count
                         }
-                        var cEdges: [TimelineMapEdge] = []
+                        var cEdges: [CanvasMapEdge] = []
                         for (e, t) in zip(edges, edgeText) {
                             let n = e.targets?.count ?? 0
-                            cEdges.append(TimelineMapEdge(
+                            cEdges.append(CanvasMapEdge(
                                 id: t.0[0].at(base), from: t.0[1].at(base), to: t.0[2].at(base), kind: t.0[3].at(base),
                                 label: t.0[4].at(base), both: e.both, has_targets: e.targets != nil,
                                 targets: n == 0 ? nil : targP.baseAddress.map { $0 + ti }, target_count: n
                             ))
                             ti += n
                         }
-                        try TimelineEngine.call {
-                            timeline_map_set_estate(
+                        try CanvasError.call(.map) {
+                            canvas_map_set_estate(
                                 handle, &cBoxes, cBoxes.count, &cNodes, cNodes.count, &cEdges, cEdges.count,
                                 &cCopies, cCopies.count, copies != nil, $0
                             )
@@ -165,27 +165,27 @@ public final class MapEngine {
     }
 
     /// Two fingers moved the map by (`dx`, `dy`) points.
-    public func scroll(dx: Double, dy: Double) { timeline_map_scroll(handle, dx, dy) }
+    public func scroll(dx: Double, dy: Double) { canvas_map_scroll(handle, dx, dy) }
 
     /// A pinch by `factor` around view point (`x`, `y`).
-    public func magnify(factor: Double, x: Double, y: Double) { timeline_map_magnify(handle, factor, x, y) }
+    public func magnify(factor: Double, x: Double, y: Double) { canvas_map_magnify(handle, factor, x, y) }
 
-    public func fit() { timeline_map_fit(handle) }
+    public func fit() { canvas_map_fit(handle) }
 
     /// An arrow: the nearest card that way, brought into view.
-    public func walk(_ direction: Direction) { timeline_map_walk(handle, direction.rawValue) }
+    public func walk(_ direction: Direction) { canvas_map_walk(handle, direction.rawValue) }
 
     public func select(_ id: String?) throws {
         var bytes = Array((id ?? "").utf8)
         try bytes.withUnsafeMutableBufferPointer { buffer in
-            let s = TimelineStr(ptr: UnsafePointer(buffer.baseAddress), len: buffer.count)
-            try TimelineEngine.call { timeline_map_select(handle, s, $0) }
+            let s = CanvasStr(ptr: UnsafePointer(buffer.baseAddress), len: buffer.count)
+            try CanvasError.call(.map) { canvas_map_select(handle, s, $0) }
         }
     }
 
     public var selected: String? {
-        guard let raw = timeline_map_selected(handle) else { return nil }
-        defer { timeline_string_free(raw) }
+        guard let raw = canvas_map_selected(handle) else { return nil }
+        defer { canvas_string_free(raw) }
         return String(cString: raw)
     }
 
@@ -193,31 +193,31 @@ public final class MapEngine {
     public var selectedApp: (box: String, app: String)? {
         var box: UnsafeMutablePointer<CChar>?
         var app: UnsafeMutablePointer<CChar>?
-        guard timeline_map_selected_app(handle, &box, &app), let box, let app else { return nil }
+        guard canvas_map_selected_app(handle, &box, &app), let box, let app else { return nil }
         defer {
-            timeline_string_free(box)
-            timeline_string_free(app)
+            canvas_string_free(box)
+            canvas_string_free(app)
         }
         return (String(cString: box), String(cString: app))
     }
 
     public func hit(x: Double, y: Double) throws -> Hit {
-        var out = TimelineHit(kind: 0, id: nil, from: .nan, to: .nan)
-        try TimelineEngine.call { timeline_map_hit(handle, x, y, &out, $0) }
-        defer { timeline_string_free(out.id) }
+        var out = CanvasTimelineHit(kind: 0, id: nil, from: .nan, to: .nan)
+        try CanvasError.call(.map) { canvas_map_hit(handle, x, y, &out, $0) }
+        defer { canvas_string_free(out.id) }
         let id = out.id.map { String(cString: $0) } ?? ""
         switch Int32(out.kind) {
-        case TIMELINE_HIT_CARD: return .card(id)
-        case TIMELINE_HIT_LINK: return .link(id)
-        case TIMELINE_HIT_FRAME: return .frame(id)
+        case CANVAS_TIMELINE_HIT_CARD: return .card(id)
+        case CANVAS_TIMELINE_HIT_LINK: return .link(id)
+        case CANVAS_TIMELINE_HIT_FRAME: return .frame(id)
         default: return .none
         }
     }
 
     /// Draw a frame if anything changed; call it from the display link while `animating`.
     public func frame() throws -> TimelineEngine.Frame {
-        var out = TimelineFrame(built: false, presented: false, animating: false, next_due_ms: .nan)
-        try TimelineEngine.call { timeline_map_frame(handle, &out, $0) }
+        var out = CanvasFrameReport(built: false, presented: false, animating: false, next_due_ms: .nan)
+        try CanvasError.call(.map) { canvas_map_frame(handle, &out, $0) }
         return TimelineEngine.Frame(built: out.built, presented: out.presented, animating: out.animating, nextDue: nil)
     }
 }

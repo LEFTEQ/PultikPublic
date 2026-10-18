@@ -1,7 +1,7 @@
+import Canvas
 import Foundation
 import Observation
 import QuartzCore
-import Timeline
 
 /// A canvas (vt-7727 D1): CI's or Estate's Timeline, Estate's Map, or the
 /// Backups timeline above Estate's Pipelines table (vt-7781 WP7).
@@ -295,16 +295,17 @@ final class TimelineStage {
 
     // MARK: - Canvases
 
-    func mount(_ canvas: TimelineCanvasView) {
-        canvases[canvas.slot] = WeakCanvas(canvas: canvas)
-        canvas.use(engine(for: canvas.slot))
+    func mount(_ canvas: CanvasView, slot: CanvasSlot) {
+        canvases[slot] = WeakCanvas(canvas: canvas)
+        canvas.use(engine(for: slot))
     }
 
-    func unmount(_ canvas: TimelineCanvasView) {
-        if canvases[canvas.slot]?.canvas === canvas { canvases[canvas.slot] = nil }
+    func unmount(_ canvas: CanvasView) {
+        guard let slot = canvases.first(where: { $0.value.canvas === canvas })?.key else { return }
+        canvases[slot] = nil
     }
 
-    func canvas(_ slot: CanvasSlot) -> TimelineCanvasView? {
+    func canvas(_ slot: CanvasSlot) -> CanvasView? {
         canvases[slot]?.canvas
     }
 
@@ -336,8 +337,8 @@ final class TimelineStage {
         hooks[slot]?.wanted(wanted)
     }
 
-    /// The panel's tree release (30 s hidden, vt-7727 D10): every GPU device
-    /// and engine goes; the feeds stay for the next show.
+    /// The panel's tree release (30 s hidden, vt-7727 D10): every engine goes,
+    /// then the shared GPU device; the feeds stay for the next show.
     func release() {
         for canvas in canvases.values.compactMap(\.canvas) { canvas.use(nil) }
         for engine in timelines.values { engine.detach() }
@@ -346,6 +347,7 @@ final class TimelineStage {
         timelines = [:]
         canvases = [:]
         for replay in replays.values { replay.cancel() }
+        CanvasSurface.release()
     }
 
     // MARK: - Keys
@@ -474,7 +476,7 @@ final class TimelineStage {
 }
 
 private struct WeakCanvas {
-    weak var canvas: TimelineCanvasView?
+    weak var canvas: CanvasView?
 }
 
 /// One canvas's replay: the playhead's instants through `ReplayClock`, the

@@ -1,27 +1,21 @@
-//! The diff model: `code_core::diff`, Pultík's `DiffLine`, `DiffDocument` and `DiffLayout`,
-//! plus the text diff (hunks, word diffs, side-by-side rows) and the column rule. Notes are
+//! The diff model: `code_core::diff`, Pultík's `DiffLine` and `DiffDocument`, plus the text diff
+//! (hunks, word diffs, side-by-side rows). Laying rows out and drawing them is the diff view's
+//! (`canvas_text::diff_view`, through canvas-ffi). Notes are
 //! data (`CODE_CORE_NOTE_*`): the app words them.
 
 use crate::search::CodeCoreRange;
 use crate::syntax::code;
-use crate::{
-    CODE_CORE_NONE, CodeCoreNumbers, CodeCoreStatus, CodeCoreStr, Failure, call, numbers_result,
-    owned, put, slice, utf16,
-};
-use code_core::TAB;
+use crate::{CODE_CORE_NONE, CodeCoreStatus, CodeCoreStr, Failure, call, owned, put, slice, utf16};
 use code_core::diff::{
-    self, ChangedFile, DiffDocument, DiffLayout, DiffLine, DocRow, FileNote, FileStatus, LineKind,
-    Metrics, SplitRow, TextDiff,
+    self, ChangedFile, DiffDocument, DiffLine, DocRow, FileNote, FileStatus, LineKind, SplitRow,
+    TextDiff,
 };
 use std::collections::HashSet;
 use std::ffi::c_char;
 
-/// A tab runs to the next multiple of this many columns.
-pub const CODE_CORE_TAB_WIDTH: u32 = 4;
 /// A file whose patch has more lines than this starts folded (as a generated file does).
 pub const CODE_CORE_COLLAPSE_LINES: u32 = 1500;
 // Literals, so the header carries numbers; held to the core's own here.
-const _: () = assert!(CODE_CORE_TAB_WIDTH == TAB);
 const _: () = assert!(CODE_CORE_COLLAPSE_LINES as usize == DiffDocument::COLLAPSE_LINES);
 
 pub const CODE_CORE_LINE_HUNK: u8 = 0;
@@ -339,229 +333,6 @@ pub unsafe extern "C" fn code_core_diff_document_free(document: *mut CodeCoreDif
     unsafe { owned::free::<CodeCoreDiffDocument, DocumentData>(document) }
 }
 
-/// Row heights and the code column's place, in points.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CodeCoreDiffMetrics {
-    pub line_height: f64,
-    pub header_height: f64,
-    pub gap_height: f64,
-    pub note_height: f64,
-    pub advance: f64,
-    /// The code column's left edge: the gutter and the ± marker.
-    pub code_x: f64,
-}
-
-impl From<Metrics> for CodeCoreDiffMetrics {
-    fn from(m: Metrics) -> Self {
-        Self {
-            line_height: m.line_height,
-            header_height: m.header_height,
-            gap_height: m.gap_height,
-            note_height: m.note_height,
-            advance: m.advance,
-            code_x: m.code_x,
-        }
-    }
-}
-
-impl From<CodeCoreDiffMetrics> for Metrics {
-    fn from(m: CodeCoreDiffMetrics) -> Self {
-        Self {
-            line_height: m.line_height,
-            header_height: m.header_height,
-            gap_height: m.gap_height,
-            note_height: m.note_height,
-            advance: m.advance,
-            code_x: m.code_x,
-        }
-    }
-}
-
-/// The metrics a layout starts from.
-///
-/// # Safety
-/// `out` is valid for a write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_diff_metrics_default(
-    out: *mut CodeCoreDiffMetrics,
-    error: *mut *mut c_char,
-) -> CodeCoreStatus {
-    // SAFETY: per this function's contract.
-    call(error, || unsafe { put(out, Metrics::default().into()) })
-}
-
-/// Rows laid out at one width: each row's visual rows (a wrapped line is several) and the
-/// running offsets (`row_count + 1`, the last is the height). `wrap_columns` is 0 when lines
-/// do not wrap.
-#[repr(C)]
-pub struct CodeCoreDiffLayout {
-    pub wrap_columns: u32,
-    pub visual_rows: *const u32,
-    pub offsets: *const f64,
-    pub row_count: usize,
-}
-
-type LayoutData = DiffLayout;
-
-/// Lay `row_count` rows out at `width` points: `row_kinds` are `CODE_CORE_ROW_*`, `columns`
-/// each row's width in columns (a document's own). Wrapping fits whole columns after the
-/// code column and a 12-point margin, never fewer than 20.
-///
-/// # Safety
-/// `row_kinds` and `columns` hold `row_count` entries valid for the call; `out` is valid
-/// for a write. Free the result with `code_core_diff_layout_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_diff_layout(
-    row_kinds: *const u8,
-    columns: *const u32,
-    row_count: usize,
-    width: f64,
-    wraps: bool,
-    metrics: CodeCoreDiffMetrics,
-    out: *mut *mut CodeCoreDiffLayout,
-    error: *mut *mut c_char,
-) -> CodeCoreStatus {
-    call(error, || {
-        // SAFETY: per this function's contract.
-        let (kinds, columns) =
-            unsafe { (slice(row_kinds, row_count)?, slice(columns, row_count)?) };
-        let rows = kinds
-            .iter()
-            .map(|&k| match k {
-                CODE_CORE_ROW_HEADER => Ok(DocRow::Header { file: 0 }),
-                CODE_CORE_ROW_LINE => Ok(DocRow::Line { file: 0, index: 0 }),
-                CODE_CORE_ROW_NOTE => Ok(DocRow::Note {
-                    file: 0,
-                    note: FileNote::NoDiff,
-                }),
-                CODE_CORE_ROW_GAP => Ok(DocRow::Gap),
-                _ => Err(Failure::Invalid("an unknown row kind")),
-            })
-            .collect::<Result<Vec<_>, Failure>>()?;
-        // The layout reads only the rows' kinds and columns.
-        let document = DiffDocument {
-            files: Vec::new(),
-            rows,
-            columns: columns.to_vec(),
-            digits: 0,
-        };
-        let layout = DiffLayout::new(&document, width, wraps, metrics.into());
-        let result = owned::into_raw(layout, |l: &LayoutData| CodeCoreDiffLayout {
-            wrap_columns: l.wrap_columns.unwrap_or(0),
-            visual_rows: l.visual_rows.as_ptr(),
-            offsets: l.offsets.as_ptr(),
-            row_count: l.visual_rows.len(),
-        });
-        // SAFETY: per this function's contract.
-        unsafe { put(out, result) }
-    })
-}
-
-/// Free a layout; null is a no-op.
-///
-/// # Safety
-/// `layout` is null or came from `code_core_diff_layout`, freed once.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_diff_layout_free(layout: *mut CodeCoreDiffLayout) {
-    // SAFETY: per this function's contract.
-    unsafe { owned::free::<CodeCoreDiffLayout, LayoutData>(layout) }
-}
-
-/// `text`'s width in columns: a tab runs to the next stop of `CODE_CORE_TAB_WIDTH`, East
-/// Asian wide chars and emoji take two, combining marks none.
-///
-/// # Safety
-/// `text` is valid for the call; `columns` is valid for a write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_columns(
-    text: CodeCoreStr,
-    columns: *mut u32,
-    error: *mut *mut c_char,
-) -> CodeCoreStatus {
-    call(error, || {
-        // SAFETY: per this function's contract.
-        let width = diff::columns(unsafe { text.text() }?);
-        // SAFETY: per this function's contract.
-        unsafe { put(columns, width) }
-    })
-}
-
-/// A text with its tabs expanded, and each original UTF-16 offset's place in it (`map`, one
-/// past the end included: the original's UTF-16 length + 1 entries).
-#[repr(C)]
-pub struct CodeCoreExpanded {
-    pub text: CodeCoreStr,
-    pub map: *const u32,
-    pub map_count: usize,
-}
-
-type ExpandedData = (String, Vec<u32>);
-
-/// `text` with its tabs expanded to their stops, and the UTF-16 offset map between the two.
-///
-/// # Safety
-/// `text` is valid for the call; `out` is valid for a write. Free the result with
-/// `code_core_expanded_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_expand_tabs(
-    text: CodeCoreStr,
-    out: *mut *mut CodeCoreExpanded,
-    error: *mut *mut c_char,
-) -> CodeCoreStatus {
-    call(error, || {
-        // SAFETY: per this function's contract.
-        let (expanded, map) = diff::expand_tabs(unsafe { text.text() }?);
-        let map = map.into_iter().map(|n| n as u32).collect();
-        let result = owned::into_raw((expanded, map), |(text, map): &ExpandedData| {
-            CodeCoreExpanded {
-                text: CodeCoreStr::of(text),
-                map: map.as_ptr(),
-                map_count: map.len(),
-            }
-        });
-        // SAFETY: per this function's contract.
-        unsafe { put(out, result) }
-    })
-}
-
-/// Free an expanded text; null is a no-op.
-///
-/// # Safety
-/// `expanded` is null or came from `code_core_expand_tabs`, freed once.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_expanded_free(expanded: *mut CodeCoreExpanded) {
-    // SAFETY: per this function's contract.
-    unsafe { owned::free::<CodeCoreExpanded, ExpandedData>(expanded) }
-}
-
-/// Where each visual row after the first starts in a line wrapped at `columns` (its drawn
-/// text, tabs expanded), in UTF-16 units: the drawing half of the layout's wrap rule. A wide
-/// char on a row's last column stays on it; a line never draws more rows than its layout.
-///
-/// # Safety
-/// `text` is valid for the call; `out` is valid for a write. Free the result with
-/// `code_core_numbers_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn code_core_row_starts(
-    text: CodeCoreStr,
-    columns: u32,
-    out: *mut *mut CodeCoreNumbers,
-    error: *mut *mut c_char,
-) -> CodeCoreStatus {
-    call(error, || {
-        // SAFETY: per this function's contract.
-        let text = unsafe { text.text() }?;
-        let mut cursor = utf16::Cursor::default();
-        let starts = diff::row_starts(text, columns)
-            .into_iter()
-            .map(|at| cursor.at(text, at) as u32)
-            .collect();
-        // SAFETY: per this function's contract.
-        unsafe { put(out, numbers_result(starts)) }
-    })
-}
-
 /// Whether a path is a lockfile or a generated file (they start folded).
 ///
 /// # Safety
@@ -779,8 +550,8 @@ pub unsafe extern "C" fn code_core_text_diff_free(diff: *mut CodeCoreTextDiff) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CODE_CORE_OK;
     use crate::testing::{read, s};
-    use crate::{CODE_CORE_OK, code_core_numbers_free};
     use std::ptr::null_mut;
 
     fn changed(path: &str, patch: Option<&str>, trimmed: bool) -> CodeCoreChangedFile {
@@ -795,7 +566,7 @@ mod tests {
     /// The document crosses whole: rows with their notes as data, columns, digits, each
     /// file's lines, language, fold and fragments; then lays out by its row kinds.
     #[test]
-    fn a_change_set_crosses_as_rows_and_lays_out() {
+    fn a_change_set_crosses_as_rows() {
         let patch = "@@ -9,2 +9,2 @@\n fn a() {}\n-let x = 1;\n+let 漢 = 2;";
         let files = [
             changed("src/a.rs", Some(patch), false),
@@ -886,57 +657,14 @@ mod tests {
         assert_eq!(old, [CODE_CORE_NONE, 0, 1, CODE_CORE_NONE]);
         assert_eq!(new, [CODE_CORE_NONE, 0, CODE_CORE_NONE, 1]);
         assert!(docs[1].collapsed);
-
-        let kinds: Vec<u8> = rows.iter().map(|r| r.kind).collect();
-        let metrics = CodeCoreDiffMetrics {
-            advance: 10.0,
-            code_x: 0.0,
-            ..Metrics::default().into()
-        };
-        let mut laid = null_mut();
-        // SAFETY: valid arrays; freed below.
-        let layout = unsafe {
-            let status = code_core_diff_layout(
-                kinds.as_ptr(),
-                columns.as_ptr(),
-                kinds.len(),
-                1012.0,
-                true,
-                metrics,
-                &mut laid,
-                null_mut(),
-            );
-            assert_eq!(status, CODE_CORE_OK);
-            &*laid
-        };
-        assert_eq!(layout.wrap_columns, 100);
-        // SAFETY: the result's arrays.
-        let offsets = unsafe { std::slice::from_raw_parts(layout.offsets, layout.row_count + 1) };
-        assert_eq!(offsets[1], 30.0, "a header");
-        // SAFETY: freed once each.
-        unsafe {
-            code_core_diff_layout_free(laid);
-            code_core_diff_document_free(out);
-        }
+        // SAFETY: freed once.
+        unsafe { code_core_diff_document_free(out) };
     }
 
     #[test]
-    fn columns_tabs_and_row_starts_in_utf16() {
-        let (mut columns, mut out) = (0, null_mut());
-        // SAFETY: valid arguments; freed below.
+    fn generated_and_long_files_start_folded() {
+        // SAFETY: valid arguments.
         unsafe {
-            code_core_columns(s("\t漢x"), &mut columns, null_mut());
-            assert_eq!(columns, 7);
-            code_core_expand_tabs(s("😀\tb"), &mut out, null_mut());
-            assert_eq!(read((*out).text), "😀  b");
-            let map = std::slice::from_raw_parts((*out).map, (*out).map_count);
-            assert_eq!(map, [0, 1, 2, 4, 5]);
-            code_core_expanded_free(out);
-            let mut starts = null_mut();
-            code_core_row_starts(s(&"😀".repeat(30)), 20, &mut starts, null_mut());
-            let starts_read = std::slice::from_raw_parts((*starts).values, (*starts).count);
-            assert_eq!(starts_read, [20, 40], "ten emoji a row, two units each");
-            code_core_numbers_free(starts);
             let mut generated = false;
             code_core_is_generated(s("web/app.min.js"), &mut generated, null_mut());
             assert!(generated);

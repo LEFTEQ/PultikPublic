@@ -4,11 +4,11 @@
 //! `wireguard`, `storagebox`), parsed by the map: an unknown word is an error, never a guess.
 
 use super::{
-    Failure, TimelineHit, TimelinePalette, TimelineStatus, TimelineStr, call, owned, slice,
+    CanvasStatus, CanvasStr, CanvasTimelineHit, CanvasTimelinePalette, Failure, Surface, call,
+    owned, slice,
 };
 use canvas_draw::{Camera, Point, Size};
-use canvas_gpu::{FrameOutcome, Gpu, Target};
-use canvas_text::TextSystem;
+use canvas_gpu::FrameOutcome;
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 use timeline::Palette;
@@ -19,41 +19,41 @@ use timeline::map::{
 };
 
 /// A hit on a card (`id` its id), a link or a box's frame.
-pub const TIMELINE_HIT_CARD: u8 = 5;
-pub const TIMELINE_HIT_LINK: u8 = 6;
-pub const TIMELINE_HIT_FRAME: u8 = 7;
+pub const CANVAS_TIMELINE_HIT_CARD: u8 = 5;
+pub const CANVAS_TIMELINE_HIT_LINK: u8 = 6;
+pub const CANVAS_TIMELINE_HIT_FRAME: u8 = 7;
 
 /// An app on a box (`/api/v1/estate/map` `boxes[].apps`): `sync` and `health` in Semafor's words,
 /// an empty `note` when none.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineMapApp {
-    pub name: TimelineStr,
-    pub sync: TimelineStr,
-    pub health: TimelineStr,
-    pub note: TimelineStr,
+pub struct CanvasMapApp {
+    pub name: CanvasStr,
+    pub sync: CanvasStr,
+    pub health: CanvasStr,
+    pub note: CanvasStr,
 }
 
 /// A rollout running on a box: through the gateway or not, its target and app (empty: none).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineMapRollout {
+pub struct CanvasMapRollout {
     pub gateway: bool,
-    pub target: TimelineStr,
-    pub app: TimelineStr,
+    pub target: CanvasStr,
+    pub app: CanvasStr,
 }
 
 /// A box: its name, `sync` word, address and header line (empty: none), apps and rollouts.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineMapBox {
-    pub name: TimelineStr,
-    pub sync: TimelineStr,
-    pub addr: TimelineStr,
-    pub line: TimelineStr,
-    pub apps: *const TimelineMapApp,
+pub struct CanvasMapBox {
+    pub name: CanvasStr,
+    pub sync: CanvasStr,
+    pub addr: CanvasStr,
+    pub line: CanvasStr,
+    pub apps: *const CanvasMapApp,
     pub app_count: usize,
-    pub rollouts: *const TimelineMapRollout,
+    pub rollouts: *const CanvasMapRollout,
     pub rollout_count: usize,
 }
 
@@ -61,26 +61,26 @@ pub struct TimelineMapBox {
 /// Semafor's words.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineMapNode {
-    pub id: TimelineStr,
-    pub kind: TimelineStr,
-    pub label: TimelineStr,
-    pub detail: TimelineStr,
-    pub place: TimelineStr,
+pub struct CanvasMapNode {
+    pub id: CanvasStr,
+    pub kind: CanvasStr,
+    pub label: CanvasStr,
+    pub detail: CanvasStr,
+    pub place: CanvasStr,
 }
 
 /// A topology edge: `kind` in Semafor's words; `targets` only when `has_targets`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineMapEdge {
-    pub id: TimelineStr,
-    pub from: TimelineStr,
-    pub to: TimelineStr,
-    pub kind: TimelineStr,
-    pub label: TimelineStr,
+pub struct CanvasMapEdge {
+    pub id: CanvasStr,
+    pub from: CanvasStr,
+    pub to: CanvasStr,
+    pub kind: CanvasStr,
+    pub label: CanvasStr,
     pub both: bool,
     pub has_targets: bool,
-    pub targets: *const TimelineStr,
+    pub targets: *const CanvasStr,
     pub target_count: usize,
 }
 
@@ -88,21 +88,20 @@ pub struct TimelineMapEdge {
 /// Semafor's words, `age_s` NaN when unknown, an empty `location` when none.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineMapCopy {
-    pub box_name: TimelineStr,
-    pub pipeline: TimelineStr,
-    pub place: TimelineStr,
-    pub state: TimelineStr,
-    pub location: TimelineStr,
+pub struct CanvasMapCopy {
+    pub box_name: CanvasStr,
+    pub pipeline: CanvasStr,
+    pub place: CanvasStr,
+    pub state: CanvasStr,
+    pub location: CanvasStr,
     pub age_s: f64,
 }
 
 /// One map on screen.
-pub struct TimelineMapHandle {
+pub struct CanvasMap {
     palette: Palette,
     scene: Option<MapScene>,
-    text: TextSystem,
-    renderer: Option<(Gpu, Target)>,
+    renderer: Option<Surface>,
     size: Size,
     camera: Camera,
     fitted: bool,
@@ -112,51 +111,52 @@ pub struct TimelineMapHandle {
     /// The zoom band and generation last emitted, and the camera last drawn.
     emitted: Option<(f32, u64)>,
     drawn: Option<Camera>,
+    /// The shared atlas's generation at the last emit: another means the glyphs moved.
+    built_at: u64,
 }
 
 /// # Safety
 /// `h` is null (refused) or a live map handle used by this thread alone.
-unsafe fn map<'a>(h: *mut TimelineMapHandle) -> Result<&'a mut TimelineMapHandle, Failure> {
+unsafe fn map<'a>(h: *mut CanvasMap) -> Result<&'a mut CanvasMap, Failure> {
     // SAFETY: per this function's contract.
     unsafe { h.as_mut() }.ok_or(Failure::Invalid("a null map handle"))
 }
 
 /// # Safety
-/// As [`TimelineStr::text`].
-unsafe fn word<T: Wire>(s: TimelineStr, what: &str) -> Result<T, Failure> {
+/// As [`CanvasStr::text`].
+unsafe fn word<T: Wire>(s: CanvasStr, what: &str) -> Result<T, Failure> {
     // SAFETY: per this function's contract.
     let w = unsafe { s.text() }?;
     T::from_wire(&w).ok_or_else(|| Failure::Engine(format!("an unknown {what} '{w}'")))
 }
 
 /// # Safety
-/// As [`TimelineStr::text`].
-unsafe fn some(s: TimelineStr) -> Result<Option<Arc<str>>, Failure> {
+/// As [`CanvasStr::text`].
+unsafe fn some(s: CanvasStr) -> Result<Option<Arc<str>>, Failure> {
     // SAFETY: per this function's contract.
     let t = unsafe { s.text() }?;
     Ok((!t.is_empty()).then_some(t))
 }
 
-/// A new, empty map drawn in `palette`. Free it with timeline_map_free.
+/// A new, empty map drawn in `palette`. Free it with canvas_map_free.
 ///
 /// # Safety
 /// `palette` and `out` are valid; `error` is null or valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_new(
-    palette: *const TimelinePalette,
-    out: *mut *mut TimelineMapHandle,
+pub unsafe extern "C" fn canvas_map_new(
+    palette: *const CanvasTimelinePalette,
+    out: *mut *mut CanvasMap,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let palette = unsafe { palette.as_ref() }.ok_or(Failure::Invalid("a null palette"))?;
         if out.is_null() {
             return Err(Failure::Invalid("a null out parameter"));
         }
-        let h = Box::new(TimelineMapHandle {
+        let h = Box::new(CanvasMap {
             palette: (*palette).into(),
             scene: None,
-            text: TextSystem::new(),
             renderer: None,
             size: Size::new(800.0, 600.0),
             camera: Camera::IDENTITY,
@@ -165,6 +165,7 @@ pub unsafe extern "C" fn timeline_map_new(
             generation: 0,
             emitted: None,
             drawn: None,
+            built_at: 0,
         });
         // SAFETY: checked non-null above.
         unsafe { *out = Box::into_raw(h) };
@@ -177,61 +178,46 @@ pub unsafe extern "C" fn timeline_map_new(
 /// # Safety
 /// `h` is null or a map handle, not used afterwards.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_free(h: *mut TimelineMapHandle) {
+pub unsafe extern "C" fn canvas_map_free(h: *mut CanvasMap) {
     if !h.is_null() {
         // SAFETY: per this function's contract.
         drop(unsafe { Box::from_raw(h) });
     }
 }
 
-/// Draw into `layer` (a `CAMetalLayer *`), `width` × `height` points at `scale`.
+/// Draw into `layer` (a `CAMetalLayer *`), `width` × `height` points at `scale`, on the shared
+/// device.
 ///
 /// # Safety
 /// `h` is a live map; `layer` is a valid CAMetalLayer that outlives the attachment.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_attach(
-    h: *mut TimelineMapHandle,
+pub unsafe extern "C" fn canvas_map_attach(
+    h: *mut CanvasMap,
     layer: *mut c_void,
     width: f64,
     height: f64,
     scale: f64,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { map(h) }?;
-        if layer.is_null() {
-            return Err(Failure::Invalid("a null layer"));
-        }
-        let gpu = Gpu::new().map_err(|e| Failure::Engine(e.to_string()))?;
-        #[cfg(target_vendor = "apple")]
-        // SAFETY: the caller's contract: a valid CAMetalLayer that outlives the target.
-        let target = unsafe {
-            gpu.create_layer_target(layer, canvas_gpu::Compositing::Opaque, width, height, scale)
-        }
-        .map_err(|e| Failure::Engine(e.to_string()))?;
-        #[cfg(not(target_vendor = "apple"))]
-        let target: Target = {
-            let _ = (width, height, scale);
-            return Err(Failure::Engine("layers are Apple-only".into()));
-        };
+        // SAFETY: the caller's contract: a valid CAMetalLayer that outlives the attachment.
+        let surface = unsafe { Surface::attach(layer, width, height, scale) }?;
         h.size = Size::new(width as f32, height as f32);
-        let mut target = target;
-        // As the timeline's: the host's display link paces frames (AC 8).
-        gpu.set_vsync(&mut target, false);
-        h.renderer = Some((gpu, target));
+        h.renderer = Some(surface);
         h.emitted = None;
         h.drawn = None;
         Ok(())
     })
 }
 
-/// Release the GPU device; the estate and the camera stay.
+/// Stop drawing into the layer; the estate, the camera and the shared device stay.
 ///
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_detach(h: *mut TimelineMapHandle) {
+pub unsafe extern "C" fn canvas_map_detach(h: *mut CanvasMap) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         h.renderer = None;
@@ -245,17 +231,12 @@ pub unsafe extern "C" fn timeline_map_detach(h: *mut TimelineMapHandle) {
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_resize(
-    h: *mut TimelineMapHandle,
-    width: f64,
-    height: f64,
-    scale: f64,
-) {
+pub unsafe extern "C" fn canvas_map_resize(h: *mut CanvasMap, width: f64, height: f64, scale: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         h.size = Size::new(width as f32, height as f32);
-        if let Some((gpu, target)) = &mut h.renderer {
-            gpu.resize(target, width, height, scale);
+        if let Some(r) = &mut h.renderer {
+            r.resize(width, height, scale);
         }
         h.drawn = None;
         h.emitted = None;
@@ -269,19 +250,19 @@ pub unsafe extern "C" fn timeline_map_resize(
 /// `h` is a live map; every array is valid for its count, every text for the call.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn timeline_map_set_estate(
-    h: *mut TimelineMapHandle,
-    boxes: *const TimelineMapBox,
+pub unsafe extern "C" fn canvas_map_set_estate(
+    h: *mut CanvasMap,
+    boxes: *const CanvasMapBox,
     box_count: usize,
-    nodes: *const TimelineMapNode,
+    nodes: *const CanvasMapNode,
     node_count: usize,
-    edges: *const TimelineMapEdge,
+    edges: *const CanvasMapEdge,
     edge_count: usize,
-    copies: *const TimelineMapCopy,
+    copies: *const CanvasMapCopy,
     copy_count: usize,
     copies_loaded: bool,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract, for every read below.
         unsafe {
@@ -383,9 +364,9 @@ pub unsafe extern "C" fn timeline_map_set_estate(
 /// # Safety
 /// `h` is null or a live map; `palette` is valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_set_palette(
-    h: *mut TimelineMapHandle,
-    palette: *const TimelinePalette,
+pub unsafe extern "C" fn canvas_map_set_palette(
+    h: *mut CanvasMap,
+    palette: *const CanvasTimelinePalette,
 ) {
     // SAFETY: per this function's contract.
     if let (Some(h), Some(p)) = unsafe { (h.as_mut(), palette.as_ref()) } {
@@ -399,7 +380,7 @@ pub unsafe extern "C" fn timeline_map_set_palette(
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_scroll(h: *mut TimelineMapHandle, dx: f64, dy: f64) {
+pub unsafe extern "C" fn canvas_map_scroll(h: *mut CanvasMap, dx: f64, dy: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         h.camera.offset = Point::new(h.camera.offset.x + dx as f32, h.camera.offset.y + dy as f32);
@@ -411,12 +392,7 @@ pub unsafe extern "C" fn timeline_map_scroll(h: *mut TimelineMapHandle, dx: f64,
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_magnify(
-    h: *mut TimelineMapHandle,
-    factor: f64,
-    x: f64,
-    y: f64,
-) {
+pub unsafe extern "C" fn canvas_map_magnify(h: *mut CanvasMap, factor: f64, x: f64, y: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         let at = Point::new(x as f32, y as f32);
@@ -434,7 +410,7 @@ pub unsafe extern "C" fn timeline_map_magnify(
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_fit(h: *mut TimelineMapHandle) {
+pub unsafe extern "C" fn canvas_map_fit(h: *mut CanvasMap) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() }
         && let Some(scene) = &h.scene
@@ -450,7 +426,7 @@ pub unsafe extern "C" fn timeline_map_fit(h: *mut TimelineMapHandle) {
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_walk(h: *mut TimelineMapHandle, dir: u8) {
+pub unsafe extern "C" fn canvas_map_walk(h: *mut CanvasMap, dir: u8) {
     // SAFETY: per this function's contract.
     let Some(h) = (unsafe { h.as_mut() }) else {
         return;
@@ -480,11 +456,11 @@ pub unsafe extern "C" fn timeline_map_walk(h: *mut TimelineMapHandle, dir: u8) {
 /// # Safety
 /// `h` is a live map; `id` is valid for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_select(
-    h: *mut TimelineMapHandle,
-    id: TimelineStr,
+pub unsafe extern "C" fn canvas_map_select(
+    h: *mut CanvasMap,
+    id: CanvasStr,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let (h, id) = unsafe { (map(h)?, id.text()?) };
@@ -494,12 +470,12 @@ pub unsafe extern "C" fn timeline_map_select(
     })
 }
 
-/// The selected card's id as an owned string (free with timeline_string_free), or null.
+/// The selected card's id as an owned string (free with canvas_string_free), or null.
 ///
 /// # Safety
 /// `h` is null or a live map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_selected(h: *mut TimelineMapHandle) -> *mut c_char {
+pub unsafe extern "C" fn canvas_map_selected(h: *mut CanvasMap) -> *mut c_char {
     // SAFETY: per this function's contract.
     unsafe { h.as_ref() }
         .and_then(|h| h.selected.as_deref())
@@ -507,13 +483,13 @@ pub unsafe extern "C" fn timeline_map_selected(h: *mut TimelineMapHandle) -> *mu
 }
 
 /// What ↵ opens: the selected card's live app, as owned `box_name` and `app` strings (free
-/// both with timeline_string_free). False, and both null, when the selection is no live app.
+/// both with canvas_string_free). False, and both null, when the selection is no live app.
 ///
 /// # Safety
 /// `h` is null or a live map; `box_name` and `app` are valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_selected_app(
-    h: *mut TimelineMapHandle,
+pub unsafe extern "C" fn canvas_map_selected_app(
+    h: *mut CanvasMap,
     box_name: *mut *mut c_char,
     app: *mut *mut c_char,
 ) -> bool {
@@ -543,13 +519,13 @@ pub unsafe extern "C" fn timeline_map_selected_app(
 /// # Safety
 /// `h` is a live map; `out` is valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_hit(
-    h: *mut TimelineMapHandle,
+pub unsafe extern "C" fn canvas_map_hit(
+    h: *mut CanvasMap,
     x: f64,
     y: f64,
-    out: *mut TimelineHit,
+    out: *mut CanvasTimelineHit,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { map(h) }?;
@@ -562,14 +538,14 @@ pub unsafe extern "C" fn timeline_map_hit(
             .as_ref()
             .and_then(|s| s.hit(world, h.camera.scale.x));
         let (kind, id) = match hit {
-            None => (super::TIMELINE_HIT_NONE, std::ptr::null_mut()),
-            Some(MapHit::Card(id)) => (TIMELINE_HIT_CARD, owned(&id)),
-            Some(MapHit::Link(id)) => (TIMELINE_HIT_LINK, owned(&id)),
-            Some(MapHit::Frame(id)) => (TIMELINE_HIT_FRAME, owned(&id)),
+            None => (super::CANVAS_TIMELINE_HIT_NONE, std::ptr::null_mut()),
+            Some(MapHit::Card(id)) => (CANVAS_TIMELINE_HIT_CARD, owned(&id)),
+            Some(MapHit::Link(id)) => (CANVAS_TIMELINE_HIT_LINK, owned(&id)),
+            Some(MapHit::Frame(id)) => (CANVAS_TIMELINE_HIT_FRAME, owned(&id)),
         };
         // SAFETY: checked non-null above.
         unsafe {
-            out.write(TimelineHit {
+            out.write(CanvasTimelineHit {
                 kind,
                 id,
                 from: f64::NAN,
@@ -587,43 +563,51 @@ pub unsafe extern "C" fn timeline_map_hit(
 /// # Safety
 /// `h` is a live map; `out` is valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_map_frame(
-    h: *mut TimelineMapHandle,
-    out: *mut super::TimelineFrame,
+pub unsafe extern "C" fn canvas_map_frame(
+    h: *mut CanvasMap,
+    out: *mut super::CanvasFrameReport,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { map(h) }?;
         if out.is_null() {
             return Err(Failure::Invalid("a null out parameter"));
         }
-        let mut frame = super::TimelineFrame::default();
-        if let (Some(scene), Some((gpu, target))) = (&h.scene, &mut h.renderer) {
+        let mut frame = super::CanvasFrameReport::default();
+        if let (Some(scene), Some(r)) = (&h.scene, &mut h.renderer) {
             if !h.fitted {
                 h.camera = scene.fit(h.size);
                 h.fitted = true;
             }
             let band = zoom_band(h.camera.scale.x);
-            if h.emitted != Some((band, h.generation)) {
-                let dl = scene.emit(&h.palette, &mut h.text, band, h.selected.as_deref());
-                gpu.set_camera(target, h.camera);
-                frame.built = true;
-                frame.presented = gpu
-                    .render(target, &dl, &mut h.text)
-                    .map_err(|e| Failure::Engine(e.to_string()))?
-                    == FrameOutcome::Presented;
-                h.emitted = Some((band, h.generation));
-                h.drawn = Some(h.camera);
-            } else if h.drawn != Some(h.camera) || target.animating() {
-                gpu.set_camera(target, h.camera);
-                frame.presented = gpu
-                    .redraw(target)
-                    .map_err(|e| Failure::Engine(e.to_string()))?
-                    == FrameOutcome::Presented;
-                h.drawn = Some(h.camera);
-            }
-            frame.animating = target.animating();
+            let (camera, data, selected) = (h.camera, h.generation, h.selected.as_deref());
+            let (palette, emitted, drawn, built_at) =
+                (&h.palette, &mut h.emitted, &mut h.drawn, &mut h.built_at);
+            r.with(|gpu, target, text| -> Result<(), Failure> {
+                // Glyphs another surface's frame moved: emit again.
+                if *emitted != Some((band, data)) || *built_at != text.atlas().generation() {
+                    let dl = scene.emit(palette, text, band, selected);
+                    gpu.set_camera(target, camera);
+                    frame.built = true;
+                    frame.presented = gpu
+                        .render(target, &dl, text)
+                        .map_err(|e| Failure::Engine(e.to_string()))?
+                        == FrameOutcome::Presented;
+                    *emitted = Some((band, data));
+                    *built_at = text.atlas().generation();
+                    *drawn = Some(camera);
+                } else if *drawn != Some(camera) || target.animating() {
+                    gpu.set_camera(target, camera);
+                    frame.presented = gpu
+                        .redraw(target)
+                        .map_err(|e| Failure::Engine(e.to_string()))?
+                        == FrameOutcome::Presented;
+                    *drawn = Some(camera);
+                }
+                Ok(())
+            })?;
+            frame.animating = r.animating();
         }
         // SAFETY: checked non-null above.
         unsafe { out.write(frame) };
@@ -635,21 +619,21 @@ pub unsafe extern "C" fn timeline_map_frame(
 mod tests {
     use super::*;
 
-    fn s(text: &'static str) -> TimelineStr {
-        TimelineStr {
+    fn s(text: &'static str) -> CanvasStr {
+        CanvasStr {
             ptr: text.as_ptr(),
             len: text.len(),
         }
     }
 
-    fn palette() -> TimelinePalette {
-        let c = super::super::TimelineRgba {
+    fn palette() -> CanvasTimelinePalette {
+        let c = super::super::CanvasRgba {
             r: 0.5,
             g: 0.5,
             b: 0.5,
             a: 1.0,
         };
-        TimelinePalette {
+        CanvasTimelinePalette {
             background: c,
             band: c,
             foreground: c,
@@ -666,20 +650,20 @@ mod tests {
     #[test]
     fn a_map_takes_an_estate_walks_its_cards_and_refuses_an_unknown_word() {
         let apps = [
-            TimelineMapApp {
+            CanvasMapApp {
                 name: s("exampleapp"),
                 sync: s("synced"),
                 health: s("healthy"),
                 note: s(""),
             },
-            TimelineMapApp {
+            CanvasMapApp {
                 name: s("vitrinka"),
                 sync: s("synced"),
                 health: s("healthy"),
                 note: s(""),
             },
         ];
-        let mut b = TimelineMapBox {
+        let mut b = CanvasMapBox {
             name: s("app-server"),
             sync: s("synced"),
             addr: s(""),
@@ -693,11 +677,8 @@ mod tests {
         let none: *const u8 = std::ptr::null();
         // SAFETY: valid pointers for every call below.
         unsafe {
-            assert_eq!(
-                timeline_map_new(&palette(), &mut h, std::ptr::null_mut()),
-                0
-            );
-            let ok = timeline_map_set_estate(
+            assert_eq!(canvas_map_new(&palette(), &mut h, std::ptr::null_mut()), 0);
+            let ok = canvas_map_set_estate(
                 h,
                 &b,
                 1,
@@ -711,21 +692,21 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ok, 0);
-            timeline_map_walk(h, 3);
-            let first = timeline_map_selected(h);
+            canvas_map_walk(h, 3);
+            let first = canvas_map_selected(h);
             assert!(
                 !first.is_null(),
                 "a walk from nothing lands on the first card"
             );
-            super::super::timeline_string_free(first);
+            super::super::canvas_string_free(first);
             let (mut bx, mut app) = (std::ptr::null_mut(), std::ptr::null_mut());
-            assert!(timeline_map_selected_app(h, &mut bx, &mut app));
+            assert!(canvas_map_selected_app(h, &mut bx, &mut app));
             assert_eq!(std::ffi::CStr::from_ptr(bx).to_str(), Ok("app-server"));
-            super::super::timeline_string_free(bx);
-            super::super::timeline_string_free(app);
+            super::super::canvas_string_free(bx);
+            super::super::canvas_string_free(app);
             b.sync = s("sideways");
             let mut err = std::ptr::null_mut();
-            let bad = timeline_map_set_estate(
+            let bad = canvas_map_set_estate(
                 h,
                 &b,
                 1,
@@ -744,8 +725,8 @@ mod tests {
                     .to_string_lossy()
                     .contains("sideways")
             );
-            super::super::timeline_string_free(err);
-            timeline_map_free(h);
+            super::super::canvas_string_free(err);
+            canvas_map_free(h);
         }
     }
 }

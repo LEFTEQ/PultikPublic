@@ -1,4 +1,4 @@
-import CTimeline
+import CCanvas
 import Foundation
 
 /// The Estate and Backups lenses' data (`TimelineEngine(lens: .estate | .backups)`): Semafor's
@@ -103,13 +103,13 @@ extension TimelineEngine {
         let t = events.map { [arena.add($0.id), arena.add($0.box), arena.add($0.title), arena.add($0.surface ?? "")] }
         try arena.with { base in
             var c = zip(events, t).map { e, t in
-                TimelineEstateEvent(
+                CanvasTimelineEstateEvent(
                     id: t[0].at(base), box_name: t[1].at(base), title: t[2].at(base), surface: t[3].at(base),
                     kind: e.kind.rawValue, result: e.result.rawValue, at: e.at.ms,
                     duration: e.duration.map { $0 * 1000 } ?? .nan, size_bytes: e.sizeBytes ?? .max
                 )
             }
-            try Self.call { timeline_set_estate_events(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_estate_events(handle, &c, c.count, $0) }
         }
     }
 
@@ -118,12 +118,12 @@ extension TimelineEngine {
         let t = timers.map { [arena.add($0.box), arena.add($0.unit), arena.add($0.surface ?? "")] }
         try arena.with { base in
             var c = zip(timers, t).map { s, t in
-                TimelineEstateTimer(
+                CanvasTimelineEstateTimer(
                     box_name: t[0].at(base), unit: t[1].at(base), surface: t[2].at(base),
                     kind: s.kind.rawValue, next: s.next.ms, period: s.period * 1000
                 )
             }
-            try Self.call { timeline_set_estate_timers(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_estate_timers(handle, &c, c.count, $0) }
         }
     }
 
@@ -132,9 +132,9 @@ extension TimelineEngine {
         let t = pins.map { [arena.add($0.box), arena.add($0.label)] }
         try arena.with { base in
             var c = zip(pins, t).map { p, t in
-                TimelineEstatePin(box_name: t[0].at(base), label: t[1].at(base), from: p.from.ms, to: p.to?.ms ?? .nan)
+                CanvasTimelineEstatePin(box_name: t[0].at(base), label: t[1].at(base), from: p.from.ms, to: p.to?.ms ?? .nan)
             }
-            try Self.call { timeline_set_estate_pins(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_estate_pins(handle, &c, c.count, $0) }
         }
     }
 
@@ -143,12 +143,12 @@ extension TimelineEngine {
         let t = bins.map { [arena.add($0.box), arena.add($0.surface ?? "")] }
         try arena.with { base in
             var c = zip(bins, t).map { b, t in
-                TimelineEstateBin(
+                CanvasTimelineEstateBin(
                     box_name: t[0].at(base), surface: t[1].at(base), row: b.row.rawValue, from: b.from.ms,
                     width: b.width * 1000, count: b.count, failures: b.failures, scheduled: b.scheduled
                 )
             }
-            try Self.call { timeline_set_estate_bins(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_estate_bins(handle, &c, c.count, $0) }
         }
     }
 
@@ -159,7 +159,7 @@ extension TimelineEngine {
         let t = boxes.map { arena.add($0) }
         try arena.with { base in
             var c = t.map { $0.at(base) }
-            try Self.call { timeline_set_estate_boxes(handle, &c, c.count, $0) }
+            try CanvasError.call(.timeline) { canvas_timeline_set_estate_boxes(handle, &c, c.count, $0) }
         }
     }
 }

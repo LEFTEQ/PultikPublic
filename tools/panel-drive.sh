@@ -8,7 +8,7 @@
 #   tools/panel-drive.sh size 1240x720             # pin the frame (AC 13's 1240/1600 pt captures); '' resets
 #   tools/panel-drive.sh query '<text>'            # set the palette text
 #   tools/panel-drive.sh paste                     # clipboard through the field editor (a real ⌘V; makes the panel key)
-#   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|space|1-9|a|b|c|e|f|i|k|l|m|n|r|z|minus|equal (key 3 cmd = CI)
+#   tools/panel-drive.sh key enter [cmd,opt,shift] # enter|tab|up|down|left|right|esc|backspace|space|1-9|a|b|c|e|f|i|k|l|m|n|r|s|z|minus|equal (key 3 cmd = CI)
 #   tools/panel-drive.sh key left "" 5            # the same key 5× at key-repeat speed (50 ms apart, in the app)
 #   tools/panel-drive.sh capture /tmp/panel.png    # the panel window (+ any open popover) as PNG
 #   tools/panel-drive.sh state [/tmp/state.json]   # palette + shell state as JSON (module, selection, detailOpen, strip…)

@@ -154,6 +154,9 @@ struct Preferences: Codable {
     /// ⌥Z in a diff turned wrapping off (PR workbench D9): true while long
     /// lines run past the edge. Absent (never false) while they wrap.
     var codeUnwrapped: Bool?
+    /// ⌥S on a PR's Files changed laid the diff out side by side: true
+    /// while it does. Absent (never false) while it is inline.
+    var codeSplit: Bool?
     /// The code theme Settings ▸ Code picked (workbench WP4), a
     /// `Packages/Theme` id. Absent until one is picked: the default draws
     /// (`CodePreferences.defaultThemes`). An id this build does not know (a
@@ -293,7 +296,7 @@ struct Preferences: Codable {
     /// hostname is ALSO build-server-next, so nothing keys on a hostname.
     static let defaultServers = [
         NamedRef(name: "BuildServer-next", ref: "build-server-next", ssh: "build-server-next",
-                 semafor: "https://semafor.byhenderson.com"),
+                 semafor: "https://semafor.dev.byhenderson.com"),
         NamedRef(name: "BuildServer", ref: "build-vps", ssh: "build-server-admin",
                  semafor: "https://semafor.ops.example.invalid"),
         NamedRef(name: "AppServer", ref: "example-vps", ssh: "app-server"),
@@ -498,6 +501,7 @@ struct Preferences: Codable {
         dimBrightness = try container.decodeIfPresent(Double.self, forKey: .dimBrightness)
         neverSleep = try container.decodeIfPresent(Bool.self, forKey: .neverSleep)
         codeUnwrapped = try container.decodeIfPresent(Bool.self, forKey: .codeUnwrapped)
+        codeSplit = try container.decodeIfPresent(Bool.self, forKey: .codeSplit)
         codeTheme = try container.decodeIfPresent(String.self, forKey: .codeTheme)
     }
 
@@ -585,6 +589,7 @@ struct Preferences: Codable {
         let retired = retireDeadSSHAliases()
         let servers = migrateServerEstate()
         let next = migrateBuildServerNext()
+        let semafor = migrateBuildServerNextSemafor()
         let services = migrateServiceEstate()
         let presets = migrateDisplayPresets()
         let repos = migrateRepoSlugs()
@@ -592,7 +597,7 @@ struct Preferences: Codable {
         let prod = seedProdPointers()
         let modules = seedModules()
         let eve = migrateEveConsole()
-        return retired || servers || next || services || presets || repos || probes || prod || modules || eve
+        return retired || servers || next || semafor || services || presets || repos || probes || prod || modules || eve
     }
 
     /// Eve's 2026-10-14 move: a saved link on exactly the old console name
@@ -891,6 +896,21 @@ struct Preferences: Codable {
             guard let semafor = shipped[servers[index].ref] ?? nil else { continue }
             servers[index].semafor = semafor
             changed = true
+        }
+        return changed
+    }
+
+    /// BuildServer-next's Semafor moved on 2026-10-17 (build-server-infra decision
+    /// 56: no per-app name in public DNS): a server on exactly the old name,
+    /// trailing slash or not, follows it to `semafor.dev.byhenderson.com`.
+    /// Any other value, an edited one, "" or none, stays as saved.
+    mutating func migrateBuildServerNextSemafor() -> Bool {
+        let retired: Set = ["https://semafor.byhenderson.com", "https://semafor.byhenderson.com/"]
+        var changed = false
+        for index in servers.indices where servers[index].semafor.map(retired.contains) == true {
+            servers[index].semafor = "https://semafor.dev.byhenderson.com"
+            changed = true
+            NSLog("pultik: server '%@' follows its Semafor to semafor.dev.byhenderson.com", servers[index].name)
         }
         return changed
     }

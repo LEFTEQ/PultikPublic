@@ -80,8 +80,8 @@ struct PRFilesTab: View {
                 ZStack(alignment: .bottom) {
                     if let document {
                         CodeCanvas(document: document, documentID: documentID, wraps: CodePreferences.shared.wraps,
-                                   active: active, focusedFile: focusedFile(document),
-                                   scrollRequest: router.scrollRequest,
+                                   split: CodePreferences.shared.split, active: active,
+                                   focusedFile: focusedFile(document), scrollRequest: router.scrollRequest,
                                    blob: { [store, repo = pr.ref.repo] sha in try await store.blobText(repo: repo, sha: sha) },
                                    reveal: reveal, marks: marks(document, pending: pending),
                                    anchor: composer.map { ($0.file, $0.lines) },
@@ -421,6 +421,10 @@ struct PRFilesTab: View {
             Spacer(minLength: 6)
             KbdHint("⌥Z")
             Text(CodePreferences.shared.wraps ? "unwrap" : "wrap").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
+            // Side by side selects nothing (the diff engine's selection is inline only): ⌘C waits for inline.
+            KbdHint("⌥S")
+            Text(CodePreferences.shared.split ? "inline · to select" : "side by side")
+                .font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
             KbdHint("⌘B")
             Text(CodePreferences.shared.sideColumnShown ? "hide tree" : "tree").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
         }

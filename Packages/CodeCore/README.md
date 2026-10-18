@@ -25,10 +25,10 @@ for the Foundation harness.
 - **Columns** follow the core's width rule: a tab runs to the next stop of 4, East Asian
   wide chars and emoji take two, combining marks none.
 - **Failures:** a core refusal or a caught Rust panic throws `CodeCoreError`. Lookups that
-  cannot fail (a path's language, a column count, the word at a column) log a failure and
+  cannot fail (a path's language, the word at a column) log a failure and
   answer a neutral value instead.
-- **Threads:** `SyntaxEngine`, `CodeText`, `DiffLine.parse`, `DiffRows`, `DiffLayout` and
-  `LineMatcher` are safe from any thread. `SymbolIndexes`, `SymbolIndexBuilder` and
+- **Threads:** `SyntaxEngine`, `CodeText`, `DiffLine.parse`, `DiffRows` and `LineMatcher` are
+  safe from any thread. `SymbolIndexes`, `SymbolIndexBuilder` and
   `GrepRecords` wrap one handle each: one owner (an actor, or a lock) uses it at a time.
 
 ## API
@@ -47,12 +47,10 @@ indexes.install(builder, repo: "o/r", head: sha)
 indexes.definitions(of: "render", repo: "o/r", head: sha, from: path, imports: imports)
 
 CodeText.wordAt(line, column: 12)                          // the identifier under a column
-CodeText.expandTabs(line)                                  // (text, UTF-16 offset map)
 let grep = try GrepRecords(head: sha, limit: 2000, query: q, toggles: SearchToggles())
 
 DiffLine.parse(patch)                                      // drawn lines with gutter numbers
-let rows = DiffRows(files, truncated: false, toggled: [])  // a change set as rows
-DiffLayout(rows.shape, width: 900, wraps: true, metrics: .init())
+DiffRows(files, truncated: false, toggled: [])             // each file's lines, language, fold
 try TextDiff(old: before, new: after)                      // hunks, word diffs, split rows
 ```
 

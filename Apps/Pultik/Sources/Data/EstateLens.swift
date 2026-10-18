@@ -1,5 +1,5 @@
+import Canvas
 import Foundation
-import Timeline
 
 // What Semafor's estate hands the Estate and Backups lenses and the estate map
 // (vt-7781 WP7, WP8), in the engines' values: each host's `TimelineWindow`

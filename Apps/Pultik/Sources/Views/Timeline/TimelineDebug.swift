@@ -1,7 +1,7 @@
 #if DEBUG
+import Canvas
 import Foundation
 import QuartzCore
-import Timeline
 
 /// Synthetic CI history for the engine-only surface (vt-7781 WP5): the panel
 /// driver's `timeline-demo` and `timeline-bench` feed it until Semafor's jobs
@@ -138,10 +138,14 @@ enum PanelBodyLog {
 /// pinch, driven per display frame through the gestures' own entries
 /// (`applyScroll`, `applyMagnify`), hands-off. It reports the frame interval
 /// (the display link's cadence: 8.33 ms only on a 120 Hz display), the
-/// canvas's own cost per frame and the scenes built.
+/// canvas's own cost per frame and the scenes built. It watches the canvas as
+/// its frame observer, which the canvas holds weakly: `running` keeps it.
 @MainActor
-final class TimelineBench {
+final class TimelineBench: CanvasFrameObserver {
     enum Phase: String, CaseIterable { case pan, pinch }
+
+    /// The bench in flight per canvas, until its report.
+    fileprivate static var running: [CanvasSlot: TimelineBench] = [:]
 
     private struct Samples {
         var intervals: [Double] = []
@@ -152,6 +156,7 @@ final class TimelineBench {
         var slowWithPanelUpdate = 0
     }
 
+    private let slot: CanvasSlot
     private let seconds: Double
     private let done: ([String: Any]) -> Void
     private var phase = Phase.pan
@@ -159,13 +164,14 @@ final class TimelineBench {
     private var last: CFTimeInterval?
     private var samples: [Phase: Samples] = [:]
 
-    init(seconds: Double, done: @escaping ([String: Any]) -> Void) {
+    init(slot: CanvasSlot, seconds: Double, done: @escaping ([String: Any]) -> Void) {
+        self.slot = slot
         self.seconds = seconds
         self.done = done
     }
 
     /// Before a frame: this frame's share of the scripted gesture.
-    func drive(_ canvas: TimelineCanvasView, at timestamp: CFTimeInterval) {
+    func willDraw(_ canvas: CanvasView, at timestamp: CFTimeInterval) {
         let start = phaseStart ?? timestamp
         phaseStart = start
         let dt = last.map { timestamp - $0 } ?? 0
@@ -183,7 +189,7 @@ final class TimelineBench {
     }
 
     /// After a frame: its interval, its cost and whether it built the scene.
-    func record(_ link: CADisplayLink, cost: Double, built: Bool, canvas: TimelineCanvasView) {
+    func didDraw(_ canvas: CanvasView, link: CADisplayLink, cost: Double, built: Bool) {
         var sample = samples[phase] ?? Samples()
         if let last {
             let interval = (link.timestamp - last) * 1000
@@ -205,7 +211,8 @@ final class TimelineBench {
             phaseStart = nil
             return
         }
-        canvas.bench = nil
+        canvas.observer = nil
+        Self.running[slot] = nil
         let screen = canvas.window?.screen
         var report: [String: Any] = [
             "display": screen?.localizedName ?? "",
@@ -221,7 +228,7 @@ final class TimelineBench {
         }
         report["all"] = ["interval": Self.stats(samples.values.flatMap(\.intervals)),
                          "cost": Self.stats(samples.values.flatMap(\.costs))]
-        report["canvas"] = TimelineStage.shared.debugState(canvas.slot)
+        report["canvas"] = TimelineStage.shared.debugState(slot)
         done(report)
     }
 
@@ -234,13 +241,15 @@ final class TimelineBench {
     }
 }
 
-extension TimelineCanvasView {
-    /// Runs the bench on this canvas; `done` gets the report, or why it could not run.
-    func runBench(seconds: Double, done: @escaping ([String: Any]) -> Void) {
+extension CanvasView {
+    /// Runs the bench on this canvas, `slot`'s; `done` gets the report, or why it could not run.
+    func runBench(_ slot: CanvasSlot, seconds: Double, done: @escaping ([String: Any]) -> Void) {
         guard attached, active else {
             return done(["error": "the canvas is not drawing", "canvas": TimelineStage.shared.debugState(slot)])
         }
-        bench = TimelineBench(seconds: seconds, done: done)
+        let bench = TimelineBench(slot: slot, seconds: seconds, done: done)
+        TimelineBench.running[slot] = bench
+        observer = bench
         wake()
     }
 }

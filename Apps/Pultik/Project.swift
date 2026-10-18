@@ -5,8 +5,9 @@ import ProjectDescriptionHelpers
 //
 // Highlighting, symbols, search and the diff model are crates/code-core, reached through its
 // C ABI (crates/code-core-ffi, include/code_core.h) and Packages/CodeCore's Swift wrappers;
-// the timelines are crates/timeline, through crates/timeline-ffi (include/timeline.h) and
-// Packages/Timeline. Both ABIs ship in ONE archive, crates/pultik-ffi (libpultik_ffi.a).
+// every Rust-drawn surface (the timelines, the estate map) goes through crates/canvas-ffi
+// (include/canvas.h) and Packages/Canvas. Both ABIs ship in ONE archive, crates/pultik-ffi
+// (libpultik_ffi.a).
 // RUST_CARGO_TARGET_DIR follows $CARGO_TARGET_DIR when xcodebuild inherits it, else
 // <repo>/target. RUST_LIB is the static library the app links: one slice per arch built.
 let rustSettings: SettingsDictionary = [
@@ -61,9 +62,9 @@ let project = Project(
         // Workbench WP3b: highlighting, symbols, search and the diff model from the Rust
         // code core, over its C ABI (Packages/CodeCore/README.md).
         .local(path: "../../Packages/CodeCore"),
-        // Timelines phase 2: Semafor's timelines and the estate map on the Rust renderer, over
-        // their C ABI (Packages/Timeline/README.md).
-        .local(path: "../../Packages/Timeline"),
+        // Every Rust-drawn surface (PR diff D5): the canvas host, Semafor's timelines and the
+        // estate map on the Rust renderer, over one C ABI (Packages/Canvas/README.md).
+        .local(path: "../../Packages/Canvas"),
         // Workbench WP4: every code theme from one definition file, shared
         // with the Rust core (Packages/Theme/README.md).
         .local(path: "../../Packages/Theme"),
@@ -133,7 +134,7 @@ let project = Project(
             dependencies: [
                 .target(name: "PultikFanHelper"), .package(product: "Markdown"),
                 .package(product: "CodeCore"), .package(product: "CodeThemes"), .package(product: "Links"),
-                .package(product: "Timeline"),
+                .package(product: "Canvas"),
             ],
             settings: .settings(base: [
                 "CODE_SIGN_IDENTITY": "-",

@@ -88,7 +88,7 @@ enum PanelDriver {
         case "r": (code, chars) = (15, "r") // ⌘R: CI's Re-run failed
         case "a": (code, chars) = (0, "a") // ⌘A: mark every row shown (bulk D1)
         case "backspace": (code, chars) = (51, "\u{7f}")
-        // A PR workbench's verbs and keys (D5): letters, ⌘K, ⌘B, ⌥Z, space.
+        // A PR workbench's verbs and keys (D5): letters, ⌘K, ⌘B, ⌥Z, ⌥S, space.
         case "space": (code, chars) = (49, " ")
         case "m": (code, chars) = (46, "m")
         case "c": (code, chars) = (8, "c")
@@ -98,6 +98,7 @@ enum PanelDriver {
         case "b": (code, chars) = (11, "b")
         case "f": (code, chars) = (3, "f")
         case "z": (code, chars) = (6, "z")
+        case "s": (code, chars) = (1, "s") // ⌥S: Files changed side by side
         // An entered canvas's keys (vt-7727 D5): N now, − / = zoom.
         case "n": (code, chars) = (45, "n")
         case "minus", "-": (code, chars) = (27, "-")

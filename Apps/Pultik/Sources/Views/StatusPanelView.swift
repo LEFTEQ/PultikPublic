@@ -870,6 +870,8 @@ struct StatusPanelView: View {
             router.requestVerb(VerbRequest.menu)
         case .toggleWrap:
             CodePreferences.shared.toggleWraps()
+        case .toggleSplit:
+            CodePreferences.shared.toggleSplit()
         case .copyCode:
             return CodeCanvasView.active?.copySelection() ?? false
         case .submitComposer:

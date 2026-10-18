@@ -822,6 +822,22 @@ impl LineTokens {
         &self.runs
     }
 
+    /// Runs already split by line, each line's in its own bytes, sorted: a host's highlights
+    /// brought back into code-core's terms (canvas-ffi's diff).
+    pub fn from_lines<L: IntoIterator<Item = TokenRun>>(
+        lines: impl IntoIterator<Item = L>,
+    ) -> Self {
+        let mut tokens = LineTokens {
+            runs: Vec::new(),
+            lines: vec![0],
+        };
+        for line in lines {
+            tokens.runs.extend(line);
+            tokens.lines.push(tokens.runs.len() as u32);
+        }
+        tokens
+    }
+
     /// Each line's first index into [`LineTokens::all_runs`], then the end.
     pub fn line_starts(&self) -> &[u32] {
         &self.lines

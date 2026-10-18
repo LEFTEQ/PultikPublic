@@ -28,9 +28,6 @@
 // No number: a line a side does not have, a fragment line, no language.
 #define CODE_CORE_NONE 4294967295
 
-// A tab runs to the next multiple of this many columns.
-#define CODE_CORE_TAB_WIDTH 4
-
 // A file whose patch has more lines than this starts folded (as a generated file does).
 #define CODE_CORE_COLLAPSE_LINES 1500
 
@@ -202,35 +199,6 @@ typedef struct CodeCoreDiffDocument {
   const uint32_t *columns;
   uint32_t digits;
 } CodeCoreDiffDocument;
-
-// Row heights and the code column's place, in points.
-typedef struct CodeCoreDiffMetrics {
-  double line_height;
-  double header_height;
-  double gap_height;
-  double note_height;
-  double advance;
-  // The code column's left edge: the gutter and the ± marker.
-  double code_x;
-} CodeCoreDiffMetrics;
-
-// Rows laid out at one width: each row's visual rows (a wrapped line is several) and the
-// running offsets (`row_count + 1`, the last is the height). `wrap_columns` is 0 when lines
-// do not wrap.
-typedef struct CodeCoreDiffLayout {
-  uint32_t wrap_columns;
-  const uint32_t *visual_rows;
-  const double *offsets;
-  size_t row_count;
-} CodeCoreDiffLayout;
-
-// A text with its tabs expanded, and each original UTF-16 offset's place in it (`map`, one
-// past the end included: the original's UTF-16 length + 1 entries).
-typedef struct CodeCoreExpanded {
-  struct CodeCoreStr text;
-  const uint32_t *map;
-  size_t map_count;
-} CodeCoreExpanded;
 
 // One hunk: its header line, its ranges, its section heading and its lines after the
 // header (`first_line .. end_line`).
@@ -444,68 +412,6 @@ CodeCoreStatus code_core_diff_document(const struct CodeCoreChangedFile *files,
 // # Safety
 // `document` is null or came from `code_core_diff_document`, freed once.
 void code_core_diff_document_free(struct CodeCoreDiffDocument *document);
-
-// The metrics a layout starts from.
-//
-// # Safety
-// `out` is valid for a write.
-CodeCoreStatus code_core_diff_metrics_default(struct CodeCoreDiffMetrics *out, char **error);
-
-// Lay `row_count` rows out at `width` points: `row_kinds` are `CODE_CORE_ROW_*`, `columns`
-// each row's width in columns (a document's own). Wrapping fits whole columns after the
-// code column and a 12-point margin, never fewer than 20.
-//
-// # Safety
-// `row_kinds` and `columns` hold `row_count` entries valid for the call; `out` is valid
-// for a write. Free the result with `code_core_diff_layout_free`.
-CodeCoreStatus code_core_diff_layout(const uint8_t *row_kinds,
-                                     const uint32_t *columns,
-                                     size_t row_count,
-                                     double width,
-                                     bool wraps,
-                                     struct CodeCoreDiffMetrics metrics,
-                                     struct CodeCoreDiffLayout **out,
-                                     char **error);
-
-// Free a layout; null is a no-op.
-//
-// # Safety
-// `layout` is null or came from `code_core_diff_layout`, freed once.
-void code_core_diff_layout_free(struct CodeCoreDiffLayout *layout);
-
-// `text`'s width in columns: a tab runs to the next stop of `CODE_CORE_TAB_WIDTH`, East
-// Asian wide chars and emoji take two, combining marks none.
-//
-// # Safety
-// `text` is valid for the call; `columns` is valid for a write.
-CodeCoreStatus code_core_columns(struct CodeCoreStr text, uint32_t *columns, char **error);
-
-// `text` with its tabs expanded to their stops, and the UTF-16 offset map between the two.
-//
-// # Safety
-// `text` is valid for the call; `out` is valid for a write. Free the result with
-// `code_core_expanded_free`.
-CodeCoreStatus code_core_expand_tabs(struct CodeCoreStr text,
-                                     struct CodeCoreExpanded **out,
-                                     char **error);
-
-// Free an expanded text; null is a no-op.
-//
-// # Safety
-// `expanded` is null or came from `code_core_expand_tabs`, freed once.
-void code_core_expanded_free(struct CodeCoreExpanded *expanded);
-
-// Where each visual row after the first starts in a line wrapped at `columns` (its drawn
-// text, tabs expanded), in UTF-16 units: the drawing half of the layout's wrap rule. A wide
-// char on a row's last column stays on it; a line never draws more rows than its layout.
-//
-// # Safety
-// `text` is valid for the call; `out` is valid for a write. Free the result with
-// `code_core_numbers_free`.
-CodeCoreStatus code_core_row_starts(struct CodeCoreStr text,
-                                    uint32_t columns,
-                                    struct CodeCoreNumbers **out,
-                                    char **error);
 
 // Whether a path is a lockfile or a generated file (they start folded).
 //

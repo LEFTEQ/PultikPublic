@@ -16,7 +16,7 @@ toolchain and its macOS targets, which rustup installs on first use. Nothing els
 no Zig, no system libraries. The app lives in `Apps/Pultik/`; the root
 `Workspace.swift` generates the workspace. Its local packages are `Packages/Theme`
 (code themes), `Packages/Links` (deep links), and `Packages/CodeCore` and
-`Packages/Timeline`, the Swift faces of the Rust core in `crates/`: syntax
+`Packages/Canvas`, the Swift faces of the Rust core in `crates/`: syntax
 highlighting, symbols, code search and diffs (`code-core`), and the zoomable
 timelines and estate map on a wgpu renderer (`timeline`, `canvas-*`). The app's
 cargo build phase compiles that core into one static library, `libpultik_ffi.a`

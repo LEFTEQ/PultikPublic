@@ -1,52 +1,11 @@
 import CCodeCore
 import Foundation
 
-/// The core's rules for a line of code on screen: its width in columns (a tab runs to the
-/// next stop, East Asian wide chars and emoji take two, combining marks none), its tabs
-/// expanded, where it wraps, the identifier under a column, and which files start folded.
+/// The core's rules for a line of code: the identifier under a column, and which files start
+/// folded. Columns, tabs and wrapping are the diff engine's (`Packages/Canvas`), drawn in Rust.
 public enum CodeText {
-    /// A tab runs to the next multiple of this many columns.
-    public static let tabWidth = Int(CODE_CORE_TAB_WIDTH)
     /// A patch longer than this starts folded.
     public static let collapseLines = Int(CODE_CORE_COLLAPSE_LINES)
-
-    /// `text`'s width in columns.
-    public static func columns(_ text: String) -> Int {
-        Core.answer("columns", fallback: text.utf16.count) {
-            var columns: UInt32 = 0
-            try text.withCore { text in try Core.call { code_core_columns(text, &columns, $0) } }
-            return Int(columns)
-        }
-    }
-
-    /// `text` with its tabs expanded, and each original UTF-16 offset's place in it (one past
-    /// the end included), so runs, selection and hit-testing map between the two.
-    public static func expandTabs(_ text: String) -> (text: String, map: [Int]) {
-        // Without a tab the core answers the text itself and the identity map.
-        guard text.utf16.contains(0x09) else { return (text, Array(0 ... text.utf16.count)) }
-        return Core.answer("expanding tabs", fallback: (text, Array(0 ... text.utf16.count))) {
-            var out: UnsafeMutablePointer<CodeCoreExpanded>?
-            defer { code_core_expanded_free(out) }
-            try text.withCore { text in try Core.call { code_core_expand_tabs(text, &out, $0) } }
-            guard let expanded = out?.pointee else { return (text, Array(0 ... text.utf16.count)) }
-            return (expanded.text.string, Core.buffer(expanded.map, expanded.map_count).map(Int.init))
-        }
-    }
-
-    /// Where each visual row after the first starts, in UTF-16 units, when the drawn `text`
-    /// (tabs expanded) wraps at `columns`: a char sits on the row its first column falls in,
-    /// so a line never draws more rows than its columns lay out.
-    public static func rowStarts(_ text: String, columns: Int) -> [Int] {
-        Core.answer("wrapping a line", fallback: []) {
-            var out: UnsafeMutablePointer<CodeCoreNumbers>?
-            defer { code_core_numbers_free(out) }
-            try text.withCore { text in
-                try Core.call { code_core_row_starts(text, UInt32(clamping: max(columns, 1)), &out, $0) }
-            }
-            guard let numbers = out?.pointee else { return [] }
-            return Core.buffer(numbers.values, numbers.count).map(Int.init)
-        }
-    }
 
     /// The identifier under UTF-16 `column` of `line` (letters, digits, `_` and `$`, not
     /// starting with a digit); nil off one.

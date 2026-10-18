@@ -1,5 +1,5 @@
+import Canvas
 import SwiftUI
-import Timeline
 
 /// A module's canvas view (vt-7727 D1, D5): CI's and Estate's Timeline and
 /// Estate's Map. The header carries the module's views and the canvas's

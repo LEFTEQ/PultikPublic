@@ -1,6 +1,6 @@
 [package]
 name = "pultik-ffi"
-description = "libpultik_ffi: the one Rust archive Pultík links, code-core-ffi and timeline-ffi as rlibs (their headers are code_core.h and timeline.h)."
+description = "libpultik_ffi: the one Rust archive Pultík links, code-core-ffi and canvas-ffi as rlibs (their headers are code_core.h and canvas.h)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,4 +12,4 @@ crate-type = ["staticlib"]
 
 [dependencies]
 code-core-ffi.workspace = true
-timeline-ffi.workspace = true
+canvas-ffi.workspace = true

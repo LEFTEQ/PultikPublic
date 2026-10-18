@@ -1,19 +1,20 @@
-//! The timeline's C ABI: what Pultík's `Packages/Timeline` calls. Swift owns the data, paging,
-//! polling, cards, chrome and every key; it hands this crate plain data and gestures, and the
-//! timeline owns marks, layout, hit testing, stepping, the camera and drawing (on the canvas
-//! crates, into the host's `CAMetalLayer`). `include/timeline.h` is generated from this crate by
-//! cbindgen (`cargo xtask timeline-header`, `--check` for drift).
+//! Every Rust-drawn surface Pultík hosts, over one C ABI (D2, docs/specs/2026-10-17-pr-diff-rust-canvas-decisions.md): what `Packages/Canvas`
+//! calls. Swift owns the data, paging, polling, cards, chrome and every key; it hands this crate
+//! plain data and gestures, and each engine owns its layout, hit testing, camera and drawing (on
+//! the canvas crates, into the host's `CAMetalLayer`): the timeline here (`canvas_timeline_*`),
+//! the estate map in [`map`] (`canvas_map_*`) and the diff in [`diff`] (`canvas_diff_*`), all on
+//! [`surface`]'s one shared device (`canvas_surface_*`). `include/canvas.h` is generated from
+//! this crate by cbindgen (`cargo xtask canvas-header`, `--check` for drift).
 //!
-//! - Plain data only: `#[repr(C)]` structs, [`TimelineStr`] (UTF-8 pointer and byte length),
+//! - Plain data only: `#[repr(C)]` structs, [`CanvasStr`] (UTF-8 pointer and byte length),
 //!   arrays as pointer and count, times as `f64` ms since the epoch with NaN for none.
-//! - A handle is used by one thread at a time (the main thread). Its GPU device exists only
-//!   between [`timeline_attach`] and [`timeline_detach`] (or [`timeline_free`]).
-//! - Every entry point runs inside [`call`]: a panic becomes [`TIMELINE_PANICKED`] with its
+//! - Every handle is used by the main thread alone. It draws only between its `_attach` and
+//!   `_detach` (or `_free`); the device they share lives until `canvas_surface_release`.
+//! - Every entry point runs inside [`call`]: a panic becomes [`CANVAS_PANICKED`] with its
 //!   message, never an unwind into Swift (Pultík builds the `dev` and `ffi-release` profiles,
 //!   which unwind).
 
-use canvas_gpu::{FrameOutcome, Gpu, Target};
-use canvas_text::TextSystem;
+use canvas_gpu::FrameOutcome;
 use std::ffi::{CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -25,28 +26,31 @@ use timeline::lens::estate::{
 };
 use timeline::scene::Hit;
 
+pub mod diff;
 pub mod map;
+pub mod surface;
+use surface::Surface;
 use timeline::{Bin, Lens, Palette, Step, Timeline};
 
-/// What a call answered: TIMELINE_OK or why not.
-pub type TimelineStatus = i32;
-pub const TIMELINE_OK: TimelineStatus = 0;
+/// What a call answered: CANVAS_OK or why not.
+pub type CanvasStatus = i32;
+pub const CANVAS_OK: CanvasStatus = 0;
 /// The engine refused (no GPU adapter, a surface it could not configure); the message says why.
-pub const TIMELINE_FAILED: TimelineStatus = 1;
+pub const CANVAS_FAILED: CanvasStatus = 1;
 /// The engine panicked: caught here, the message is the panic's.
-pub const TIMELINE_PANICKED: TimelineStatus = 2;
+pub const CANVAS_PANICKED: CanvasStatus = 2;
 /// An argument was unusable: a null pointer, text that is not UTF-8, an unknown code.
-pub const TIMELINE_INVALID: TimelineStatus = 3;
+pub const CANVAS_INVALID: CanvasStatus = 3;
 
 /// UTF-8 text by pointer and byte length (never NUL-terminated), owned by the caller for the call.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineStr {
+pub struct CanvasStr {
     pub ptr: *const u8,
     pub len: usize,
 }
 
-impl TimelineStr {
+impl CanvasStr {
     /// # Safety
     /// `ptr` is null with `len` 0, or valid for `len` bytes for the call.
     unsafe fn text(self) -> Result<Arc<str>, Failure> {
@@ -65,15 +69,15 @@ impl TimelineStr {
 /// A straight-alpha sRGB colour in `0..=1`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineRgba {
+pub struct CanvasRgba {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub a: f32,
 }
 
-impl From<TimelineRgba> for canvas_draw::Rgba {
-    fn from(c: TimelineRgba) -> Self {
+impl From<CanvasRgba> for canvas_draw::Rgba {
+    fn from(c: CanvasRgba) -> Self {
         canvas_draw::Rgba::new(c.r, c.g, c.b, c.a)
     }
 }
@@ -81,21 +85,21 @@ impl From<TimelineRgba> for canvas_draw::Rgba {
 /// The host's status tokens (Pultík's Theme): colour means status, never a repository.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelinePalette {
-    pub background: TimelineRgba,
-    pub band: TimelineRgba,
-    pub foreground: TimelineRgba,
-    pub muted: TimelineRgba,
-    pub grid: TimelineRgba,
-    pub data: TimelineRgba,
-    pub ok: TimelineRgba,
-    pub danger: TimelineRgba,
-    pub warning: TimelineRgba,
-    pub accent: TimelineRgba,
+pub struct CanvasTimelinePalette {
+    pub background: CanvasRgba,
+    pub band: CanvasRgba,
+    pub foreground: CanvasRgba,
+    pub muted: CanvasRgba,
+    pub grid: CanvasRgba,
+    pub data: CanvasRgba,
+    pub ok: CanvasRgba,
+    pub danger: CanvasRgba,
+    pub warning: CanvasRgba,
+    pub accent: CanvasRgba,
 }
 
-impl From<TimelinePalette> for Palette {
-    fn from(p: TimelinePalette) -> Self {
+impl From<CanvasTimelinePalette> for Palette {
+    fn from(p: CanvasTimelinePalette) -> Self {
         Palette {
             background: p.background.into(),
             band: p.band.into(),
@@ -114,23 +118,23 @@ impl From<TimelinePalette> for Palette {
 /// Which lens a handle draws.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimelineLens {
+pub enum CanvasTimelineLens {
     Ci = 0,
-    /// Each box a lane of Rollouts / Backups / Cleanups (timeline_set_estate_*).
+    /// Each box a lane of Rollouts / Backups / Cleanups (canvas_timeline_set_estate_*).
     Estate = 1,
     /// One row per backed-up surface: groups of rows keyed `box|surface`.
     Backups = 2,
 }
 
 /// One CI job (Semafor's `/api/v1/ci/timeline` `jobs`). Times are ms since the epoch, NaN for
-/// none; `result` is a TIMELINE_RESULT_*; a memory figure of `UINT32_MAX` is unmeasured.
+/// none; `result` is a CANVAS_TIMELINE_RESULT_*; a memory figure of `UINT32_MAX` is unmeasured.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineCiJob {
-    pub id: TimelineStr,
-    pub lane: TimelineStr,
-    pub repo: TimelineStr,
-    pub name: TimelineStr,
+pub struct CanvasTimelineCiJob {
+    pub id: CanvasStr,
+    pub lane: CanvasStr,
+    pub repo: CanvasStr,
+    pub name: CanvasStr,
     pub queued_at: f64,
     pub started_at: f64,
     pub completed_at: f64,
@@ -139,18 +143,18 @@ pub struct TimelineCiJob {
     pub reserved_mib: u32,
 }
 
-pub const TIMELINE_RESULT_SUCCEEDED: u8 = 0;
-pub const TIMELINE_RESULT_FAILED: u8 = 1;
-pub const TIMELINE_RESULT_CANCELLED: u8 = 2;
-pub const TIMELINE_RESULT_UNKNOWN: u8 = 3;
-pub const TIMELINE_RESULT_RUNNING: u8 = 4;
-pub const TIMELINE_RESULT_WAITING: u8 = 5;
+pub const CANVAS_TIMELINE_RESULT_SUCCEEDED: u8 = 0;
+pub const CANVAS_TIMELINE_RESULT_FAILED: u8 = 1;
+pub const CANVAS_TIMELINE_RESULT_CANCELLED: u8 = 2;
+pub const CANVAS_TIMELINE_RESULT_UNKNOWN: u8 = 3;
+pub const CANVAS_TIMELINE_RESULT_RUNNING: u8 = 4;
+pub const CANVAS_TIMELINE_RESULT_WAITING: u8 = 5;
 
 /// One density bin: `count` items on `row` in `[from, from + width)` ms, `failures` of them failed.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineBin {
-    pub row: TimelineStr,
+pub struct CanvasTimelineBin {
+    pub row: CanvasStr,
     pub from: f64,
     pub width: f64,
     pub count: u32,
@@ -160,27 +164,27 @@ pub struct TimelineBin {
 /// A row: its key (what an item's row names), label and lane-glyph tint (`has_tint`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineRow {
-    pub key: TimelineStr,
-    pub label: TimelineStr,
-    pub tint: TimelineRgba,
+pub struct CanvasTimelineRow {
+    pub key: CanvasStr,
+    pub label: CanvasStr,
+    pub tint: CanvasRgba,
     pub has_tint: bool,
 }
 
 /// A group of rows stacked under its label (an organisation's lanes, the hosted lanes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineGroup {
-    pub key: TimelineStr,
-    pub label: TimelineStr,
-    pub rows: *const TimelineRow,
+pub struct CanvasTimelineGroup {
+    pub key: CanvasStr,
+    pub label: CanvasStr,
+    pub rows: *const CanvasTimelineRow,
     pub row_count: usize,
 }
 
 /// A key's intent (KeyboardCoordinator's entered-timeline context, D5).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimelineIntent {
+pub enum CanvasTimelineIntent {
     /// ← / →: the previous / next finished outcome.
     OutcomeBack = 0,
     OutcomeForward = 1,
@@ -200,7 +204,7 @@ pub enum TimelineIntent {
 /// What a frame did.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineFrame {
+pub struct CanvasFrameReport {
     /// The scene was built again (a level, the window, the data or the selection changed).
     pub built: bool,
     /// A frame reached the layer.
@@ -212,9 +216,9 @@ pub struct TimelineFrame {
     pub next_due_ms: f64,
 }
 
-impl Default for TimelineFrame {
+impl Default for CanvasFrameReport {
     fn default() -> Self {
-        TimelineFrame {
+        CanvasFrameReport {
             built: false,
             presented: false,
             animating: false,
@@ -226,8 +230,8 @@ impl Default for TimelineFrame {
 /// The axis strip's height and the label column's width, points: where the host's own hit
 /// zones (the playhead drag) begin. Literals, so cbindgen writes them; a test holds them equal to
 /// the engine's.
-pub const TIMELINE_AXIS_PT: f32 = 30.0;
-pub const TIMELINE_LABEL_W: f32 = 168.0;
+pub const CANVAS_TIMELINE_AXIS_PT: f32 = 30.0;
+pub const CANVAS_TIMELINE_LABEL_W: f32 = 168.0;
 
 /// Show `[from, to]` (ms) across a quarter of the lanes, at least twice the current zoom: what a
 /// click on a cluster or a band opens.
@@ -235,7 +239,7 @@ pub const TIMELINE_LABEL_W: f32 = 168.0;
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_zoom_to(h: *mut TimelineHandle, from: f64, to: f64) {
+pub unsafe extern "C" fn canvas_timeline_zoom_to(h: *mut CanvasTimeline, from: f64, to: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() }
         && from.is_finite()
@@ -248,7 +252,7 @@ pub unsafe extern "C" fn timeline_zoom_to(h: *mut TimelineHandle, from: f64, to:
 /// The view and what the host should load and replay.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct TimelineState {
+pub struct CanvasTimelineState {
     /// Time at the lanes' left edge and the span they show, ms.
     pub t0: f64,
     pub span: f64,
@@ -261,37 +265,32 @@ pub struct TimelineState {
     pub playhead: f64,
 }
 
-/// What a point is on: TIMELINE_HIT_NONE, _MARK (its id in `id`) or _CLUSTER (`from`..`to`).
+/// What a point is on: CANVAS_TIMELINE_HIT_NONE, _MARK (its id in `id`) or _CLUSTER (`from`..`to`).
 #[repr(C)]
 #[derive(Debug)]
-pub struct TimelineHit {
+pub struct CanvasTimelineHit {
     pub kind: u8,
-    /// An owned NUL-terminated id (free with timeline_string_free), or null.
+    /// An owned NUL-terminated id (free with canvas_string_free), or null.
     pub id: *mut c_char,
     pub from: f64,
     pub to: f64,
 }
 
-pub const TIMELINE_HIT_NONE: u8 = 0;
-pub const TIMELINE_HIT_MARK: u8 = 1;
-pub const TIMELINE_HIT_CLUSTER: u8 = 2;
-pub const TIMELINE_HIT_RAIL: u8 = 3;
-pub const TIMELINE_HIT_BAND: u8 = 4;
-
-/// The GPU side of an attached handle.
-struct Renderer {
-    gpu: Gpu,
-    target: Target,
-}
+pub const CANVAS_TIMELINE_HIT_NONE: u8 = 0;
+pub const CANVAS_TIMELINE_HIT_MARK: u8 = 1;
+pub const CANVAS_TIMELINE_HIT_CLUSTER: u8 = 2;
+pub const CANVAS_TIMELINE_HIT_RAIL: u8 = 3;
+pub const CANVAS_TIMELINE_HIT_BAND: u8 = 4;
 
 /// One timeline on screen.
-pub struct TimelineHandle {
-    lens: TimelineLens,
+pub struct CanvasTimeline {
+    lens: CanvasTimelineLens,
     timeline: Timeline,
-    text: TextSystem,
-    renderer: Option<Renderer>,
+    renderer: Option<Surface>,
     /// The camera last drawn, so an unchanged view presents nothing.
     drawn: Option<canvas_draw::Camera>,
+    /// The shared atlas's generation at the last build: another means the glyphs moved.
+    built_at: u64,
 }
 
 #[derive(Debug)]
@@ -307,18 +306,18 @@ fn owned(s: &str) -> *mut c_char {
 }
 
 /// Run one entry point: a panic or a failure becomes its status, its message goes to `error`.
-fn call(error: *mut *mut c_char, f: impl FnOnce() -> Result<(), Failure>) -> TimelineStatus {
+fn call(error: *mut *mut c_char, f: impl FnOnce() -> Result<(), Failure>) -> CanvasStatus {
     let (status, message) = match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(())) => (TIMELINE_OK, None),
-        Ok(Err(Failure::Engine(m))) => (TIMELINE_FAILED, Some(m)),
-        Ok(Err(Failure::Invalid(why))) => (TIMELINE_INVALID, Some(why.to_owned())),
+        Ok(Ok(())) => (CANVAS_OK, None),
+        Ok(Err(Failure::Engine(m))) => (CANVAS_FAILED, Some(m)),
+        Ok(Err(Failure::Invalid(why))) => (CANVAS_INVALID, Some(why.to_owned())),
         Err(payload) => {
             let m = payload
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "a panic without a message".to_owned());
-            (TIMELINE_PANICKED, Some(m))
+            (CANVAS_PANICKED, Some(m))
         }
     };
     if !error.is_null() {
@@ -329,8 +328,8 @@ fn call(error: *mut *mut c_char, f: impl FnOnce() -> Result<(), Failure>) -> Tim
 }
 
 /// # Safety
-/// `h` is null (refused) or a live handle from [`timeline_new`] used by this thread alone.
-unsafe fn handle<'a>(h: *mut TimelineHandle) -> Result<&'a mut TimelineHandle, Failure> {
+/// `h` is null (refused) or a live handle from [`canvas_timeline_new`] used by this thread alone.
+unsafe fn handle<'a>(h: *mut CanvasTimeline) -> Result<&'a mut CanvasTimeline, Failure> {
     // SAFETY: per this function's contract.
     unsafe { h.as_mut() }.ok_or(Failure::Invalid("a null handle"))
 }
@@ -356,34 +355,34 @@ fn mib(v: u32) -> Option<u32> {
 
 fn result(code: u8) -> Result<CiResult, Failure> {
     Ok(match code {
-        TIMELINE_RESULT_SUCCEEDED => CiResult::Succeeded,
-        TIMELINE_RESULT_FAILED => CiResult::Failed,
-        TIMELINE_RESULT_CANCELLED => CiResult::Cancelled,
-        TIMELINE_RESULT_UNKNOWN => CiResult::Unknown,
-        TIMELINE_RESULT_RUNNING => CiResult::Running,
-        TIMELINE_RESULT_WAITING => CiResult::Waiting,
+        CANVAS_TIMELINE_RESULT_SUCCEEDED => CiResult::Succeeded,
+        CANVAS_TIMELINE_RESULT_FAILED => CiResult::Failed,
+        CANVAS_TIMELINE_RESULT_CANCELLED => CiResult::Cancelled,
+        CANVAS_TIMELINE_RESULT_UNKNOWN => CiResult::Unknown,
+        CANVAS_TIMELINE_RESULT_RUNNING => CiResult::Running,
+        CANVAS_TIMELINE_RESULT_WAITING => CiResult::Waiting,
         _ => return Err(Failure::Invalid("an unknown job result")),
     })
 }
 
-/// A new timeline of `lens` (a TimelineLens) at `now`, drawn in `palette`. Free it with
-/// timeline_free.
+/// A new timeline of `lens` (a CanvasTimelineLens) at `now`, drawn in `palette`. Free it with
+/// canvas_timeline_free.
 ///
 /// # Safety
 /// `palette` and `out` are valid; `error` is null or valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_new(
+pub unsafe extern "C" fn canvas_timeline_new(
     lens: u8,
-    palette: *const TimelinePalette,
+    palette: *const CanvasTimelinePalette,
     now: f64,
-    out: *mut *mut TimelineHandle,
+    out: *mut *mut CanvasTimeline,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         let lens = match lens {
-            0 => TimelineLens::Ci,
-            1 => TimelineLens::Estate,
-            2 => TimelineLens::Backups,
+            0 => CanvasTimelineLens::Ci,
+            1 => CanvasTimelineLens::Estate,
+            2 => CanvasTimelineLens::Backups,
             _ => return Err(Failure::Invalid("an unknown lens")),
         };
         // SAFETY: per this function's contract.
@@ -392,16 +391,16 @@ pub unsafe extern "C" fn timeline_new(
             return Err(Failure::Invalid("a null out parameter"));
         }
         let spec = match lens {
-            TimelineLens::Ci => CiLens.spec(),
-            TimelineLens::Estate => EstateLens.spec(),
-            TimelineLens::Backups => BackupsLens.spec(),
+            CanvasTimelineLens::Ci => CiLens.spec(),
+            CanvasTimelineLens::Estate => EstateLens.spec(),
+            CanvasTimelineLens::Backups => BackupsLens.spec(),
         };
-        let h = Box::new(TimelineHandle {
+        let h = Box::new(CanvasTimeline {
             lens,
             timeline: Timeline::new(spec, (*palette).into(), now),
-            text: TextSystem::new(),
             renderer: None,
             drawn: None,
+            built_at: 0,
         });
         // SAFETY: checked non-null above.
         unsafe { *out = Box::into_raw(h) };
@@ -412,9 +411,9 @@ pub unsafe extern "C" fn timeline_new(
 /// Free a handle (and its GPU device, when attached).
 ///
 /// # Safety
-/// `h` is null or a handle from timeline_new, not used afterwards.
+/// `h` is null or a handle from canvas_timeline_new, not used afterwards.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_free(h: *mut TimelineHandle) {
+pub unsafe extern "C" fn canvas_timeline_free(h: *mut CanvasTimeline) {
     if !h.is_null() {
         // SAFETY: per this function's contract.
         drop(unsafe { Box::from_raw(h) });
@@ -426,52 +425,34 @@ pub unsafe extern "C" fn timeline_free(h: *mut TimelineHandle) {
 /// # Safety
 /// `s` is null or a string from this library, freed once.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_string_free(s: *mut c_char) {
+pub unsafe extern "C" fn canvas_string_free(s: *mut c_char) {
     if !s.is_null() {
         // SAFETY: per this function's contract.
         drop(unsafe { CString::from_raw(s) });
     }
 }
 
-/// Draw into `layer` (a `CAMetalLayer *`), `width` × `height` points at `scale`: creates the GPU
-/// device. Fails with TIMELINE_FAILED when the machine has no adapter.
+/// Draw into `layer` (a `CAMetalLayer *`), `width` × `height` points at `scale`, on the shared
+/// device (built on the first attach). Fails with CANVAS_FAILED when the machine has no adapter.
 ///
 /// # Safety
 /// `h` is a live handle; `layer` is a valid CAMetalLayer that outlives the attachment.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_attach(
-    h: *mut TimelineHandle,
+pub unsafe extern "C" fn canvas_timeline_attach(
+    h: *mut CanvasTimeline,
     layer: *mut c_void,
     width: f64,
     height: f64,
     scale: f64,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
-        if layer.is_null() {
-            return Err(Failure::Invalid("a null layer"));
-        }
-        let gpu = Gpu::new().map_err(|e| Failure::Engine(e.to_string()))?;
-        #[cfg(target_vendor = "apple")]
-        // SAFETY: the caller's contract: a valid CAMetalLayer that outlives the target.
-        let target = unsafe {
-            gpu.create_layer_target(layer, canvas_gpu::Compositing::Opaque, width, height, scale)
-        }
-        .map_err(|e| Failure::Engine(e.to_string()))?;
-        #[cfg(not(target_vendor = "apple"))]
-        let target: Target = {
-            let _ = (width, height, scale);
-            return Err(Failure::Engine("layers are Apple-only".into()));
-        };
+        // SAFETY: the caller's contract: a valid CAMetalLayer that outlives the attachment.
+        let surface = unsafe { Surface::attach(layer, width, height, scale) }?;
         h.timeline.resize(width as f32, height as f32);
-        let mut target = target;
-        // The host's display link paces frames. In step with the display, the panel's surface
-        // is composited at 60 Hz on a 120 Hz screen and every frame waits ~11 ms for a drawable
-        // (AC 8, Metal System Trace 2026-10-16); presented as soon as done, it costs ~0.4 ms.
-        gpu.set_vsync(&mut target, false);
-        h.renderer = Some(Renderer { gpu, target });
+        h.renderer = Some(surface);
         h.drawn = None;
         Ok(())
     })
@@ -483,21 +464,22 @@ pub unsafe extern "C" fn timeline_attach(
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_vsync(h: *mut TimelineHandle, vsync: bool) {
+pub unsafe extern "C" fn canvas_timeline_set_vsync(h: *mut CanvasTimeline, vsync: bool) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() }
         && let Some(r) = &mut h.renderer
     {
-        r.gpu.set_vsync(&mut r.target, vsync);
+        r.set_vsync(vsync);
     }
 }
 
-/// Stop drawing and release the GPU device (the panel's 30 s tree release); the data stays.
+/// Stop drawing into the layer; the data stays, and so does the shared device (released by
+/// canvas_surface_release).
 ///
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_detach(h: *mut TimelineHandle) {
+pub unsafe extern "C" fn canvas_timeline_detach(h: *mut CanvasTimeline) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         h.renderer = None;
@@ -510,19 +492,19 @@ pub unsafe extern "C" fn timeline_detach(h: *mut TimelineHandle) {
 /// # Safety
 /// `h` is a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_resize(
-    h: *mut TimelineHandle,
+pub unsafe extern "C" fn canvas_timeline_resize(
+    h: *mut CanvasTimeline,
     width: f64,
     height: f64,
     scale: f64,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
         h.timeline.resize(width as f32, height as f32);
         if let Some(r) = &mut h.renderer {
-            r.gpu.resize(&mut r.target, width, height, scale);
+            r.resize(width, height, scale);
         }
         h.drawn = None;
         Ok(())
@@ -534,7 +516,7 @@ pub unsafe extern "C" fn timeline_resize(
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_now(h: *mut TimelineHandle, now: f64) {
+pub unsafe extern "C" fn canvas_timeline_set_now(h: *mut CanvasTimeline, now: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         h.timeline.set_now(now);
@@ -546,16 +528,16 @@ pub unsafe extern "C" fn timeline_set_now(h: *mut TimelineHandle, now: f64) {
 /// # Safety
 /// `h` is a live CI handle; `jobs` is valid for `count` elements, their texts for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_ci_jobs(
-    h: *mut TimelineHandle,
-    jobs: *const TimelineCiJob,
+pub unsafe extern "C" fn canvas_timeline_set_ci_jobs(
+    h: *mut CanvasTimeline,
+    jobs: *const CanvasTimelineCiJob,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
-        if h.lens != TimelineLens::Ci {
+        if h.lens != CanvasTimelineLens::Ci {
             return Err(Failure::Invalid("not a CI timeline"));
         }
         let palette = h.timeline.palette;
@@ -589,12 +571,12 @@ pub unsafe extern "C" fn timeline_set_ci_jobs(
 /// # Safety
 /// `h` is a live handle; `bins` is valid for `count` elements, their texts for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_bins(
-    h: *mut TimelineHandle,
-    bins: *const TimelineBin,
+pub unsafe extern "C" fn canvas_timeline_set_bins(
+    h: *mut CanvasTimeline,
+    bins: *const CanvasTimelineBin,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
@@ -625,12 +607,12 @@ pub unsafe extern "C" fn timeline_set_bins(
 /// `h` is a live handle; `groups` is valid for `count` elements, each `rows` for `row_count`,
 /// their texts for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_groups(
-    h: *mut TimelineHandle,
-    groups: *const TimelineGroup,
+pub unsafe extern "C" fn canvas_timeline_set_groups(
+    h: *mut CanvasTimeline,
+    groups: *const CanvasTimelineGroup,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
@@ -658,9 +640,9 @@ pub unsafe extern "C" fn timeline_set_groups(
 /// # Safety
 /// `h` is null or a live handle; `palette` is valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_palette(
-    h: *mut TimelineHandle,
-    palette: *const TimelinePalette,
+pub unsafe extern "C" fn canvas_timeline_set_palette(
+    h: *mut CanvasTimeline,
+    palette: *const CanvasTimelinePalette,
 ) {
     // SAFETY: per this function's contract.
     if let (Some(h), Some(p)) = unsafe { (h.as_mut(), palette.as_ref()) } {
@@ -673,7 +655,7 @@ pub unsafe extern "C" fn timeline_set_palette(
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_scroll(h: *mut TimelineHandle, dx: f64, dy: f64) {
+pub unsafe extern "C" fn canvas_timeline_scroll(h: *mut CanvasTimeline, dx: f64, dy: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         h.timeline.scroll_by(dx, dy as f32);
@@ -686,7 +668,7 @@ pub unsafe extern "C" fn timeline_scroll(h: *mut TimelineHandle, dx: f64, dy: f6
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_magnify(h: *mut TimelineHandle, factor: f64, x: f64) {
+pub unsafe extern "C" fn canvas_timeline_magnify(h: *mut CanvasTimeline, factor: f64, x: f64) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         let lanes_x = x
@@ -696,16 +678,16 @@ pub unsafe extern "C" fn timeline_magnify(h: *mut TimelineHandle, factor: f64, x
     }
 }
 
-/// Run a key's intent (a TimelineIntent). The selection after it is timeline_selected's.
+/// Run a key's intent (a CanvasTimelineIntent). The selection after it is canvas_timeline_selected's.
 ///
 /// # Safety
 /// `h` is a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_key(
-    h: *mut TimelineHandle,
+pub unsafe extern "C" fn canvas_timeline_key(
+    h: *mut CanvasTimeline,
     intent: u8,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
@@ -731,11 +713,11 @@ pub unsafe extern "C" fn timeline_key(
 /// # Safety
 /// `h` is a live handle; `id` is valid for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_select(
-    h: *mut TimelineHandle,
-    id: TimelineStr,
+pub unsafe extern "C" fn canvas_timeline_select(
+    h: *mut CanvasTimeline,
+    id: CanvasStr,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let (h, id) = unsafe { (handle(h)?, id.text()?) };
@@ -744,12 +726,12 @@ pub unsafe extern "C" fn timeline_select(
     })
 }
 
-/// The selected mark's id as an owned string (free with timeline_string_free), or null.
+/// The selected mark's id as an owned string (free with canvas_string_free), or null.
 ///
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_selected(h: *mut TimelineHandle) -> *mut c_char {
+pub unsafe extern "C" fn canvas_timeline_selected(h: *mut CanvasTimeline) -> *mut c_char {
     // SAFETY: per this function's contract.
     unsafe { h.as_ref() }
         .and_then(|h| h.timeline.selected())
@@ -762,7 +744,7 @@ pub unsafe extern "C" fn timeline_selected(h: *mut TimelineHandle) -> *mut c_cha
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_playhead(h: *mut TimelineHandle, x: f64, release: bool) {
+pub unsafe extern "C" fn canvas_timeline_playhead(h: *mut CanvasTimeline, x: f64, release: bool) {
     // SAFETY: per this function's contract.
     if let Some(h) = unsafe { h.as_mut() } {
         if x.is_finite() {
@@ -779,45 +761,45 @@ pub unsafe extern "C" fn timeline_playhead(h: *mut TimelineHandle, x: f64, relea
 /// # Safety
 /// `h` is a live handle; `out` is valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_hit(
-    h: *mut TimelineHandle,
+pub unsafe extern "C" fn canvas_timeline_hit(
+    h: *mut CanvasTimeline,
     x: f64,
     y: f64,
-    out: *mut TimelineHit,
+    out: *mut CanvasTimelineHit,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
         if out.is_null() {
             return Err(Failure::Invalid("a null out parameter"));
         }
-        let none = TimelineHit {
-            kind: TIMELINE_HIT_NONE,
+        let none = CanvasTimelineHit {
+            kind: CANVAS_TIMELINE_HIT_NONE,
             id: std::ptr::null_mut(),
             from: f64::NAN,
             to: f64::NAN,
         };
         let hit = match h.timeline.hit(x as f32, y as f32) {
             None => none,
-            Some(Hit::Mark(id)) => TimelineHit {
-                kind: TIMELINE_HIT_MARK,
+            Some(Hit::Mark(id)) => CanvasTimelineHit {
+                kind: CANVAS_TIMELINE_HIT_MARK,
                 id: owned(&id),
                 ..none
             },
-            Some(Hit::Cluster(c)) => TimelineHit {
-                kind: TIMELINE_HIT_CLUSTER,
+            Some(Hit::Cluster(c)) => CanvasTimelineHit {
+                kind: CANVAS_TIMELINE_HIT_CLUSTER,
                 from: c.from,
                 to: c.to,
                 ..none
             },
-            Some(Hit::Rail(r)) => TimelineHit {
-                kind: TIMELINE_HIT_RAIL,
+            Some(Hit::Rail(r)) => CanvasTimelineHit {
+                kind: CANVAS_TIMELINE_HIT_RAIL,
                 from: r.from,
                 ..none
             },
-            Some(Hit::Band(b)) => TimelineHit {
-                kind: TIMELINE_HIT_BAND,
+            Some(Hit::Band(b)) => CanvasTimelineHit {
+                kind: CANVAS_TIMELINE_HIT_BAND,
                 id: owned(&b.key),
                 from: b.from,
                 to: b.to.unwrap_or(f64::NAN),
@@ -834,14 +816,14 @@ pub unsafe extern "C" fn timeline_hit(
 /// # Safety
 /// `h` is null or a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_state(h: *mut TimelineHandle) -> TimelineState {
+pub unsafe extern "C" fn canvas_timeline_state(h: *mut CanvasTimeline) -> CanvasTimelineState {
     // SAFETY: per this function's contract.
     let Some(h) = (unsafe { h.as_ref() }) else {
-        return TimelineState::default();
+        return CanvasTimelineState::default();
     };
     let t = &h.timeline;
     let (from, to) = t.wanted();
-    TimelineState {
+    CanvasTimelineState {
         t0: t.view().t0,
         span: t.view().span(),
         wanted_from: from,
@@ -857,42 +839,47 @@ pub unsafe extern "C" fn timeline_state(h: *mut TimelineHandle) -> TimelineState
 /// # Safety
 /// `h` is a live handle; `out` is valid for a write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_frame(
-    h: *mut TimelineHandle,
-    out: *mut TimelineFrame,
+pub unsafe extern "C" fn canvas_timeline_frame(
+    h: *mut CanvasTimeline,
+    out: *mut CanvasFrameReport,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { handle(h) }?;
         if out.is_null() {
             return Err(Failure::Invalid("a null out parameter"));
         }
-        let mut frame = TimelineFrame::default();
+        let mut frame = CanvasFrameReport::default();
         if let Some(r) = &mut h.renderer {
-            if h.timeline.needs_build() {
-                let dl = h.timeline.build(&mut h.text);
-                r.gpu.set_camera(&mut r.target, h.timeline.camera());
-                frame.built = true;
-                frame.presented = r
-                    .gpu
-                    .render(&mut r.target, &dl, &mut h.text)
-                    .map_err(|e| Failure::Engine(e.to_string()))?
-                    == FrameOutcome::Presented;
-                h.drawn = Some(h.timeline.camera());
-            } else {
-                let camera = h.timeline.camera();
-                if h.drawn != Some(camera) || r.target.animating() {
-                    r.gpu.set_camera(&mut r.target, camera);
-                    frame.presented = r
-                        .gpu
-                        .redraw(&mut r.target)
+            let (timeline, drawn, built_at) = (&mut h.timeline, &mut h.drawn, &mut h.built_at);
+            r.with(|gpu, target, text| -> Result<(), Failure> {
+                // A never-drawn target, or glyphs another surface's frame moved: build again.
+                let stale = drawn.is_none() || *built_at != text.atlas().generation();
+                if timeline.needs_build() || stale {
+                    let dl = timeline.build(text);
+                    gpu.set_camera(target, timeline.camera());
+                    frame.built = true;
+                    frame.presented = gpu
+                        .render(target, &dl, text)
                         .map_err(|e| Failure::Engine(e.to_string()))?
                         == FrameOutcome::Presented;
-                    h.drawn = Some(camera);
+                    *built_at = text.atlas().generation();
+                    *drawn = Some(timeline.camera());
+                } else {
+                    let camera = timeline.camera();
+                    if *drawn != Some(camera) || target.animating() {
+                        gpu.set_camera(target, camera);
+                        frame.presented = gpu
+                            .redraw(target)
+                            .map_err(|e| Failure::Engine(e.to_string()))?
+                            == FrameOutcome::Presented;
+                        *drawn = Some(camera);
+                    }
                 }
-            }
-            frame.animating = r.target.animating();
+                Ok(())
+            })?;
+            frame.animating = r.animating();
             frame.next_due_ms = h.timeline.next_build_in().unwrap_or(f64::NAN);
         }
         // SAFETY: checked non-null above.
@@ -902,15 +889,15 @@ pub unsafe extern "C" fn timeline_frame(
 }
 
 /// One estate event (Semafor's `/api/v1/estate/timeline` `events`): `kind` a
-/// TIMELINE_EVENT_KIND_*, `result` a TIMELINE_EVENT_RESULT_*; `duration` ms or NaN, `size_bytes`
+/// CANVAS_TIMELINE_EVENT_KIND_*, `result` a CANVAS_TIMELINE_EVENT_RESULT_*; `duration` ms or NaN, `size_bytes`
 /// `UINT64_MAX` when unknown, an empty `surface` when none.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineEstateEvent {
-    pub id: TimelineStr,
-    pub box_name: TimelineStr,
-    pub title: TimelineStr,
-    pub surface: TimelineStr,
+pub struct CanvasTimelineEstateEvent {
+    pub id: CanvasStr,
+    pub box_name: CanvasStr,
+    pub title: CanvasStr,
+    pub surface: CanvasStr,
     pub kind: u8,
     pub result: u8,
     pub at: f64,
@@ -921,10 +908,10 @@ pub struct TimelineEstateEvent {
 /// A systemd timer (`schedules`): its next run and period, ms.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineEstateTimer {
-    pub box_name: TimelineStr,
-    pub unit: TimelineStr,
-    pub surface: TimelineStr,
+pub struct CanvasTimelineEstateTimer {
+    pub box_name: CanvasStr,
+    pub unit: CanvasStr,
+    pub surface: CanvasStr,
     pub kind: u8,
     pub next: f64,
     pub period: f64,
@@ -933,9 +920,9 @@ pub struct TimelineEstateTimer {
 /// A rollback pin across its box, from `from` to `to` (NaN: still in force).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineEstatePin {
-    pub box_name: TimelineStr,
-    pub label: TimelineStr,
+pub struct CanvasTimelineEstatePin {
+    pub box_name: CanvasStr,
+    pub label: CanvasStr,
     pub from: f64,
     pub to: f64,
 }
@@ -944,9 +931,9 @@ pub struct TimelineEstatePin {
 /// keys it by `surface` and skips one without.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct TimelineEstateBin {
-    pub box_name: TimelineStr,
-    pub surface: TimelineStr,
+pub struct CanvasTimelineEstateBin {
+    pub box_name: CanvasStr,
+    pub surface: CanvasStr,
     pub row: u8,
     pub from: f64,
     pub width: f64,
@@ -955,19 +942,19 @@ pub struct TimelineEstateBin {
     pub scheduled: bool,
 }
 
-pub const TIMELINE_EVENT_KIND_RECONCILE: u8 = 0;
-pub const TIMELINE_EVENT_KIND_GATEWAY: u8 = 1;
-pub const TIMELINE_EVENT_KIND_EVE: u8 = 2;
-pub const TIMELINE_EVENT_KIND_BACKUP: u8 = 3;
-pub const TIMELINE_EVENT_KIND_RESTORE: u8 = 4;
-pub const TIMELINE_EVENT_KIND_CLEANUP: u8 = 5;
-pub const TIMELINE_EVENT_KIND_CERT: u8 = 6;
-pub const TIMELINE_EVENT_RESULT_OK: u8 = 0;
-pub const TIMELINE_EVENT_RESULT_FAIL: u8 = 1;
-pub const TIMELINE_EVENT_RESULT_ROLLBACK: u8 = 2;
-pub const TIMELINE_EVENT_RESULT_LIVE: u8 = 3;
-pub const TIMELINE_EVENT_RESULT_MISSED: u8 = 4;
-pub const TIMELINE_EVENT_RESULT_SCHEDULED: u8 = 5;
+pub const CANVAS_TIMELINE_EVENT_KIND_RECONCILE: u8 = 0;
+pub const CANVAS_TIMELINE_EVENT_KIND_GATEWAY: u8 = 1;
+pub const CANVAS_TIMELINE_EVENT_KIND_EVE: u8 = 2;
+pub const CANVAS_TIMELINE_EVENT_KIND_BACKUP: u8 = 3;
+pub const CANVAS_TIMELINE_EVENT_KIND_RESTORE: u8 = 4;
+pub const CANVAS_TIMELINE_EVENT_KIND_CLEANUP: u8 = 5;
+pub const CANVAS_TIMELINE_EVENT_KIND_CERT: u8 = 6;
+pub const CANVAS_TIMELINE_EVENT_RESULT_OK: u8 = 0;
+pub const CANVAS_TIMELINE_EVENT_RESULT_FAIL: u8 = 1;
+pub const CANVAS_TIMELINE_EVENT_RESULT_ROLLBACK: u8 = 2;
+pub const CANVAS_TIMELINE_EVENT_RESULT_LIVE: u8 = 3;
+pub const CANVAS_TIMELINE_EVENT_RESULT_MISSED: u8 = 4;
+pub const CANVAS_TIMELINE_EVENT_RESULT_SCHEDULED: u8 = 5;
 
 fn event_kind(code: u8) -> Result<EventKind, Failure> {
     Ok(match code {
@@ -995,8 +982,8 @@ fn event_result(code: u8) -> Result<EventResult, Failure> {
 }
 
 /// # Safety
-/// As [`TimelineStr::text`].
-unsafe fn optional(s: TimelineStr) -> Result<Option<Arc<str>>, Failure> {
+/// As [`CanvasStr::text`].
+unsafe fn optional(s: CanvasStr) -> Result<Option<Arc<str>>, Failure> {
     // SAFETY: per this function's contract.
     let t = unsafe { s.text() }?;
     Ok((!t.is_empty()).then_some(t))
@@ -1004,12 +991,12 @@ unsafe fn optional(s: TimelineStr) -> Result<Option<Arc<str>>, Failure> {
 
 /// # Safety
 /// `h` is a live handle.
-unsafe fn estate_handle<'a>(h: *mut TimelineHandle) -> Result<&'a mut TimelineHandle, Failure> {
+unsafe fn estate_handle<'a>(h: *mut CanvasTimeline) -> Result<&'a mut CanvasTimeline, Failure> {
     // SAFETY: per this function's contract.
     let h = unsafe { handle(h) }?;
     match h.lens {
-        TimelineLens::Estate | TimelineLens::Backups => Ok(h),
-        TimelineLens::Ci => Err(Failure::Invalid("not an Estate or Backups timeline")),
+        CanvasTimelineLens::Estate | CanvasTimelineLens::Backups => Ok(h),
+        CanvasTimelineLens::Ci => Err(Failure::Invalid("not an Estate or Backups timeline")),
     }
 }
 
@@ -1019,12 +1006,12 @@ unsafe fn estate_handle<'a>(h: *mut TimelineHandle) -> Result<&'a mut TimelineHa
 /// `h` is a live Estate or Backups handle; `events` is valid for `count` elements, their texts
 /// for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_estate_events(
-    h: *mut TimelineHandle,
-    events: *const TimelineEstateEvent,
+pub unsafe extern "C" fn canvas_timeline_set_estate_events(
+    h: *mut CanvasTimeline,
+    events: *const CanvasTimelineEstateEvent,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { estate_handle(h) }?;
@@ -1047,7 +1034,7 @@ pub unsafe extern "C" fn timeline_set_estate_events(
                 }
             };
             marks.push(match h.lens {
-                TimelineLens::Backups => BackupsLens.mark(&event, &palette),
+                CanvasTimelineLens::Backups => BackupsLens.mark(&event, &palette),
                 _ => EstateLens.mark(&event, &palette),
             });
         }
@@ -1059,14 +1046,14 @@ pub unsafe extern "C" fn timeline_set_estate_events(
 /// Replace the timers whose repeats the timeline computes.
 ///
 /// # Safety
-/// As timeline_set_estate_events, for `timers`.
+/// As canvas_timeline_set_estate_events, for `timers`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_estate_timers(
-    h: *mut TimelineHandle,
-    timers: *const TimelineEstateTimer,
+pub unsafe extern "C" fn canvas_timeline_set_estate_timers(
+    h: *mut CanvasTimeline,
+    timers: *const CanvasTimelineEstateTimer,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { estate_handle(h) }?;
@@ -1086,7 +1073,7 @@ pub unsafe extern "C" fn timeline_set_estate_timers(
                 }
             };
             let row = match (h.lens, &timer.surface) {
-                (TimelineLens::Backups, surface) => {
+                (CanvasTimelineLens::Backups, surface) => {
                     backup_row(&timer.box_name, surface.as_deref().unwrap_or(&timer.unit))
                 }
                 _ => estate_row(&timer.box_name, Row::of(timer.kind)),
@@ -1101,14 +1088,14 @@ pub unsafe extern "C" fn timeline_set_estate_timers(
 /// Replace the rollback pins (bands across their box).
 ///
 /// # Safety
-/// As timeline_set_estate_events, for `pins`.
+/// As canvas_timeline_set_estate_events, for `pins`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_estate_pins(
-    h: *mut TimelineHandle,
-    pins: *const TimelineEstatePin,
+pub unsafe extern "C" fn canvas_timeline_set_estate_pins(
+    h: *mut CanvasTimeline,
+    pins: *const CanvasTimelineEstatePin,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { estate_handle(h) }?;
@@ -1135,14 +1122,14 @@ pub unsafe extern "C" fn timeline_set_estate_pins(
 /// Replace the estate's density bins.
 ///
 /// # Safety
-/// As timeline_set_estate_events, for `bins`.
+/// As canvas_timeline_set_estate_events, for `bins`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_estate_bins(
-    h: *mut TimelineHandle,
-    bins: *const TimelineEstateBin,
+pub unsafe extern "C" fn canvas_timeline_set_estate_bins(
+    h: *mut CanvasTimeline,
+    bins: *const CanvasTimelineEstateBin,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { estate_handle(h) }?;
@@ -1159,8 +1146,8 @@ pub unsafe extern "C" fn timeline_set_estate_bins(
                 _ => return Err(Failure::Invalid("an unknown estate row")),
             };
             let key = match (h.lens, surface) {
-                (TimelineLens::Backups, Some(s)) => backup_row(&box_name, &s),
-                (TimelineLens::Backups, None) => continue,
+                (CanvasTimelineLens::Backups, Some(s)) => backup_row(&box_name, &s),
+                (CanvasTimelineLens::Backups, None) => continue,
                 _ => estate_row(&box_name, row),
             };
             let (color, grow) = match kind_row {
@@ -1189,12 +1176,12 @@ pub unsafe extern "C" fn timeline_set_estate_bins(
 /// # Safety
 /// `h` is a live Estate handle; `boxes` is valid for `count` texts for the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn timeline_set_estate_boxes(
-    h: *mut TimelineHandle,
-    boxes: *const TimelineStr,
+pub unsafe extern "C" fn canvas_timeline_set_estate_boxes(
+    h: *mut CanvasTimeline,
+    boxes: *const CanvasStr,
     count: usize,
     error: *mut *mut c_char,
-) -> TimelineStatus {
+) -> CanvasStatus {
     call(error, || {
         // SAFETY: per this function's contract.
         let h = unsafe { estate_handle(h) }?;
@@ -1213,15 +1200,15 @@ pub unsafe extern "C" fn timeline_set_estate_boxes(
 mod tests {
     use super::*;
 
-    fn s(text: &str) -> TimelineStr {
-        TimelineStr {
+    fn s(text: &str) -> CanvasStr {
+        CanvasStr {
             ptr: text.as_ptr(),
             len: text.len(),
         }
     }
 
-    fn rgba(v: f32) -> TimelineRgba {
-        TimelineRgba {
+    fn rgba(v: f32) -> CanvasRgba {
+        CanvasRgba {
             r: v,
             g: v,
             b: v,
@@ -1231,13 +1218,13 @@ mod tests {
 
     #[test]
     fn the_header_constants_are_the_engine_s() {
-        assert_eq!(TIMELINE_AXIS_PT, timeline::geometry::AXIS_PT);
-        assert_eq!(TIMELINE_LABEL_W, timeline::timeline::LABEL_W);
+        assert_eq!(CANVAS_TIMELINE_AXIS_PT, timeline::geometry::AXIS_PT);
+        assert_eq!(CANVAS_TIMELINE_LABEL_W, timeline::timeline::LABEL_W);
     }
 
     #[test]
     fn a_handle_takes_jobs_groups_and_keys_without_a_gpu() {
-        let palette = TimelinePalette {
+        let palette = CanvasTimelinePalette {
             background: rgba(0.1),
             band: rgba(0.12),
             foreground: rgba(0.9),
@@ -1255,26 +1242,26 @@ mod tests {
         // SAFETY: valid pointers for every call below.
         unsafe {
             assert_eq!(
-                timeline_new(0, &palette, now, &mut h, &mut err),
-                TIMELINE_OK
+                canvas_timeline_new(0, &palette, now, &mut h, &mut err),
+                CANVAS_OK
             );
-            let rows = [TimelineRow {
+            let rows = [CanvasTimelineRow {
                 key: s("lane-a"),
                 label: s("lane a"),
                 tint: rgba(0.3),
                 has_tint: true,
             }];
-            let groups = [TimelineGroup {
+            let groups = [CanvasTimelineGroup {
                 key: s("exampleapp"),
                 label: s("ExampleApp"),
                 rows: rows.as_ptr(),
                 row_count: 1,
             }];
             assert_eq!(
-                timeline_set_groups(h, groups.as_ptr(), 1, &mut err),
-                TIMELINE_OK
+                canvas_timeline_set_groups(h, groups.as_ptr(), 1, &mut err),
+                CANVAS_OK
             );
-            let job = TimelineCiJob {
+            let job = CanvasTimelineCiJob {
                 id: s("j1"),
                 lane: s("lane-a"),
                 repo: s("ExampleApp"),
@@ -1282,30 +1269,33 @@ mod tests {
                 queued_at: now - 3_600_000.0,
                 started_at: now - 3_500_000.0,
                 completed_at: now - 3_000_000.0,
-                result: TIMELINE_RESULT_SUCCEEDED,
+                result: CANVAS_TIMELINE_RESULT_SUCCEEDED,
                 peak_mib: u32::MAX,
                 reserved_mib: u32::MAX,
             };
-            assert_eq!(timeline_set_ci_jobs(h, &job, 1, &mut err), TIMELINE_OK);
+            assert_eq!(canvas_timeline_set_ci_jobs(h, &job, 1, &mut err), CANVAS_OK);
             assert_eq!(
-                timeline_key(h, TimelineIntent::OutcomeBack as u8, &mut err),
-                TIMELINE_OK
+                canvas_timeline_key(h, CanvasTimelineIntent::OutcomeBack as u8, &mut err),
+                CANVAS_OK
             );
-            let id = timeline_selected(h);
+            let id = canvas_timeline_selected(h);
             assert_eq!(std::ffi::CStr::from_ptr(id).to_str(), Ok("j1"));
-            timeline_string_free(id);
-            assert_eq!(timeline_state(h).playhead, now - 3_000_000.0);
-            let bad = TimelineCiJob { result: 9, ..job };
-            assert_eq!(timeline_set_ci_jobs(h, &bad, 1, &mut err), TIMELINE_INVALID);
-            assert!(!err.is_null());
-            timeline_string_free(err);
-            let mut frame = TimelineFrame::default();
+            canvas_string_free(id);
+            assert_eq!(canvas_timeline_state(h).playhead, now - 3_000_000.0);
+            let bad = CanvasTimelineCiJob { result: 9, ..job };
             assert_eq!(
-                timeline_frame(h, &mut frame, std::ptr::null_mut()),
-                TIMELINE_OK
+                canvas_timeline_set_ci_jobs(h, &bad, 1, &mut err),
+                CANVAS_INVALID
+            );
+            assert!(!err.is_null());
+            canvas_string_free(err);
+            let mut frame = CanvasFrameReport::default();
+            assert_eq!(
+                canvas_timeline_frame(h, &mut frame, std::ptr::null_mut()),
+                CANVAS_OK
             );
             assert!(!frame.presented, "a detached handle draws nothing");
-            timeline_free(h);
+            canvas_timeline_free(h);
         }
     }
 }

@@ -45,7 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Where a summon lands (stay in Pultík D1): the router lives here, not
     /// in the view, so the place survives the hosting tree's release.
     private let panelPlace = PanelPlace()
-    private let store = StatusStore.shared
+    /// Lazy: `StatusStore.init` loads settings.json and saves it whenever a
+    /// migration changes it, so a stored `let` wrote the operator's real file
+    /// from the XCTest host before the early return below could stop it.
+    private lazy var store = StatusStore.shared
     private var userRequestedQuit = false
     private var sigtermSource: DispatchSourceSignal?
 
