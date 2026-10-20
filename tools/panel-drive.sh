@@ -30,7 +30,8 @@
 #   tools/panel-drive.sh mac-stop '<finding id>'      # open a .mac finding's Stop… confirm (never confirms it)
 #   tools/panel-drive.sh mark '<object id>|all|none'  # ⌘-click a row's mark, ⌘A, or unmark (bulk actions)
 #   tools/panel-drive.sh home-toggle '<owner/repo>'   # open/close a Home PR-tile ready line ('fold' = drafts · stale)
-#   PULTIK_DEVBOX_EXECUTABLE can select a test CLI in Debug; a disposable
+#   tools/panel-drive.sh toolkit-window today|7d|30d   # the Toolkit module's window control; `state` reports toolkitWindow/Freshness
+#   PULTIK_DEVBOX_EXECUTABLE and PULTIK_TOOLKIT_EXECUTABLE can select a test CLI in Debug; a disposable
 #   PULTIK_CLEAR_FIXTURE_PATH enables the clear-fixture preview for native QA.
 #
 # Launch the app first, e.g.
@@ -50,7 +51,7 @@ case "$cmd" in
       if out="$(toolkit displays resolve --role qa --app pultik)"; then PD_TEXT="$out"; else printf '%s\n' "$out" >&2; fi
     fi ;;
   close|github-pause|github-resume) ;;
-  query|size|clear-preview|clear-action|mac-stop|home-toggle|mark|diff-fixture|gutter|timeline-demo) PD_TEXT="${1-}" ;;
+  query|size|clear-preview|clear-action|mac-stop|home-toggle|mark|diff-fixture|gutter|timeline-demo|toolkit-window) PD_TEXT="${1-}" ;;
   scroll-bench) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-scroll-bench.json ;;
   timeline-bench)
     # The recorded busiest CI day (2026-10-13, build-server) unless another page is named.
@@ -66,7 +67,7 @@ case "$cmd" in
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
   frame) ;;
   firing) PD_TEXT="${1-}" ;;
-  *) sed -n '2,34p' "$0"; exit 2 ;;
+  *) sed -n '2,35p' "$0"; exit 2 ;;
 esac
 
 post() {

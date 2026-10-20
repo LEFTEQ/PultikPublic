@@ -53,6 +53,9 @@ extension StatusStore {
         static let devbox = QueryResource<DevboxState>(name: "devbox.estate", schema: 2, staleAfter: 180)
         /// One host's Semafor views, keyed by its base URL (vt-7727 D10).
         static let semafor = QueryResource<SemaforHostState>(name: "semafor.views", staleAfter: 180)
+        /// `toolkit catalog dashboard`, keyed by the binary that answered.
+        static let toolkit = QueryResource<ToolkitDashboard>(name: "toolkit.dashboard",
+                                                           staleAfter: ToolkitHeld.staleAfter)
         // Each host × lens's newest 24 h of timeline (`semafor.timeline.<lens>`,
         // keyed by the host's base URL, vt-7781 D10) is
         // `TimelinePages.snapshotResource`: it writes them, and restores one
@@ -113,6 +116,7 @@ extension StatusStore {
             group.addTask { await self.restoreVitrinka() }
             group.addTask { await self.restoreDevbox() }
             group.addTask { await self.restoreSemafor() }
+            group.addTask { await self.restoreToolkit() }
         }
         onChange?()
     }

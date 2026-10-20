@@ -552,6 +552,10 @@ struct StatusPanelView: View {
             return MachinesPage(store: store, filter: filter, selectedID: selected,
                                 firing: estateFiring, renewals: ExpiryRadarStore.shared.watched, mac: mac,
                                 view: inputs.view, onView: { router.showView($0) }, onOpen: open)
+        case .toolkit:
+            // Its window rides the store (`toolkitPeriod`), which the memo observes.
+            return ToolkitPage(store: store, filter: filter, selectedID: selected, view: inputs.view ?? .overview,
+                              onView: { router.showView($0) }, onOpen: open)
         }
     }
 

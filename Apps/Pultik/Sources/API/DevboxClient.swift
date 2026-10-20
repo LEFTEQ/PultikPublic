@@ -44,174 +44,23 @@ actor DevboxClient {
 
     private typealias Result = DevboxClearCommandResult
 
-    /// Process pipe readers run concurrently so neither child pipe can fill
-    /// while the other is being drained. The box is lock-protected because
-    /// Dispatch owns the reader threads, not this actor.
-    private final class LockedBox<Value>: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: Value
-
-        init(_ value: Value) {
-            self.value = value
-        }
-
-        func set(_ value: Value) {
-            lock.lock()
-            self.value = value
-            lock.unlock()
-        }
-
-        func get() -> Value {
-            lock.lock()
-            defer { lock.unlock() }
-            return value
-        }
-    }
-
-    /// Serializes the timeout callback with execute's return path. Cancelling
-    /// an already-running DispatchWorkItem does not wait for its body, so a
-    /// plain cancellation can otherwise leave PID-signalling work running
-    /// after the caller has returned and those numeric PIDs may be reused.
-    private final class TimeoutController: @unchecked Sendable {
-        private let lock = NSLock()
-        private var armed = true
-
-        func fire(_ action: () -> Void) {
-            lock.lock()
-            guard armed else {
-                lock.unlock()
-                return
-            }
-            armed = false
-            action()
-            lock.unlock()
-        }
-
-        /// Acquiring the same lock both disarms a pending callback and waits
-        /// for an in-flight callback to finish before execute can return.
-        func cancelAndWait() {
-            lock.lock()
-            armed = false
-            lock.unlock()
-        }
-    }
-
-    private struct CapturedStream {
-        let data: Data
-        let truncated: Bool
-        let error: String?
-
-        static let empty = CapturedStream(data: Data(), truncated: false, error: nil)
-    }
-
-    /// A child is untrusted input even when the executable is local. Keep
-    /// draining after the retention cap so the child cannot block, but never
-    /// let a noisy process grow this menu-bar app without bound.
-    private nonisolated static func drain(
-        _ handle: FileHandle, retaining limit: Int
-    ) -> CapturedStream {
-        var data = Data()
-        var truncated = false
-        do {
-            while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-                let remaining = max(0, limit - data.count)
-                if remaining > 0 { data.append(chunk.prefix(remaining)) }
-                if chunk.count > remaining { truncated = true }
-            }
-            return CapturedStream(data: data, truncated: truncated, error: nil)
-        } catch {
-            return CapturedStream(data: data, truncated: truncated, error: "\(error)")
-        }
-    }
-
-    /// libproc gives us the direct children of an already-running Process.
-    /// Walk them before signalling the root so descendants cannot be
-    /// re-parented out of reach while still holding our pipe writers open.
-    private nonisolated static func processTree(root: pid_t) -> [pid_t] {
-        guard root > 1 else { return [] }
-        var seen = Set<pid_t>()
-        var childrenFirst = [pid_t]()
-
-        func visit(_ parent: pid_t) {
-            var buffer = [pid_t](repeating: 0, count: 1024)
-            let count = buffer.withUnsafeMutableBytes { bytes in
-                proc_listchildpids(parent, bytes.baseAddress, Int32(bytes.count))
-            }
-            guard count > 0 else { return }
-            for child in buffer.prefix(Int(count)) where child > 1 && seen.insert(child).inserted {
-                visit(child)
-                childrenFirst.append(child)
-            }
-        }
-
-        seen.insert(root)
-        visit(root)
-        childrenFirst.append(root)
-        return childrenFirst
-    }
-
-    /// Runs a configured child with bounded wall time and concurrent stdout /
-    /// stderr drains. Keeping this primitive shared prevents the fast local
-    /// discovery pass from becoming less safe than the network subprocess.
-    /// Nonisolated: it touches no actor state, and one box's 30-second poll
-    /// must never queue another box's behind it on this actor.
+    /// Runs a configured child through `BoundedProcess`: bounded wall time and
+    /// concurrent stdout / stderr drains. Keeping this primitive shared prevents
+    /// the fast local discovery pass from becoming less safe than the network
+    /// subprocess. Nonisolated: it touches no actor state, and one box's
+    /// 30-second poll must never queue another box's behind it on this actor.
     private nonisolated func execute(
         _ process: Process, timeout: Int, outputLimit: Int = 4 * 1024 * 1024,
         retainFailureOutput: Bool = false
     ) -> Result {
-        let out = Pipe(), err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
-
-        do { try process.run() } catch {
+        let output: BoundedProcess.Output
+        do {
+            output = try BoundedProcess.run(process, timeout: TimeInterval(timeout), outputLimit: outputLimit)
+        } catch {
             return Result(ok: false, stdout: "", stderr: "\(error)")
         }
-
-        let stdout = LockedBox(CapturedStream.empty)
-        let stderr = LockedBox(CapturedStream.empty)
-        let timedOut = LockedBox(false)
-        let readers = DispatchGroup()
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stdout.set(Self.drain(out.fileHandleForReading, retaining: outputLimit))
-            readers.leave()
-        }
-        readers.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderr.set(Self.drain(err.fileHandleForReading, retaining: outputLimit))
-            readers.leave()
-        }
-
-        let timeoutController = TimeoutController()
-        let killer = DispatchWorkItem { [weak process] in
-            timeoutController.fire {
-                guard let process, process.isRunning else { return }
-                timedOut.set(true)
-                // Kill this bounded transport subprocess tree synchronously
-                // at the deadline: deferring a second signal creates a
-                // stale-PID window after this method
-                // returns, while TERM cannot guarantee descendants release
-                // inherited pipe writers.
-                Self.processTree(root: process.processIdentifier)
-                    .filter { $0 > 1 }
-                    .forEach { Darwin.kill($0, SIGKILL) }
-                // A descendant that escaped the tree snapshot still cannot
-                // keep this call waiting; a surviving writer receives EPIPE.
-                try? out.fileHandleForReading.close()
-                try? err.fileHandleForReading.close()
-            }
-        }
-        DispatchQueue.global().asyncAfter(
-            deadline: .now() + .seconds(timeout), execute: killer
-        )
-
-        process.waitUntilExit()
-        killer.cancel()
-        timeoutController.cancelAndWait()
-        readers.wait()
-
-        let capturedOut = stdout.get()
-        let capturedErr = stderr.get()
+        let capturedOut = output.stdout
+        let capturedErr = output.stderr
         var errors = [String]()
         let stderrText = String(decoding: capturedErr.data, as: UTF8.self)
         if !stderrText.isEmpty { errors.append(stderrText) }
@@ -223,14 +72,14 @@ actor DevboxClient {
         let streamFailed = capturedOut.error != nil || capturedErr.error != nil
             || capturedOut.truncated || capturedErr.truncated
         return Result(
-            ok: process.terminationStatus == 0 && !timedOut.get() && !streamFailed,
+            ok: output.status == 0 && !output.timedOut && !streamFailed,
             // Callers intentionally trust a complete payload over a nonzero
             // exit status. A timed-out/truncated payload is never complete,
             // so withhold it rather than letting that rule accept a prefix.
-            stdout: !retainFailureOutput && (timedOut.get() || streamFailed)
+            stdout: !retainFailureOutput && (output.timedOut || streamFailed)
                 ? ""
                 : String(decoding: capturedOut.data, as: UTF8.self),
-            stderr: timedOut.get()
+            stderr: output.timedOut
                 ? "timed out after \(timeout)s" + (errors.isEmpty ? "" : ": \(errors.joined(separator: "; "))")
                 : errors.joined(separator: "; ")
         )

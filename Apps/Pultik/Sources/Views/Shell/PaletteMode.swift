@@ -10,6 +10,9 @@ enum PaletteMode: String, CaseIterable {
     case todos, schedule, prod, vit, boards, issues, fans, notes, organize, work, devbox, ci, estate, health, mac
     // Declared last, so a prefix they share keeps its older mode: `.p` is prod, `.h` health.
     case home, prs
+    /// Toolkit's alias. Not `.toolkit`: `.v` must keep entering Sessions at
+    /// once, and a second `v…` module alias would make it wait for the next key.
+    case kit
 
     var title: String {
         switch self {
@@ -30,6 +33,7 @@ enum PaletteMode: String, CaseIterable {
         case .mac: "Mac health"
         case .home: "Home"
         case .prs: "Pull requests"
+        case .kit: "Toolkit"
         }
     }
 
@@ -52,6 +56,7 @@ enum PaletteMode: String, CaseIterable {
         case .mac: "this Mac — likely orphans, memory by family, network (toolkit)"
         case .home: "the Now queue — what needs you, ranked"
         case .prs: "every open PR by repo — checks, reviews, the diff"
+        case .kit: "Toolkit's workflows, skills and guards — what is used, read-only"
         }
     }
 
@@ -74,6 +79,7 @@ enum PaletteMode: String, CaseIterable {
         case .mac: "memorychip"
         case .home: "house"
         case .prs: "arrow.triangle.pull"
+        case .kit: PanelModule.toolkit.symbol
         }
     }
 
@@ -87,6 +93,7 @@ enum PaletteMode: String, CaseIterable {
         case .vit: "Filter sessions, approvals and listeners…"
         case .organize: "Layout — ↵ runs the top match…"
         case .prs: "Filter PRs — title, repo, #number, branch…"
+        case .kit: "Filter workflows, skills and guards…"
         default: "Filter \(title.lowercased())…"
         }
     }
@@ -104,6 +111,7 @@ enum PaletteMode: String, CaseIterable {
         case .estate, .mac, .fans: .estate
         case .home: .home
         case .prs: .prs
+        case .kit: .toolkit
         case .todos, .schedule, .prod, .boards, .issues, .notes, .organize: nil
         }
     }

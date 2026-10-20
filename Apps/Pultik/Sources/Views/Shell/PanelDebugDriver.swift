@@ -176,6 +176,10 @@ extension StatusPanelView {
                     "replayReads": [counter: (SemaforClient.requests.snapshot[counter] ?? 0) - before],
                 ], to: path)
             }
+        case "toolkit-window":
+            // The Toolkit module's Today / 7 days / 30 days control, clicked: `today`, `7d` or `30d`.
+            guard let period = ToolkitDashboard.Period(rawValue: info["text"] as? String ?? "") else { return }
+            store.toolkitPeriod = period
         case "home-toggle":
             let text = info["text"] as? String ?? ""
             let key = text == "fold" ? PRDigest<StatusStore.InboxPR>.foldKey : text
@@ -253,6 +257,11 @@ extension StatusPanelView {
                 } ?? NSNull(),
                 "timelineReplay": store.timelineReplay.map { PultikFormat.clock($0.at) } ?? NSNull(),
                 "ciHost": store.ciSemaforHost ?? NSNull(),
+                // The Toolkit module: its window, how its dashboard is held, and the catalog drawn.
+                "toolkitWindow": store.toolkitPeriod.rawValue,
+                "toolkitFreshness": String(describing: store.toolkit.freshness()),
+                "toolkitRelease": store.toolkit.dashboard?.release ?? NSNull(),
+                "toolkitInventory": store.toolkit.dashboard?.inventory.count ?? NSNull(),
                 // The diff engine's own state (PR diff WP6): its scroll and height in points, and
                 // the frames and scenes its surface drew.
                 "code": CodeCanvasView.active.map { canvas -> [String: Any] in

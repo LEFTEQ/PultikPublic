@@ -94,12 +94,8 @@ final class MacHealthStore {
 /// stopped, or refused and why — is shown as it came back.
 enum MacHealthStop {
     /// A GUI app inherits no shell PATH, so a bare `toolkit` is looked up
-    /// where its installers put it: the Homebrew cask, then `~/.local/bin`.
-    static let toolkitPaths = [
-        "/opt/homebrew/bin/toolkit",
-        "/usr/local/bin/toolkit",
-        NSHomeDirectory() + "/.local/bin/toolkit",
-    ]
+    /// where its installers put it (`ToolkitClient.installPaths`).
+    static var toolkitPaths: [String] { ToolkitClient.installPaths }
 
     enum Outcome: Equatable, Sendable {
         case stopped(String)
