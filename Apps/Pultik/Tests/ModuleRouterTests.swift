@@ -72,11 +72,38 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertEqual(router.text, "")
     }
 
+    /// Toolkit is the ninth module (vt-8298 S1): ⌘9, `.kit` with its filter,
+    /// ⇥ through Overview · Workflows · Skills · Guards — while `.v` still
+    /// enters Sessions at once.
+    func testToolkitIsTheNinthModuleOnCommandNineAndKit() {
+        XCTAssertEqual(PanelModule.allCases.last, .toolkit)
+        XCTAssertEqual(intent(.character("9"), command: true, KeyContext()), .module(.toolkit))
+        XCTAssertEqual(PanelModule.toolkit.views, [.overview, .workflows, .skills, .guards])
+        XCTAssertEqual(PaletteMode.parse(".v")?.mode, .vit, "a second v… alias would make .v wait")
+        XCTAssertEqual(PaletteMode.parse(".k")?.mode, .kit)
+        XCTAssertEqual(PaletteMode.alias(of: .toolkit), .kit)
+        let router = ModuleRouter()
+        router.type(".kit stash")
+        XCTAssertEqual(router.module, .toolkit)
+        XCTAssertEqual(router.text, "stash")
+        XCTAssertEqual(router.view, .overview)
+        XCTAssertEqual(intent(.tab, KeyContext(module: .toolkit)), .view(1))
+        var walked: [ModuleView?] = []
+        for _ in 0 ..< 4 {
+            router.cycleView(1)
+            walked.append(router.view)
+        }
+        XCTAssertEqual(walked, [.workflows, .skills, .guards, .overview])
+        XCTAssertEqual(intent(.enter, KeyContext(module: .toolkit, items: ["skill:prm"], selection: "skill:prm")),
+                       .openDetail("skill:prm"), "↵ opens a detail and never runs anything")
+    }
+
     /// ←/→ on an empty field walk the strip, wrapping; with text they stay the caret's.
     func testArrowsOnAnEmptyFieldWalkTheStrip() {
         XCTAssertEqual(intent(.right, KeyContext()), .module(.prs))
-        XCTAssertEqual(intent(.left, KeyContext()), .module(.estate))
-        XCTAssertEqual(intent(.right, KeyContext(module: .estate)), .module(.home))
+        XCTAssertEqual(intent(.left, KeyContext()), .module(.toolkit))
+        XCTAssertEqual(intent(.right, KeyContext(module: .estate)), .module(.toolkit))
+        XCTAssertEqual(intent(.right, KeyContext(module: .toolkit)), .module(.home))
         XCTAssertEqual(intent(.left, KeyContext(module: .ci, selection: "run:1", detailOpen: true)), .module(.prs))
         XCTAssertNil(intent(.right, KeyContext(module: .ci, text: "failed")))
         XCTAssertNil(intent(.left, KeyContext(completion: true)))

@@ -19,7 +19,7 @@ edition = "2024"
 license = "LicenseRef-Proprietary"
 publish = false
 rust-version = "1.96"
-version = "4.1.0"
+version = "4.3.0"
 
 [workspace.dependencies]
 bytemuck = { features = ["derive"], version = "1.25.2" }

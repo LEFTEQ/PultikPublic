@@ -87,7 +87,7 @@ extension StatusStore {
                 case .failures: reads.append(.failures)
                 // The timeline's edge is `TimelinePages`' (`timelineVisibility`); Fleet draws the lanes
                 // and Prometheus' board. Nothing reads the old live edge since Live retired (WP6).
-                case .timeline, .fleet, .machines, .map, .backups: break
+                case .timeline, .fleet, .machines, .map, .backups, .overview, .skills, .guards: break
                 }
             }
         default:

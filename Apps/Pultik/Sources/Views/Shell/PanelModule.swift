@@ -1,10 +1,11 @@
 import Foundation
 
-/// The eight destinations on ⌘1–8 (copilot shell D9; Mac joined Estate as
-/// This Mac in vt-7727 D1). The order is the strip's order and the shortcut
-/// digit; it never changes per state.
+/// The nine destinations on ⌘1–9 (copilot shell D9; Mac joined Estate as
+/// This Mac in vt-7727 D1; Toolkit is the ninth, docs/specs/2026-10-20-toolkit-module-decisions.md).
+/// The order is the strip's default order and the shortcut digit; it never
+/// changes per state.
 enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
-    case home, prs, ci, prod, devbox, work, sessions, estate
+    case home, prs, ci, prod, devbox, work, sessions, estate, toolkit
 
     var id: String { rawValue }
 
@@ -18,6 +19,7 @@ enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
         case .work: "Work"
         case .sessions: "Sessions"
         case .estate: "Estate"
+        case .toolkit: "Toolkit"
         }
     }
 
@@ -31,6 +33,7 @@ enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
         case .work: "checklist"
         case .sessions: "terminal"
         case .estate: "server.rack"
+        case .toolkit: "wrench.and.screwdriver"
         }
     }
 
@@ -55,6 +58,7 @@ enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
         switch self {
         case .ci: [.timeline, .runs, .workflows, .failures, .fleet]
         case .estate: [.machines, .timeline, .map, .backups]
+        case .toolkit: [.overview, .workflows, .skills, .guards]
         default: []
         }
     }
@@ -67,14 +71,20 @@ enum PanelModule: String, CaseIterable, Identifiable, Codable, Sendable {
     }
 }
 
-/// One of a module's bodies (vt-7727 D1): Semafor's views, kept per module
-/// by `ModuleRouter` and restored with its place.
+/// One of a module's bodies (vt-7727 D1): Semafor's views and Toolkit's,
+/// kept per module by `ModuleRouter` and restored with its place.
+/// `workflows` is CI's GitHub workflows in CI and the bundled Workflow-tool
+/// scripts in Toolkit.
 enum ModuleView: String, Codable, Sendable {
     case timeline, runs, workflows, failures, fleet
     case machines, map, backups
+    case overview, skills, guards
 
     var title: String {
         switch self {
+        case .overview: "Overview"
+        case .skills: "Skills"
+        case .guards: "Guards"
         case .timeline: "Timeline"
         case .runs: "Runs"
         case .workflows: "Workflows"

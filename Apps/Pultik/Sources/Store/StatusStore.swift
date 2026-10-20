@@ -141,6 +141,10 @@ final class StatusStore {
     /// keeps what it had — the one-box rules, per box.
     var devboxSnapshots: [String: DevboxSnapshot] = [:]
     var devboxDiscoveredAt: Date?
+    /// The Toolkit module's dashboard and how it is held (`StatusStore+Toolkit.swift`).
+    var toolkit = ToolkitHeld()
+    /// The window the Toolkit module draws.
+    var toolkitPeriod: ToolkitDashboard.Period = .week
     var lastRefresh: Date?
     var lastSentryRefresh: Date?
     var githubPollCursor = 0
@@ -375,6 +379,10 @@ final class StatusStore {
         schedule.add("semafor", every: { [weak self] in self?.semaforInterval(cadence: cadence()) ?? 3600 }) { [weak self] in
             await self?.refreshSemafor()
         }
+        // Only while the Toolkit module is on screen: a local CLI read, never a poller of its own.
+        schedule.add("toolkit", every: { [weak self] in self?.toolkitInterval() ?? 3600 }) { [weak self] in
+            await self?.refreshToolkit()
+        }
         // Both keep their own five-minute floors inside.
         schedule.add("sentry", every: cadence) { [weak self] in await self?.refreshSentryIfStale() }
         schedule.add("issues", every: cadence) { [weak self] in await self?.refreshIssuesIfStale() }
@@ -396,6 +404,7 @@ final class StatusStore {
         visibleSince = Date()
         if Self.lanes.map(visibleCadence) != before { schedule.nudge() }
         if module != nil { kickSemafor() }
+        if module == .toolkit { kickToolkit() }
     }
 
     static let lanes = ["prod", "github", "eve", "infra", "vitrinka", "devbox"]
@@ -403,7 +412,7 @@ final class StatusStore {
     static let moduleLanes: [PanelModule: Set<String>] = [
         .home: ["prod", "github", "eve", "infra", "vitrinka", "devbox", "semafor"],
         .prs: ["github"], .ci: ["github", "infra", "semafor"], .prod: ["prod"], .devbox: ["devbox"],
-        .work: ["vitrinka"], .sessions: ["eve", "vitrinka"], .estate: ["infra", "semafor"],
+        .work: ["vitrinka"], .sessions: ["eve", "vitrinka"], .estate: ["infra", "semafor"], .toolkit: ["toolkit"],
     ]
     /// GitHub-backed modules never poll it faster than this: the hourly
     /// request budget is shared with every other GitHub read.

@@ -158,7 +158,7 @@ extension StatusPanelView {
             case .notes:
                 // Text that finds no note is a note to write, not a failed search.
                 if let note = modeNotes(filter).first { toggleNote(note) } else { createNote(filter) }
-            case .work, .devbox, .ci, .estate, .health, .mac, .fans, .vit, .home, .prs:
+            case .work, .devbox, .ci, .estate, .health, .mac, .fans, .vit, .home, .prs, .kit:
                 break // a module's alias never stays global (`ModuleRouter.route`)
             case .organize:
                 // Bare ↵ runs "default" (names() sorts it first); unmatched
@@ -302,7 +302,7 @@ extension StatusPanelView {
                              isSelected: { isSelected($0) },
                              onRun: { runOrganize($0) }) { query = "" }
         // A module's alias never stays global: the module draws its page.
-        case .work, .devbox, .ci, .estate, .health, .mac, .fans, .vit, .home, .prs:
+        case .work, .devbox, .ci, .estate, .health, .mac, .fans, .vit, .home, .prs, .kit:
             EmptyView()
         }
     }
@@ -528,7 +528,7 @@ extension StatusPanelView {
                     }
                 }
             // The deck is controls; a module's alias never stays global.
-            case .fans, .work, .devbox, .ci, .estate, .health, .mac, .vit, .home, .prs:
+            case .fans, .work, .devbox, .ci, .estate, .health, .mac, .vit, .home, .prs, .kit:
                 return []
             case .organize:
                 return modeOrganize(filter).map { name in
