@@ -14,7 +14,10 @@
 //! every other frame stays single-sampled.
 
 pub mod frame;
+pub mod retained;
 mod tess;
+
+pub use retained::{ChunkId, RetainedStats};
 
 pub use frame::{Batch, Frame, Pipeline, Viewport};
 
@@ -23,17 +26,25 @@ use canvas_text::{MAX_ALPHA_PAGES, MAX_COLOR_PAGES, PAGE_SIZE, PageKind, TextSys
 use frame::{CellInstance, GlyphInstance, PathVertex, RectInstance};
 #[cfg(target_vendor = "apple")]
 use std::ffi::c_void;
+#[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
 use std::sync::OnceLock;
+#[cfg(not(target_arch = "wasm32"))]
 use std::task::{Context, Poll, Waker};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 /// Samples of the pass a frame with paths draws in (D18).
 pub const PATH_SAMPLES: u32 = 4;
 
 /// Every target renders in this format (always supported by CAMetalLayer); colours are
 /// written gamma-encoded, so blending happens in sRGB space like AppKit's.
+#[cfg(not(target_arch = "wasm32"))]
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+#[cfg(target_arch = "wasm32")]
+pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
@@ -67,6 +78,7 @@ pub enum FrameOutcome {
 }
 
 /// Wait for a future that wgpu's native backends resolve without a reactor.
+#[cfg(not(target_arch = "wasm32"))]
 fn block_on<F: Future>(fut: F) -> F::Output {
     let mut fut = std::pin::pin!(fut);
     let mut cx = Context::from_waker(Waker::noop());
@@ -78,9 +90,19 @@ fn block_on<F: Future>(fut: F) -> F::Output {
     }
 }
 
+#[derive(Clone)]
 struct GrowBuffer {
     buffer: wgpu::Buffer,
     capacity: u64,
+}
+
+#[derive(Default, Clone)]
+struct Buffers {
+    rects: Option<GrowBuffer>,
+    glyphs: Option<GrowBuffer>,
+    cells: Option<GrowBuffer>,
+    path_vertices: Option<GrowBuffer>,
+    path_indices: Option<GrowBuffer>,
 }
 
 /// One uniform block (`Globals` in the shaders): viewport, clock, camera.
@@ -98,6 +120,20 @@ pub struct TargetStats {
     pub encodes: u64,
 }
 
+/// CPU wall time of the most recent submission, excluding offscreen fences.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CpuFrameProfile {
+    pub uniforms_ms: f64,
+    pub commands_ms: f64,
+    pub finish_ms: f64,
+    pub submit_ms: f64,
+    pub acquire_ms: f64,
+    pub present_ms: f64,
+    pub rebuild_ms: f64,
+    pub upload_ms: f64,
+    pub bundle_ms: f64,
+}
+
 /// A render destination: a configured surface, or none (offscreen capture).
 pub struct Target {
     surface: Option<wgpu::Surface<'static>>,
@@ -106,14 +142,12 @@ pub struct Target {
     /// One uniform block per [`Follow`] (by its index): identity outside a camera layer, the
     /// camera on x, on y, on both.
     cameras: [Globals; 4],
+    camera_data: [Option<[f32; 8]>; 4],
     camera: Camera,
     clock: Instant,
     frozen_clock: Option<f32>,
-    rects: Option<GrowBuffer>,
-    glyphs: Option<GrowBuffer>,
-    cells: Option<GrowBuffer>,
-    path_vertices: Option<GrowBuffer>,
-    path_indices: Option<GrowBuffer>,
+    buffers: Buffers,
+    retained: retained::Scene,
     /// The multisampled colour attachment of a frame with paths, and its size.
     msaa: Option<(wgpu::TextureView, [u32; 2])>,
     /// The last frame's instance arrays, rebuilt in place so steady frames allocate nothing.
@@ -121,6 +155,7 @@ pub struct Target {
     /// The GPU buffers hold `frame`: a redraw may re-encode it as it is.
     uploaded: bool,
     stats: TargetStats,
+    profile: CpuFrameProfile,
 }
 
 impl Target {
@@ -132,13 +167,21 @@ impl Target {
         self.camera
     }
 
+    pub fn cpu_profile(&self) -> CpuFrameProfile {
+        self.profile
+    }
+
     pub fn stats(&self) -> TargetStats {
         self.stats
     }
 
     /// The last frame flows (a dash with a speed): its host keeps redrawing while it shows.
     pub fn animating(&self) -> bool {
-        self.frame.animated
+        if self.retained.active() {
+            self.retained.animated()
+        } else {
+            self.frame.animated
+        }
     }
 
     /// The last frame built for this target.
@@ -178,6 +221,7 @@ impl Offscreen {
 
 /// The pipelines of one sample count; only the multisampled set draws paths.
 struct Pipelines {
+    quad: wgpu::RenderPipeline,
     rect: wgpu::RenderPipeline,
     glyph: wgpu::RenderPipeline,
     cell: wgpu::RenderPipeline,
@@ -261,6 +305,11 @@ fn pipelines(
     };
     let strip = wgpu::PrimitiveTopology::TriangleStrip;
     Pipelines {
+        quad: pipeline(
+            "retained quad", include_str!("../shaders/quad.wgsl"),
+            &[Some(globals_layout),Some(atlas_layout)],
+            instanced(size_of::<retained::QuadInstance>(), &wgpu::vertex_attr_array![0=>Float32x4,1=>Float32x4,2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4,6=>Uint32x2]),strip,
+        ),
         rect: pipeline(
             "rect",
             include_str!("../shaders/rect.wgsl"),
@@ -313,21 +362,43 @@ fn px(points: f64, scale: f64) -> u32 {
 
 impl Gpu {
     /// Create the instance, a high-performance adapter and the device. Blocks briefly.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Result<Self, GpuError> {
+        block_on(Self::new_async())
+    }
+
+    /// Browser-safe initialization: yields while the adapter and device are requested.
+    /// Without WebGPU, wgpu selects its WebGL2 backend.
+    pub async fn new_async() -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            ..Default::default()
-        }))
-        .map_err(|e| GpuError::Adapter(e.to_string()))?;
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("canvas"),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .map_err(|e| GpuError::Device(e.to_string()))?;
+        Self::initialize(instance, None).await
+    }
+
+    async fn initialize(
+        instance: wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Self, GpuError> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: surface,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| GpuError::Adapter(e.to_string()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let limits = wgpu::Limits::downlevel_defaults();
+        #[cfg(target_arch = "wasm32")]
+        let limits = wgpu::Limits::downlevel_webgl2_defaults();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("canvas"),
+                required_limits: limits.using_resolution(adapter.limits()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| GpuError::Device(e.to_string()))?;
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             tracing::error!(error = %e, "wgpu validation error");
         }));
@@ -440,6 +511,81 @@ impl Gpu {
         })
     }
 
+    /// Create a device and its browser surface together. WebGL2 requires the adapter
+    /// to be selected for this canvas; WebGPU is attempted first, then WebGL2.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn for_canvas(
+        canvas: web_sys::HtmlCanvasElement,
+        scale: f32,
+    ) -> Result<(Self, Target), GpuError> {
+        let mut errors = Vec::new();
+        for backend in [wgpu::Backends::BROWSER_WEBGPU, wgpu::Backends::GL] {
+            let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+            descriptor.backends = backend;
+            let instance = wgpu::Instance::new(descriptor);
+            // Do not claim a canvas context until WebGPU has supplied a usable device:
+            // a canvas that already owns a webgpu context cannot later become WebGL2.
+            let (gpu, surface) = if backend == wgpu::Backends::BROWSER_WEBGPU {
+                let gpu = match Self::initialize(instance, None).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        continue;
+                    }
+                };
+                let surface = gpu
+                    .instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                    .map_err(|e| GpuError::Surface(e.to_string()))?;
+                (gpu, surface)
+            } else {
+                let surface =
+                    match instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone())) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            errors.push(e.to_string());
+                            continue;
+                        }
+                    };
+                let gpu = match Self::initialize(instance, Some(&surface)).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        continue;
+                    }
+                };
+                (gpu, surface)
+            };
+            let caps = surface.get_capabilities(&gpu.adapter);
+            if !caps.formats.contains(&FORMAT) {
+                errors.push(format!("browser surface does not support {FORMAT:?}"));
+                continue;
+            }
+            let viewport = Viewport {
+                width_px: canvas.width().max(1),
+                height_px: canvas.height().max(1),
+                scale,
+            };
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: FORMAT,
+                color_space: Default::default(),
+                width: viewport.width_px,
+                height: viewport.height_px,
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                view_formats: vec![],
+            };
+            surface.configure(&gpu.device, &config);
+            let mut target = gpu.target(viewport);
+            target.surface = Some(surface);
+            target.config = Some(config);
+            return Ok((gpu, target));
+        }
+        Err(GpuError::Adapter(errors.join("; ")))
+    }
+
     /// The adapter's name and backend, for diagnostics.
     pub fn adapter_info(&self) -> String {
         let info = self.adapter.get_info();
@@ -486,18 +632,17 @@ impl Gpu {
                 self.globals("camera y"),
                 self.globals("camera"),
             ],
+            camera_data: [None; 4],
             camera: Camera::IDENTITY,
             clock: Instant::now(),
             frozen_clock: None,
-            rects: None,
-            glyphs: None,
-            cells: None,
-            path_vertices: None,
-            path_indices: None,
+            buffers: Buffers::default(),
+            retained: retained::Scene::default(),
             msaa: None,
             frame: Frame::default(),
             uploaded: false,
             stats: TargetStats::default(),
+            profile: CpuFrameProfile::default(),
         }
     }
 
@@ -655,14 +800,18 @@ impl Gpu {
 
     /// Write `frame`'s instances and path geometry into the target's buffers.
     fn upload(&self, target: &mut Target, frame: &Frame) {
-        let vertex = wgpu::BufferUsages::VERTEX;
-        self.write_buffer(&mut target.rects, &frame.rects, vertex);
-        self.write_buffer(&mut target.glyphs, &frame.glyphs, vertex);
-        self.write_buffer(&mut target.cells, &frame.cells, vertex);
-        self.write_buffer(&mut target.path_vertices, &frame.path_vertices, vertex);
-        let index = wgpu::BufferUsages::INDEX;
-        self.write_buffer(&mut target.path_indices, &frame.path_indices, index);
+        self.upload_buffers(&mut target.buffers, frame);
         target.stats.uploads += 1;
+    }
+
+    fn upload_buffers(&self, buffers: &mut Buffers, frame: &Frame) {
+        let vertex = wgpu::BufferUsages::VERTEX;
+        self.write_buffer(&mut buffers.rects, &frame.rects, vertex);
+        self.write_buffer(&mut buffers.glyphs, &frame.glyphs, vertex);
+        self.write_buffer(&mut buffers.cells, &frame.cells, vertex);
+        self.write_buffer(&mut buffers.path_vertices, &frame.path_vertices, vertex);
+        let index = wgpu::BufferUsages::INDEX;
+        self.write_buffer(&mut buffers.path_indices, &frame.path_indices, index);
     }
 
     /// The multisampled attachment at the target's size, created on its first frame with
@@ -698,6 +847,32 @@ impl Gpu {
     /// Encode `frame` (already uploaded) into one render pass on `view`: the uniforms are
     /// the only writes, so a camera move or a clock tick costs this alone.
     fn encode(&self, target: &mut Target, frame: &Frame, view: &wgpu::TextureView) {
+        if target.retained.active() {
+            let scene = std::mem::take(&mut target.retained);
+            self.encode_lists(target, scene.frames(), scene.clear(), view, Some(&scene));
+            target.retained = scene;
+        } else {
+            let buffers = std::mem::take(&mut target.buffers);
+            self.encode_lists(
+                target,
+                std::iter::once((frame, &buffers)),
+                frame.clear,
+                view,
+                None,
+            );
+            target.buffers = buffers;
+        }
+    }
+
+    fn encode_lists<'a>(
+        &self,
+        target: &mut Target,
+        frames: impl Iterator<Item = (&'a Frame, &'a Buffers)> + Clone,
+        clear: [f64; 4],
+        view: &wgpu::TextureView,
+        scene: Option<&retained::Scene>,
+    ) {
+        let started = Instant::now();
         let vp = target.viewport;
         let (w, h, t, s) = (
             vp.width_px as f32,
@@ -705,6 +880,7 @@ impl Gpu {
             target.time(),
             vp.scale,
         );
+        let used = scene.map(|s| s.follows());
         for (i, f) in [Follow::NONE, Follow::X, Follow::Y, Follow::BOTH]
             .into_iter()
             .enumerate()
@@ -713,17 +889,26 @@ impl Gpu {
             let data = [
                 w,
                 h,
-                t,
+                if scene.is_some_and(|s| !s.animated()) {
+                    0.0
+                } else {
+                    t
+                },
                 0.0,
                 c.scale.x,
                 c.scale.y,
                 c.offset.x * s,
                 c.offset.y * s,
             ];
-            self.queue
-                .write_buffer(&target.cameras[i].buffer, 0, bytemuck::cast_slice(&data));
+            if used.is_none_or(|mask| mask[i]) && target.camera_data[i] != Some(data) {
+                self.queue
+                    .write_buffer(&target.cameras[i].buffer, 0, bytemuck::cast_slice(&data));
+                target.camera_data[i] = Some(data);
+            }
         }
-        let multisampled = frame.has_paths();
+        target.profile.uniforms_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let commands = Instant::now();
+        let multisampled = frames.clone().any(|(frame, _)| frame.has_paths());
         let msaa = multisampled.then(|| self.msaa_view(target));
         let pipes = if multisampled {
             self.multisampled()
@@ -737,7 +922,7 @@ impl Gpu {
                 label: Some("frame"),
             });
         {
-            let [r, g, b, a] = frame.clear;
+            let [r, g, b, a] = clear;
             let load = wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a });
             let attachment = match &msaa {
                 Some(msaa) => wgpu::RenderPassColorAttachment {
@@ -764,60 +949,86 @@ impl Gpu {
                 color_attachments: &[Some(attachment)],
                 ..Default::default()
             });
-            pass.set_bind_group(1, &self.atlas_bind, &[]);
-            let mut bound: Option<Follow> = None;
-            let mut scissor: Option<[u32; 4]> = None;
-            let mut pipeline: Option<Pipeline> = None;
-            for batch in &frame.batches {
-                let [x, y, w, h] = batch.scissor.unwrap_or([0, 0, vp.width_px, vp.height_px]);
-                if w == 0 || h == 0 {
-                    continue;
+            if let Some(scene) = scene {
+                for run in scene.bundles() {
+                    pass.set_scissor_rect(
+                        run.scissor[0],
+                        run.scissor[1],
+                        run.scissor[2],
+                        run.scissor[3],
+                    );
+                    pass.execute_bundles(std::iter::once(if multisampled {
+                        &run.msaa
+                    } else {
+                        run.single.as_ref().expect("single-sampled chunk")
+                    }));
                 }
-                let buffer = match batch.pipeline {
-                    Pipeline::Rect => &target.rects,
-                    Pipeline::Glyph => &target.glyphs,
-                    Pipeline::Cell => &target.cells,
-                    Pipeline::Path => &target.path_vertices,
-                };
-                let Some(buffer) = buffer else { continue };
-                if bound != Some(batch.follow) {
-                    pass.set_bind_group(0, &target.cameras[batch.follow.index()].bind, &[]);
-                    bound = Some(batch.follow);
-                }
-                // Only what changed between batches is set again: a timeline alternates a few
-                // pipelines under one scissor thousands of times.
-                if scissor != Some([x, y, w, h]) {
-                    pass.set_scissor_rect(x, y, w, h);
-                    scissor = Some([x, y, w, h]);
-                }
-                if pipeline != Some(batch.pipeline) {
-                    match batch.pipeline {
-                        Pipeline::Rect => pass.set_pipeline(&pipes.rect),
-                        Pipeline::Glyph => pass.set_pipeline(&pipes.glyph),
-                        Pipeline::Cell => pass.set_pipeline(&pipes.cell),
-                        Pipeline::Path => {
-                            let (Some(path), Some(indices)) = (&pipes.path, &target.path_indices)
-                            else {
-                                continue;
-                            };
-                            pass.set_pipeline(path);
-                            pass.set_index_buffer(
-                                indices.buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
+            } else {
+                pass.set_bind_group(1, &self.atlas_bind, &[]);
+                let mut bound: Option<Follow> = None;
+                let mut scissor: Option<[u32; 4]> = None;
+                for (frame, buffers) in frames {
+                    let mut pipeline: Option<Pipeline> = None;
+                    for batch in &frame.batches {
+                        let [x, y, w, h] =
+                            batch.scissor.unwrap_or([0, 0, vp.width_px, vp.height_px]);
+                        if w == 0 || h == 0 {
+                            continue;
+                        }
+                        let buffer = match batch.pipeline {
+                            Pipeline::Rect => &buffers.rects,
+                            Pipeline::Glyph => &buffers.glyphs,
+                            Pipeline::Cell => &buffers.cells,
+                            Pipeline::Path => &buffers.path_vertices,
+                        };
+                        let Some(buffer) = buffer else { continue };
+                        if bound != Some(batch.follow) {
+                            pass.set_bind_group(0, &target.cameras[batch.follow.index()].bind, &[]);
+                            bound = Some(batch.follow);
+                        }
+                        // Only what changed between batches is set again: a timeline alternates a few
+                        // pipelines under one scissor thousands of times.
+                        if scissor != Some([x, y, w, h]) {
+                            pass.set_scissor_rect(x, y, w, h);
+                            scissor = Some([x, y, w, h]);
+                        }
+                        if pipeline != Some(batch.pipeline) {
+                            match batch.pipeline {
+                                Pipeline::Rect => pass.set_pipeline(&pipes.rect),
+                                Pipeline::Glyph => pass.set_pipeline(&pipes.glyph),
+                                Pipeline::Cell => pass.set_pipeline(&pipes.cell),
+                                Pipeline::Path => {
+                                    let (Some(path), Some(indices)) =
+                                        (&pipes.path, &buffers.path_indices)
+                                    else {
+                                        continue;
+                                    };
+                                    pass.set_pipeline(path);
+                                    pass.set_index_buffer(
+                                        indices.buffer.slice(..),
+                                        wgpu::IndexFormat::Uint32,
+                                    );
+                                }
+                            }
+                            pass.set_vertex_buffer(0, buffer.buffer.slice(..));
+                            pipeline = Some(batch.pipeline);
+                        }
+                        if batch.pipeline == Pipeline::Path {
+                            pass.draw_indexed(batch.instances.clone(), 0, 0..1);
+                        } else {
+                            pass.draw(0..4, batch.instances.clone());
                         }
                     }
-                    pass.set_vertex_buffer(0, buffer.buffer.slice(..));
-                    pipeline = Some(batch.pipeline);
-                }
-                if batch.pipeline == Pipeline::Path {
-                    pass.draw_indexed(batch.instances.clone(), 0, 0..1);
-                } else {
-                    pass.draw(0..4, batch.instances.clone());
                 }
             }
         }
-        self.queue.submit([encoder.finish()]);
+        target.profile.commands_ms = commands.elapsed().as_secs_f64() * 1000.0;
+        let finish = Instant::now();
+        let command = encoder.finish();
+        target.profile.finish_ms = finish.elapsed().as_secs_f64() * 1000.0;
+        let submit = Instant::now();
+        self.queue.submit([command]);
+        target.profile.submit_ms = submit.elapsed().as_secs_f64() * 1000.0;
         target.stats.encodes += 1;
     }
 
@@ -846,7 +1057,10 @@ impl Gpu {
 
     /// Encode the target's retained frame on the surface's next texture and present it.
     fn present(&self, target: &mut Target) -> Result<FrameOutcome, GpuError> {
-        let Some(texture) = self.acquire(target)? else {
+        let acquired = Instant::now();
+        let texture = self.acquire(target)?;
+        target.profile.acquire_ms = acquired.elapsed().as_secs_f64() * 1000.0;
+        let Some(texture) = texture else {
             return Ok(FrameOutcome::Skipped);
         };
         let view = texture
@@ -855,7 +1069,9 @@ impl Gpu {
         let frame = std::mem::take(&mut target.frame);
         self.encode(target, &frame, &view);
         target.frame = frame;
+        let presented = Instant::now();
         self.queue.present(texture);
+        target.profile.present_ms = presented.elapsed().as_secs_f64() * 1000.0;
         Ok(FrameOutcome::Presented)
     }
 
@@ -869,6 +1085,7 @@ impl Gpu {
         if target.surface.is_none() {
             return Err(GpuError::Surface("target has no surface".into()));
         }
+        target.retained.active = false;
         target.frame.rebuild(dl, text, target.viewport);
         self.upload_atlas(text);
         let frame = std::mem::take(&mut target.frame);
@@ -917,14 +1134,23 @@ impl Gpu {
     }
 
     fn wait(&self) -> Result<(), GpuError> {
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map(|_| ())
-            .map_err(|e| GpuError::Wait(e.to_string()))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map(|_| ())
+                .map_err(|e| GpuError::Wait(e.to_string()))
+        }
+        // Browser submission is asynchronous; blocking would prevent completion callbacks.
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
     }
 
-    /// Draw an already built `frame` into `off`: upload the atlas's new rects, encode,
-    /// submit, and block until the GPU has finished it.
+    /// Draw an already built `frame` into `off`: upload the atlas's new rects, encode
+    /// and submit. Native targets block until completion; browsers must await
+    /// [`read_offscreen_async`](Self::read_offscreen_async) when they need the pixels.
     pub fn draw_offscreen(
         &self,
         off: &mut Offscreen,
@@ -932,6 +1158,7 @@ impl Gpu {
         text: &mut TextSystem,
     ) -> Result<(), GpuError> {
         self.upload_atlas(text);
+        off.target.retained.active = false;
         self.upload(&mut off.target, frame);
         // The buffers now hold the caller's frame, not the target's own.
         off.target.uploaded = false;
@@ -947,6 +1174,7 @@ impl Gpu {
         text: &mut TextSystem,
     ) -> Result<(), GpuError> {
         let target = &mut off.target;
+        target.retained.active = false;
         target.frame.rebuild(dl, text, target.viewport);
         self.upload_atlas(text);
         let frame = std::mem::take(&mut target.frame);
@@ -955,6 +1183,18 @@ impl Gpu {
         target.frame = frame;
         target.uploaded = true;
         self.wait()
+    }
+
+    /// Submit the retained offscreen frame without a GPU fence (CPU frame-cost probes).
+    /// Readback, or `redraw_offscreen`, waits when completion is required.
+    pub fn submit_offscreen(&self, off: &mut Offscreen) -> Result<(), GpuError> {
+        if !off.target.uploaded {
+            return Err(GpuError::Surface("nothing rendered to redraw".into()));
+        }
+        let frame = std::mem::take(&mut off.target.frame);
+        self.encode(&mut off.target, &frame, &off.view);
+        off.target.frame = frame;
+        Ok(())
     }
 
     /// Draw `off`'s last rendered frame again, as [`redraw`](Self::redraw) does.
@@ -970,7 +1210,16 @@ impl Gpu {
 
     /// Read `off`'s texture back as straight-alpha RGBA8, rows top first. Blocks until the
     /// GPU finishes.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read_offscreen(&self, off: &Offscreen) -> Result<(u32, u32, Vec<u8>), GpuError> {
+        block_on(self.read_offscreen_async(off))
+    }
+
+    /// Readback that yields to the browser event loop while mapping the GPU buffer.
+    pub async fn read_offscreen_async(
+        &self,
+        off: &Offscreen,
+    ) -> Result<(u32, u32, Vec<u8>), GpuError> {
         let (w, h) = (off.target.viewport.width_px, off.target.viewport.height_px);
         let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -1003,24 +1252,59 @@ impl Gpu {
         );
         self.queue.submit([encoder.finish()]);
         let slice = buffer.slice(..);
+        #[cfg(not(target_arch = "wasm32"))]
         let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        let (tx, mut rx) = futures_channel::oneshot::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             // The receiver outlives the poll below; a send error cannot happen.
             let _ = tx.send(r);
         });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| GpuError::Readback(e.to_string()))?;
-        rx.recv()
-            .map_err(|e| GpuError::Readback(e.to_string()))?
-            .map_err(|e| GpuError::Readback(e.to_string()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_err(|e| GpuError::Readback(e.to_string()))?;
+            rx.recv()
+                .map_err(|e| GpuError::Readback(e.to_string()))?
+                .map_err(|e| GpuError::Readback(e.to_string()))?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // WebGL mapping callbacks advance on device.poll; WebGPU resolves a JS
+            // promise. Yield a browser task between polls so neither backend deadlocks.
+            loop {
+                self.device
+                    .poll(wgpu::PollType::Poll)
+                    .map_err(|e| GpuError::Readback(e.to_string()))?;
+                if let Some(result) = rx
+                    .try_recv()
+                    .map_err(|e| GpuError::Readback(e.to_string()))?
+                {
+                    result.map_err(|e| GpuError::Readback(e.to_string()))?;
+                    break;
+                }
+                let task = js_sys::Promise::new(&mut |resolve, _| {
+                    web_sys::window()
+                        .expect("browser readback requires Window")
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
+                        .expect("schedule readback poll");
+                });
+                wasm_bindgen_futures::JsFuture::from(task)
+                    .await
+                    .map_err(|e| GpuError::Readback(format!("{e:?}")))?;
+            }
+        }
         let mapped = slice
             .get_mapped_range()
             .map_err(|e| GpuError::Readback(e.to_string()))?;
         let mut out = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h as usize {
             for p in mapped[y * row as usize..][..w as usize * 4].chunks_exact(4) {
+                #[cfg(not(target_arch = "wasm32"))]
                 let (b, g, r, a) = (p[0], p[1], p[2], p[3]);
+                #[cfg(target_arch = "wasm32")]
+                let (r, g, b, a) = (p[0], p[1], p[2], p[3]);
                 let un = |c: u8| {
                     if a == 0 {
                         0
@@ -1038,6 +1322,7 @@ impl Gpu {
 
     /// Render `dl` offscreen and read it back as straight-alpha RGBA8, rows top first
     /// (a debug capture, a golden). Blocks until the GPU finishes.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn render_to_rgba(
         &self,
         dl: &DisplayList,

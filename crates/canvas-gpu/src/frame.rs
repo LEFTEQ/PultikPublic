@@ -89,7 +89,7 @@ pub struct Batch {
 }
 
 /// Everything one frame draws.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Frame {
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
@@ -149,6 +149,15 @@ impl Frame {
             self.build_once(dl, text, vp, false);
             self.atlas_reset = true;
         }
+    }
+
+    pub(crate) fn rebuild_retained(
+        &mut self,
+        dl: &DisplayList,
+        text: &mut TextSystem,
+        vp: Viewport,
+    ) {
+        self.build_once(dl, text, vp, false);
     }
 
     fn build_once(&mut self, dl: &DisplayList, text: &mut TextSystem, vp: Viewport, evict: bool) {
@@ -225,7 +234,7 @@ fn premul(c: Rgba) -> [f32; 4] {
     c.premultiplied()
 }
 
-fn premul64(c: Rgba) -> [f64; 4] {
+pub(crate) fn premul64(c: Rgba) -> [f64; 4] {
     c.premultiplied().map(f64::from)
 }
 

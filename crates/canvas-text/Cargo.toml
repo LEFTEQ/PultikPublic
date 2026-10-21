@@ -9,17 +9,25 @@ publish.workspace = true
 
 [dependencies]
 canvas-draw.workspace = true
-# `code_view`: code-core's rows, highlights and diffs, coloured by a theme.
-code-core.workspace = true
-theme.workspace = true
 etagere.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native editor adapters own the tree-sitter-backed code model. Browser hosts hand
+# pre-laid-out rows to Op::Code; labels, cells and atlas rasterization stay shared.
+code-core.workspace = true
+theme.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-text.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 
-[dev-dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+unicode-segmentation.workspace = true
+wasm-bindgen = "0.2.129"
+web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlCanvasElement", "CanvasRenderingContext2d", "TextMetrics", "ImageData"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest.workspace = true

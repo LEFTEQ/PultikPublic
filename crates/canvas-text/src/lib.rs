@@ -2,7 +2,8 @@
 //!
 //! - [`TextSystem`]: fonts, shaping with a cache, glyph rasterization into the [`Atlas`].
 //!   On macOS shaping is Core Text `CTLine` (bidi, fallback fonts, caret offsets from the
-//!   system); elsewhere a fixed-advance fallback keeps the crate building and testable.
+//!   system); browsers rasterize Canvas2D runs into the same atlas, while other native
+//!   targets retain a fixed-advance fallback. Browser limits are in this crate's README.
 //!   [`ShapedLine`]'s carets and [`nearest`] are what an editor's line layout builds its
 //!   caret, hit-test and range geometry from.
 //! - Cell text ([`term`]): the monospaced font, its [`TermMetrics`], and
@@ -20,9 +21,13 @@
 
 pub mod atlas;
 mod code;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod code_view;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod diff_view;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod editor_view;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod merge_view;
 pub mod sprite;
 pub mod term;
@@ -30,8 +35,11 @@ pub mod term;
 #[cfg(target_os = "macos")]
 #[path = "coretext.rs"]
 mod platform;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 #[path = "fallback.rs"]
+mod platform;
+#[cfg(target_arch = "wasm32")]
+#[path = "browser.rs"]
 mod platform;
 
 pub use atlas::{

@@ -15,6 +15,31 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 
+/// A Rust host's attach failure, without exposing the C ABI's status machinery.
+#[derive(Debug)]
+pub enum SurfaceError {
+    Invalid(&'static str),
+    Engine(String),
+}
+
+impl std::fmt::Display for SurfaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) => f.write_str(message),
+            Self::Engine(message) => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for SurfaceError {}
+impl From<SurfaceError> for Failure {
+    fn from(error: SurfaceError) -> Self {
+        match error {
+            SurfaceError::Invalid(message) => Self::Invalid(message),
+            SurfaceError::Engine(message) => Self::Engine(message),
+        }
+    }
+}
+
 struct Shared {
     gpu: Gpu,
     text: TextSystem,
@@ -35,8 +60,10 @@ thread_local! {
 }
 
 /// One layer's target on the shared device. Dropping it detaches it.
-pub(crate) struct Surface {
+pub struct Surface {
     target: Option<Target>,
+    // The shared owner is thread-local; a target must never migrate to another thread.
+    thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl Surface {
@@ -47,24 +74,24 @@ impl Surface {
     ///
     /// # Safety
     /// `layer` is a valid CAMetalLayer that outlives the surface.
-    pub(crate) unsafe fn attach(
+    pub unsafe fn attach(
         layer: *mut c_void,
         width: f64,
         height: f64,
         scale: f64,
-    ) -> Result<Self, Failure> {
+    ) -> Result<Self, SurfaceError> {
         if layer.is_null() {
-            return Err(Failure::Invalid("a null layer"));
+            return Err(SurfaceError::Invalid("a null layer"));
         }
         #[cfg(not(target_vendor = "apple"))]
         {
             let _ = (width, height, scale);
-            Err(Failure::Engine("layers are Apple-only".into()))
+            Err(SurfaceError::Engine("layers are Apple-only".into()))
         }
         #[cfg(target_vendor = "apple")]
         SHARED.with_borrow_mut(|shared| {
             if shared.is_none() {
-                let gpu = Gpu::new().map_err(|e| Failure::Engine(e.to_string()))?;
+                let gpu = Gpu::new().map_err(|e| SurfaceError::Engine(e.to_string()))?;
                 BUILDS.set(BUILDS.get() + 1);
                 **shared = Some(Shared {
                     gpu,
@@ -84,26 +111,41 @@ impl Surface {
                     scale,
                 )
             }
-            .map_err(|e| Failure::Engine(e.to_string()))?;
+            .map_err(|e| SurfaceError::Engine(e.to_string()))?;
             s.gpu.set_vsync(&mut target, false);
             s.attached += 1;
             s.release = false;
             Ok(Surface {
                 target: Some(target),
+                thread: std::marker::PhantomData,
             })
         })
     }
 
-    pub(crate) fn resize(&mut self, width: f64, height: f64, scale: f64) {
+    pub fn resize(&mut self, width: f64, height: f64, scale: f64) {
         self.with(|gpu, target, _| gpu.resize(target, width, height, scale));
     }
 
-    pub(crate) fn set_vsync(&mut self, vsync: bool) {
+    pub fn set_vsync(&mut self, vsync: bool) {
         self.with(|gpu, target, _| gpu.set_vsync(target, vsync));
     }
 
+    /// The shared atlas's current generation; compare with a consumer's last build.
+    pub fn atlas_generation(&self) -> u64 {
+        SHARED.with_borrow(|shared| {
+            shared
+                .as_ref()
+                .expect("an attached surface owns the device")
+                .text
+                .atlas()
+                .generation()
+        })
+    }
+
     /// Run `f` on the device, this surface's target and the shared text system.
-    pub(crate) fn with<R>(&mut self, f: impl FnOnce(&Gpu, &mut Target, &mut TextSystem) -> R) -> R {
+    /// Main-thread only. Do not re-enter any shared-surface operation inside `f`.
+    /// Borrowed renderer references cannot escape the closure.
+    pub fn with<R>(&mut self, f: impl FnOnce(&Gpu, &mut Target, &mut TextSystem) -> R) -> R {
         let target = self
             .target
             .as_mut()
@@ -116,7 +158,7 @@ impl Surface {
         })
     }
 
-    pub(crate) fn animating(&self) -> bool {
+    pub fn animating(&self) -> bool {
         self.target.as_ref().is_some_and(Target::animating)
     }
 }
@@ -164,6 +206,34 @@ mod tests {
     use super::*;
     use canvas_draw::{DisplayList, Op, Path, PathOp, Point, Rgba, TextRun};
     use std::sync::Arc;
+
+    #[test]
+    fn borrowed_surface_uses_shared_owner_and_atlas() {
+        std::thread::spawn(|| {
+            let gpu = Gpu::new().expect("a Metal device");
+            SHARED.with_borrow_mut(|shared| {
+                **shared = Some(Shared {
+                    gpu,
+                    text: TextSystem::new(),
+                    attached: 1,
+                    release: false,
+                });
+            });
+            let surface = Surface {
+                target: None,
+                thread: std::marker::PhantomData,
+            };
+            let generation = surface.atlas_generation();
+            SHARED.with_borrow_mut(|shared| shared.as_mut().unwrap().text.atlas_mut().clear());
+            assert_eq!(surface.atlas_generation(), generation + 1);
+            canvas_surface_release();
+            assert!(canvas_surface_live());
+            drop(surface);
+            assert!(!canvas_surface_live());
+        })
+        .join()
+        .unwrap();
+    }
 
     /// A thread that ends with its device alive and drawn with (the process quitting) ends
     /// cleanly: its thread-locals' destructors never drop the device.

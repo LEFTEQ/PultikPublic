@@ -56,6 +56,7 @@ tree-sitter-php = "=0.25.1"
 tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
 tree-sitter-yaml = "=0.7.0"
+unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 
 [profile.dev]
