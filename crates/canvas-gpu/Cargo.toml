@@ -19,12 +19,26 @@ tracing.workspace = true
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal"] }
 
-[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+[target.'cfg(all(not(target_vendor = "apple"), not(target_arch = "wasm32")))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "gles"] }
 
-[dev-dependencies]
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "webgpu", "webgl"] }
+web-time = "1.1.0"
+wasm-bindgen = "0.2.129"
+web-sys = { version = "0.3.106", features = ["HtmlCanvasElement", "Window", "Performance"] }
+futures-channel = "0.3.32"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # tests/diff_view.rs lays out a code block as an editor does ...
 code-core.workspace = true
 # ... and colours a diff by the house theme.
 theme.workspace = true
 png = "0.18.1"
+
+[[example]]
+name = "browser"
+path = "tests/browser/harness.rs"
+crate-type = ["cdylib"]

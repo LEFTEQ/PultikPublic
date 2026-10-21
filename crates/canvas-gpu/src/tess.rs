@@ -43,6 +43,17 @@ pub(crate) struct Tessellator {
     pub misses: u64,
 }
 
+impl Clone for Tessellator {
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            build: self.build,
+            misses: self.misses,
+            ..Self::default()
+        }
+    }
+}
+
 impl std::fmt::Debug for Tessellator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tessellator")

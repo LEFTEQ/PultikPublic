@@ -41,6 +41,8 @@ fn vs(v: Vertex) -> VsOut {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    // Derivatives must be evaluated before a potentially non-uniform early return.
+    let w = max(fwidth(in.advance), 1e-4);
     let on = in.dash.x;
     if (on <= 0.0) {
         return in.color;
@@ -49,7 +51,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let along = in.advance + in.dash.z - globals.time * in.dash.w;
     let d = along - floor(along / period) * period;
     // Coverage across the dash's two ends, one pixel of the advancement wide.
-    let w = max(fwidth(in.advance), 1e-4);
     let coverage = clamp(min(d, on - d) / w + 0.5, 0.0, 1.0);
     return in.color * coverage;
 }

@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shared renderer qualification</title>
+<canvas id="canvas" width="160" height="88"></canvas>
+<pre id="result">Running wasm renderer…</pre>
+<script type="module">
+import init, { qualify } from "/browser.js";
+const output = document.querySelector("#result");
+try {
+  if (new URL(location.href).searchParams.has("webgl")) {
+    // Test the fallback without depending on Chromium's WebGPU default or launch flags.
+    Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+  }
+  await init();
+  const report = await qualify(document.querySelector("canvas"));
+  const pixels = Array.from(report.pixels);
+  delete report.pixels;
+  if (new URL(location.href).searchParams.has("capture")) {
+    const response = await fetch("/capture", { method: "POST", body: JSON.stringify(pixels) });
+    if (!response.ok) throw new Error("baseline capture failed");
+    report.baseline = "candidate captured; not a golden assertion";
+  } else {
+    const response = await fetch("/golden.json");
+    if (!response.ok) throw new Error("committed golden missing");
+    const golden = await response.json();
+    if (pixels.length !== golden.length) throw new Error("pixel count differs");
+    let different = 0, maxDelta = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const delta = Math.max(...pixels.slice(i, i + 4).map((v, j) => Math.abs(v - golden[i + j])));
+      maxDelta = Math.max(maxDelta, delta);
+      if (delta > 12) different++;
+    }
+    // Raster edges may vary slightly by backend. A missing label or shape exceeds 0.5%.
+    if (different > 160 * 88 * 0.005) throw new Error(`${different} pixels exceed tolerance`);
+    report.pixelTest = { passed: true, different, maxDelta, tolerance: 12, maxFraction: 0.005 };
+  }
+  let ink = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i] > 220 && pixels[i + 1] > 220 && pixels[i + 2] > 220) ink++;
+  }
+  if (ink < 100) throw new Error(`text missing: only ${ink} bright pixels`);
+  window.qualification = {
+    passed: report.p99Ms <= 8.33,
+    ...report,
+    frameBudgetMs: 8.33,
+    textPixels: ink,
+    userAgent: navigator.userAgent,
+  };
+} catch (error) {
+  window.qualification = { passed: false, error: String(error), stack: error.stack };
+}
+output.textContent = JSON.stringify(window.qualification, null, 2);
+</script>
