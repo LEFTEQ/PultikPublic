@@ -164,6 +164,170 @@ fn publication_is_atomic_ordered_and_removable() {
     );
 }
 
+fn resident_lists(count: usize) -> Vec<Arc<DisplayList>> {
+    (0..count)
+        .map(|i| {
+            let mut list = DisplayList::new(Rgba::BLACK);
+            list.push_camera(Follow::BOTH);
+            let x = (i % 40) as f32 * 72.;
+            let y = (i / 40) as f32 * 32.;
+            list.rect(RoundedRect::new(
+                Rect::new(x, y, 68., 28.),
+                4.,
+                Rgba::hex(0x224488).with_alpha(0.7),
+            ));
+            list.text(TextRun::new(
+                format!("Node {i}"),
+                Point::new(x + 3., y + 4.),
+                12.,
+                Rgba::WHITE,
+            ));
+            list.pop_camera();
+            Arc::new(list)
+        })
+        .collect()
+}
+
+#[test]
+fn resident_republication_preserves_pixels_and_resources() {
+    let Some(gpu) = gpu() else { return };
+    let mut text = TextSystem::new();
+    let mut off = gpu.offscreen(viewport());
+    let lists = resident_lists(1000);
+    let order: Vec<_> = (0..lists.len() as u64).collect();
+    let overlay = rect(Rgba::hex(0xffaa00), 20.);
+    off.target_mut().begin_chunks();
+    for (id, list) in order.iter().zip(&lists) {
+        gpu.upsert_chunk(off.target_mut(), *id, list.clone(), &mut text)
+            .unwrap();
+    }
+    gpu.set_chunk_overlay(off.target_mut(), Some(overlay.clone()), &mut text)
+        .unwrap();
+    gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
+        .unwrap();
+    gpu.redraw_offscreen(&mut off).unwrap();
+    let first = gpu.read_offscreen(&off).unwrap().2;
+    let stats = off.target().retained_stats();
+    off.target_mut().begin_chunks();
+    for (id, list) in order.iter().zip(&lists) {
+        gpu.upsert_chunk(off.target_mut(), *id, list.clone(), &mut text)
+            .unwrap();
+    }
+    gpu.set_chunk_overlay(off.target_mut(), Some(overlay), &mut text)
+        .unwrap();
+    assert!(
+        gpu.publish_chunks(off.target_mut(), &[0, 0], Rgba::WHITE, &mut text)
+            .is_err()
+    );
+    assert!(
+        gpu.publish_chunks(off.target_mut(), &[u64::MAX], Rgba::WHITE, &mut text)
+            .is_err()
+    );
+    gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
+        .unwrap();
+    assert!(!off.target().retained_publish_profile().index_rebuilt);
+    gpu.redraw_offscreen(&mut off).unwrap();
+    assert_eq!(first, gpu.read_offscreen(&off).unwrap().2);
+    assert_eq!(stats, off.target().retained_stats());
+    assert_eq!(pixel(&gpu, &off, 30, 20), [255, 170, 0, 255]);
+
+    let mut shuffled = order.clone();
+    shuffled.reverse();
+    off.target_mut().begin_chunks();
+    gpu.publish_chunks(off.target_mut(), &shuffled, Rgba::BLACK, &mut text)
+        .unwrap();
+    assert!(off.target().retained_publish_profile().index_rebuilt);
+    gpu.redraw_offscreen(&mut off).unwrap();
+    assert_eq!(first, gpu.read_offscreen(&off).unwrap().2);
+    off.target_mut().begin_chunks();
+    gpu.publish_chunks(off.target_mut(), &shuffled, Rgba::BLACK, &mut text)
+        .unwrap();
+    assert!(!off.target().retained_publish_profile().index_rebuilt);
+
+    gpu.resize(off.target_mut(), 96., 64., 2.);
+    gpu.refresh_chunks(off.target_mut(), &mut text);
+    let resized = off.target().retained_stats();
+    assert_eq!(resized.builds, stats.builds + 1001);
+    gpu.refresh_chunks(off.target_mut(), &mut text);
+    assert_eq!(resized, off.target().retained_stats());
+    text.atlas_mut().clear();
+    gpu.refresh_chunks(off.target_mut(), &mut text);
+    let refreshed = off.target().retained_stats();
+    assert_eq!(refreshed.atlas_refreshes, resized.atlas_refreshes + 1000);
+    gpu.refresh_chunks(off.target_mut(), &mut text);
+    assert_eq!(refreshed, off.target().retained_stats());
+}
+
+#[test]
+#[ignore = "resident publication measurement: --profile perf -- --ignored --nocapture"]
+fn retained_1000_resident_publish_cost() {
+    let gpu = Gpu::new().expect("publication measurement requires GPU");
+    println!("adapter={}", gpu.adapter_info());
+    let mut text = TextSystem::new();
+    let mut off = gpu.offscreen(viewport());
+    let lists = resident_lists(1000);
+    let order: Vec<_> = (0..lists.len() as u64).collect();
+    off.target_mut().begin_chunks();
+    for (id, list) in order.iter().zip(&lists) {
+        gpu.upsert_chunk(off.target_mut(), *id, list.clone(), &mut text)
+            .unwrap();
+    }
+    gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
+        .unwrap();
+    let stats = off.target().retained_stats();
+    for mode in ["same-order", "rotating-order"] {
+        let mut order = order.clone();
+        let mut samples = Vec::new();
+        let mut phases: [Vec<f64>; 4] = Default::default();
+        for iteration in 0..140 {
+            if mode == "rotating-order" {
+                order.rotate_left(37);
+            }
+            off.target_mut().begin_chunks();
+            for (id, list) in order.iter().zip(&lists) {
+                gpu.upsert_chunk(off.target_mut(), *id, list.clone(), &mut text)
+                    .unwrap();
+            }
+            let started = std::time::Instant::now();
+            gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
+                .unwrap();
+            let elapsed = started.elapsed().as_secs_f64() * 1000.;
+            if iteration >= 20 {
+                samples.push(elapsed);
+                let p = off.target().retained_publish_profile();
+                for (values, value) in phases.iter_mut().zip([
+                    p.validation_ms,
+                    p.index_ms,
+                    p.swap_spare_ms,
+                    p.refresh_ms,
+                ]) {
+                    values.push(value);
+                }
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let p99 = samples[samples.len() * 99 / 100];
+        println!(
+            "resident mode={mode} chunks=1000 samples={} publish_p50_ms={:.3} publish_p99_ms={p99:.3}",
+            samples.len(),
+            samples[samples.len() / 2],
+        );
+        for (name, values) in ["validation", "index", "swap_spare", "refresh"]
+            .into_iter()
+            .zip(&mut phases)
+        {
+            values.sort_by(f64::total_cmp);
+            println!(
+                "{name}_p50_ms={:.3} {name}_p99_ms={:.3}",
+                values[values.len() / 2],
+                values[values.len() * 99 / 100],
+            );
+        }
+        assert_eq!(stats, off.target().retained_stats());
+        assert!(p99 < 10., "resident publication p99 {p99:.3} ms >= 10 ms");
+    }
+}
+
 #[test]
 fn camera_overlay_clips_paths_and_single_list_parity() {
     let Some(gpu) = gpu() else { return };

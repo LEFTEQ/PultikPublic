@@ -6,7 +6,7 @@ use crate::{Buffers, Frame, Gpu, GpuError, Target, Viewport};
 use canvas_draw::{Camera, DisplayList, Follow, Point, Rect, Rgba};
 use canvas_text::TextSystem;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -19,6 +19,16 @@ pub struct RetainedStats {
     pub builds: u64,
     pub tessellations: u64,
     pub atlas_refreshes: u64,
+}
+
+/// CPU bookkeeping for the last successful publication, excluding resource preparation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RetainedPublishProfile {
+    pub validation_ms: f64,
+    pub index_ms: f64,
+    pub swap_spare_ms: f64,
+    pub refresh_ms: f64,
+    pub index_rebuilt: bool,
 }
 
 #[repr(C)]
@@ -141,17 +151,23 @@ impl RunIndex {
 }
 #[derive(Default)]
 pub(crate) struct Scene {
-    resources: BTreeMap<ChunkId, Arc<Resource>>,
-    spare: BTreeMap<ChunkId, (Buffers, Option<crate::GrowBuffer>)>,
+    resources: HashMap<ChunkId, Arc<Resource>>,
+    spare: HashMap<ChunkId, (Buffers, Option<crate::GrowBuffer>)>,
     overlay: Option<Arc<Resource>>,
-    pending: Option<BTreeMap<ChunkId, Arc<Resource>>>,
+    pending: Option<HashMap<ChunkId, Arc<Resource>>>,
+    pending_changed: bool,
     pending_overlay: Option<Option<Arc<Resource>>>,
     visible: Vec<Arc<Resource>>,
+    visible_scratch: Vec<Arc<Resource>>,
+    seen: HashSet<ChunkId>,
+    refreshed: Option<(Viewport, u64)>,
     clear: [f64; 4],
     pub(crate) active: bool,
     stats: RetainedStats,
+    publish_profile: RetainedPublishProfile,
     runs: Vec<(usize, usize)>,
     indices: [RunIndex; 4],
+    index_entries: [Vec<(GridBounds, usize)>; 4],
     margins: [Point; 4],
     unbounded: Vec<usize>,
     selected: Vec<usize>,
@@ -190,6 +206,71 @@ impl Scene {
     pub(crate) fn has_paths(&self) -> bool {
         self.paths
     }
+    fn validate_order(&mut self, order: &[ChunkId]) -> Result<bool, GpuError> {
+        let pending = self.pending.as_ref().ok_or_else(transaction_required)?;
+        let overlay = self.pending_overlay.as_ref().expect("transaction overlay");
+        let mut unchanged = self.visible.len() == order.len() + usize::from(overlay.is_some());
+        self.seen.clear();
+        self.seen.reserve(order.len());
+        for (position, id) in order.iter().enumerate() {
+            let Some(resource) = pending.get(id).filter(|_| self.seen.insert(*id)) else {
+                return Err(GpuError::Surface(
+                    "unknown or duplicate retained chunk key".into(),
+                ));
+            };
+            unchanged &= self
+                .visible
+                .get(position)
+                .is_some_and(|old| Arc::ptr_eq(old, resource));
+        }
+        if let Some(overlay) = overlay {
+            unchanged &= self
+                .visible
+                .last()
+                .is_some_and(|old| Arc::ptr_eq(old, overlay));
+        }
+        Ok(unchanged)
+    }
+    fn publish_order(&mut self, order: &[ChunkId], unchanged: bool) {
+        if !unchanged {
+            let pending = self.pending.as_ref().expect("validated transaction");
+            self.visible_scratch
+                .extend(order.iter().map(|id| pending[id].clone()));
+            self.visible_scratch.extend(
+                self.pending_overlay
+                    .as_ref()
+                    .expect("transaction overlay")
+                    .iter()
+                    .cloned(),
+            );
+            std::mem::swap(&mut self.visible, &mut self.visible_scratch);
+            self.visible_scratch.clear();
+            self.rebuild_index();
+        }
+    }
+    fn commit_resources(&mut self) {
+        let resources = self.pending.take().expect("validated transaction");
+        let old = std::mem::replace(&mut self.resources, resources);
+        if self.pending_changed {
+            for (id, resource) in old {
+                if self
+                    .resources
+                    .get(&id)
+                    .is_some_and(|current| !Arc::ptr_eq(current, &resource))
+                    && let Ok(resource) = Arc::try_unwrap(resource)
+                {
+                    self.spare
+                        .insert(id, (resource.buffers, resource.quad_buffer));
+                }
+            }
+            self.spare.retain(|id, _| self.resources.contains_key(id));
+        }
+        self.pending_changed = false;
+        self.overlay = self.pending_overlay.take().expect("transaction overlay");
+    }
+    fn needs_refresh(&self, viewport: Viewport, generation: u64) -> bool {
+        self.refreshed != Some((viewport, generation))
+    }
     fn rebuild_index(&mut self) {
         self.runs.clear();
         self.unbounded.clear();
@@ -198,7 +279,9 @@ impl Scene {
         self.animated = false;
         self.paths = false;
         self.margins = [Point::ZERO; 4];
-        let mut entries: [Vec<(GridBounds, usize)>; 4] = Default::default();
+        for entries in &mut self.index_entries {
+            entries.clear();
+        }
         for (resource, r) in self.visible.iter().enumerate() {
             self.animated |= r.frame.animated;
             self.paths |= r.frame.has_paths();
@@ -212,7 +295,7 @@ impl Scene {
                     let i = b.follow.index();
                     self.margins[i].x = self.margins[i].x.max(b.margin.x);
                     self.margins[i].y = self.margins[i].y.max(b.margin.y);
-                    entries[i].push((
+                    self.index_entries[i].push((
                         GridBounds {
                             min: b.world.origin(),
                             max: Point::new(b.world.max_x(), b.world.max_y()),
@@ -224,7 +307,7 @@ impl Scene {
                 }
             }
         }
-        for (index, entries) in self.indices.iter_mut().zip(&mut entries) {
+        for (index, entries) in self.indices.iter_mut().zip(&mut self.index_entries) {
             index.nodes.clear();
             index.root = index.build(entries);
         }
@@ -279,19 +362,26 @@ impl Target {
         self.retained.stats
     }
 
+    pub fn retained_publish_profile(&self) -> RetainedPublishProfile {
+        self.retained.publish_profile
+    }
+
     /// Start (or abandon and restart) a transaction from the last published set.
     pub fn begin_chunks(&mut self) {
         self.retained.pending = Some(self.retained.resources.clone());
+        self.retained.pending_changed = false;
         self.retained.pending_overlay = Some(self.retained.overlay.clone());
     }
 
     /// Remove from the transaction; the published set remains untouched.
     pub fn remove_chunk(&mut self, id: ChunkId) -> Result<(), GpuError> {
-        self.retained
+        let removed = self
+            .retained
             .pending
             .as_mut()
             .ok_or_else(transaction_required)?
             .remove(&id);
+        self.retained.pending_changed |= removed.is_some();
         Ok(())
     }
 }
@@ -611,6 +701,8 @@ impl Gpu {
             .as_mut()
             .expect("checked above")
             .insert(id, resource);
+        target.retained.pending_changed = true;
+        target.retained.refreshed = None;
         self.upload_atlas(text);
         Ok(())
     }
@@ -627,6 +719,9 @@ impl Gpu {
             .pending_overlay
             .as_ref()
             .ok_or_else(transaction_required)?;
+        if previous.is_none() && list.is_none() {
+            return Ok(());
+        }
         if let (Some(old), Some(list)) = (previous, &list)
             && Arc::ptr_eq(&old.list, list)
             && old.viewport == target.viewport
@@ -638,6 +733,7 @@ impl Gpu {
         let resource =
             list.map(|list| self.chunk_resource(target, list, previous.as_deref(), None, text));
         target.retained.pending_overlay = Some(resource);
+        target.retained.refreshed = None;
         self.upload_atlas(text);
         Ok(())
     }
@@ -652,60 +748,37 @@ impl Gpu {
         clear: Rgba,
         text: &mut TextSystem,
     ) -> Result<(), GpuError> {
-        let pending = target
-            .retained
-            .pending
-            .as_ref()
-            .ok_or_else(transaction_required)?;
-        let mut seen = BTreeSet::new();
-        if order
-            .iter()
-            .any(|id| !pending.contains_key(id) || !seen.insert(*id))
-        {
-            return Err(GpuError::Surface(
-                "unknown or duplicate retained chunk key".into(),
-            ));
-        }
-        let resources = target.retained.pending.take().expect("checked above");
-        let overlay = target
-            .retained
-            .pending_overlay
-            .take()
-            .expect("transaction overlay");
-        let mut visible: Vec<_> = order.iter().map(|id| resources[id].clone()).collect();
-        visible.extend(overlay.iter().cloned());
-        target.retained.visible = visible;
-        target.retained.rebuild_index();
-        let old = std::mem::replace(&mut target.retained.resources, resources);
-        for (id, resource) in old {
-            if target
-                .retained
-                .resources
-                .get(&id)
-                .is_some_and(|current| !Arc::ptr_eq(current, &resource))
-                && let Ok(resource) = Arc::try_unwrap(resource)
-            {
-                target
-                    .retained
-                    .spare
-                    .insert(id, (resource.buffers, resource.quad_buffer));
-            }
-        }
-        target
-            .retained
-            .spare
-            .retain(|id, _| target.retained.resources.contains_key(id));
-        target.retained.overlay = overlay;
+        let started = crate::Instant::now();
+        let mut profile = RetainedPublishProfile::default();
+        let unchanged = target.retained.validate_order(order)?;
+        profile.validation_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = crate::Instant::now();
+        target.retained.publish_order(order, unchanged);
+        profile.index_ms = started.elapsed().as_secs_f64() * 1000.;
+        profile.index_rebuilt = !unchanged;
+        let started = crate::Instant::now();
+        target.retained.commit_resources();
         target.retained.clear = crate::frame::premul64(clear);
         target.retained.active = true;
         target.uploaded = true;
+        profile.swap_spare_ms = started.elapsed().as_secs_f64() * 1000.;
+        let started = crate::Instant::now();
         self.refresh_chunks(target, text);
+        profile.refresh_ms = started.elapsed().as_secs_f64() * 1000.;
+        target.retained.publish_profile = profile;
         Ok(())
     }
 
     /// Call before a retained redraw when another surface may have reset the shared
     /// atlas, or after resize. The normal camera-only path does no builds/uploads.
     pub fn refresh_chunks(&self, target: &mut Target, text: &mut TextSystem) {
+        if !target
+            .retained
+            .needs_refresh(target.viewport, text.atlas().generation())
+        {
+            self.upload_atlas(text);
+            return;
+        }
         let mut scene = std::mem::take(&mut target.retained);
         // Map pointer identities once so visible and staged aliases stay shared.
         let mut replacements = BTreeMap::<usize, Arc<Resource>>::new();
@@ -765,6 +838,7 @@ impl Gpu {
         if !replacements.is_empty() {
             scene.rebuild_index();
         }
+        scene.refreshed = Some((target.viewport, text.atlas().generation()));
         target.retained = scene;
         self.upload_atlas(text);
     }
@@ -822,6 +896,248 @@ mod tests {
         );
         assert_eq!(scene.selected, [2, 3]);
     }
+    #[test]
+    fn median_index_matches_brute_force_and_reuses_nodes() {
+        let mut entries: Vec<_> = (0..1000)
+            .map(|i| {
+                let x = ((i * 7919) % 997) as f32 - 500.;
+                let y = ((i * 104729) % 991) as f32 - 500.;
+                (
+                    GridBounds {
+                        min: Point::new(x, y),
+                        max: Point::new(x + (i % 53) as f32, y + (i % 37) as f32),
+                    },
+                    i,
+                )
+            })
+            .collect();
+        entries.push((
+            GridBounds {
+                min: Point::new(-f32::MAX, -f32::MAX),
+                max: Point::new(f32::MAX, f32::MAX),
+            },
+            entries.len(),
+        ));
+        let mut index = RunIndex::default();
+        index.root = index.build(&mut entries);
+        assert_eq!(index.nodes.len(), entries.len() * 2 - 1);
+        let allocation = index.nodes.as_ptr();
+        index.nodes.clear();
+        entries.reverse();
+        index.root = index.build(&mut entries);
+        assert_eq!(allocation, index.nodes.as_ptr());
+        for i in 0..100 {
+            let x = (i * 17 % 1000) as f32 - 500.;
+            let y = (i * 29 % 1000) as f32 - 500.;
+            let viewport = GridBounds {
+                min: Point::new(x, y),
+                max: Point::new(x + 80., y + 60.),
+            };
+            let mut selected = Vec::new();
+            index.query(index.root.unwrap(), viewport, &mut selected);
+            selected.sort_unstable();
+            let mut expected: Vec<_> = entries
+                .iter()
+                .filter(|(bounds, _)| bounds.intersects(viewport))
+                .map(|(_, run)| *run)
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(selected, expected);
+        }
+        for entry in &mut entries {
+            entry.0 = GridBounds::default();
+        }
+        index.nodes.clear();
+        index.root = index.build(&mut entries);
+        let mut selected = Vec::new();
+        index.query(index.root.unwrap(), GridBounds::default(), &mut selected);
+        assert_eq!(selected.len(), entries.len());
+        assert!(index.build(&mut []).is_none());
+    }
+
+    fn resident_scene() -> (Scene, Viewport, Vec<ChunkId>, Vec<(GridBounds, usize)>) {
+        let viewport = Viewport {
+            width_px: 320,
+            height_px: 180,
+            scale: 1.,
+        };
+        let mut scene = Scene::default();
+        let order: Vec<_> = (0..1000).collect();
+        let mut entries = Vec::new();
+        for id in &order {
+            let x = (id % 40) as f32 * 72.;
+            let y = (id / 40) as f32 * 32.;
+            let mut list = DisplayList::new(Rgba::BLACK);
+            list.rect(canvas_draw::RoundedRect::new(
+                Rect::new(x, y, 68., 28.),
+                4.,
+                Rgba::WHITE,
+            ));
+            list.text(canvas_draw::TextRun::new(
+                format!("Node {id}"),
+                Point::new(x, y),
+                12.,
+                Rgba::WHITE,
+            ));
+            scene.resources.insert(
+                *id,
+                Arc::new(Resource {
+                    quad_buffer: None,
+                    follows: [false, false, false, true],
+                    bundles: Vec::new(),
+                    list: Arc::new(list),
+                    frame: Frame::default(),
+                    buffers: Buffers::default(),
+                    generation: 7,
+                    atlas_dependent: true,
+                    viewport,
+                }),
+            );
+            for run in 0..3 {
+                entries.push((
+                    GridBounds {
+                        min: Point::new(x, y + run as f32),
+                        max: Point::new(x + 68., y + 28.),
+                    },
+                    entries.len(),
+                ));
+            }
+        }
+        scene
+            .visible
+            .extend(order.iter().map(|id| scene.resources[id].clone()));
+        scene.indices[3].root = scene.indices[3].build(&mut entries);
+        scene.refreshed = Some((viewport, 7));
+        (scene, viewport, order, entries)
+    }
+
+    #[test]
+    fn resident_bookkeeping_skips_index_and_matches_full_rebuild() {
+        let (mut scene, viewport, order, mut entries) = resident_scene();
+        let mut rebuilt = RunIndex::default();
+        rebuilt.root = rebuilt.build(&mut entries);
+        scene.pending = Some(scene.resources.clone());
+        scene.pending_overlay = Some(None);
+        assert!(scene.validate_order(&[0, 0]).is_err());
+        assert!(scene.validate_order(&[u64::MAX]).is_err());
+        let unchanged = scene.validate_order(&order).unwrap();
+        assert!(unchanged);
+        let nodes = scene.indices[3].nodes.as_ptr();
+        let visible = scene.visible.as_ptr();
+        scene.publish_order(&order, unchanged);
+        scene.commit_resources();
+        assert_eq!(nodes, scene.indices[3].nodes.as_ptr());
+        assert_eq!(visible, scene.visible.as_ptr());
+        assert!(!scene.needs_refresh(viewport, 7));
+        assert!(scene.needs_refresh(viewport, 8));
+        assert!(scene.needs_refresh(
+            Viewport {
+                scale: 2.,
+                ..viewport
+            },
+            7
+        ));
+        for i in 0..100 {
+            let bounds = GridBounds {
+                min: Point::new(i as f32 * 19., i as f32 * 3.),
+                max: Point::new(i as f32 * 19. + 320., i as f32 * 3. + 180.),
+            };
+            let mut actual = Vec::new();
+            let mut expected = Vec::new();
+            scene.indices[3].query(scene.indices[3].root.unwrap(), bounds, &mut actual);
+            rebuilt.query(rebuilt.root.unwrap(), bounds, &mut expected);
+            actual.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn retained_resident_bookkeeping_cost() {
+        let (mut scene, viewport, order, _) = resident_scene();
+        let mut samples = Vec::new();
+        let mut phases: [Vec<f64>; 4] = Default::default();
+        for iteration in 0..140 {
+            scene.pending = Some(scene.resources.clone());
+            scene.pending_overlay = Some(None);
+            let started = std::time::Instant::now();
+            let unchanged = scene.validate_order(&order).unwrap();
+            let validation = started.elapsed().as_secs_f64() * 1000.;
+            assert!(unchanged, "same-order publication must skip rebuild_index");
+            let phase = std::time::Instant::now();
+            scene.publish_order(&order, unchanged);
+            let index = phase.elapsed().as_secs_f64() * 1000.;
+            let phase = std::time::Instant::now();
+            scene.commit_resources();
+            let swap = phase.elapsed().as_secs_f64() * 1000.;
+            let phase = std::time::Instant::now();
+            assert!(!std::hint::black_box(scene.needs_refresh(viewport, 7)));
+            let refresh = phase.elapsed().as_secs_f64() * 1000.;
+            if iteration >= 20 {
+                samples.push(started.elapsed().as_secs_f64() * 1000.);
+                for (values, value) in phases.iter_mut().zip([validation, index, swap, refresh]) {
+                    values.push(value);
+                }
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let p99 = samples[samples.len() * 99 / 100];
+        println!(
+            "resident_cpu chunks=1000 synthetic_runs=3000 p50_ms={:.3} p99_ms={p99:.3}",
+            samples[samples.len() / 2]
+        );
+        for (name, values) in ["validation", "index_skip", "swap_spare", "refresh_skip"]
+            .into_iter()
+            .zip(&mut phases)
+        {
+            values.sort_by(f64::total_cmp);
+            println!(
+                "{name}_p50_ms={:.3} {name}_p99_ms={:.3}",
+                values[values.len() / 2],
+                values[values.len() * 99 / 100]
+            );
+        }
+        assert!(p99 < 20., "resident bookkeeping p99 {p99:.3} ms >= 20 ms");
+    }
+
+    #[test]
+    #[ignore = "CPU-only index measurement: --profile perf -- --ignored --nocapture"]
+    fn retained_index_build_cost() {
+        for count in [1000, 10000] {
+            let mut entries: Vec<_> = (0..count)
+                .map(|i| {
+                    let x = ((i * 7919) % 997) as f32 * 10.;
+                    let y = ((i * 104729) % 991) as f32 * 10.;
+                    (
+                        GridBounds {
+                            min: Point::new(x, y),
+                            max: Point::new(x + 68., y + 28.),
+                        },
+                        i,
+                    )
+                })
+                .collect();
+            let mut index = RunIndex::default();
+            let mut samples = Vec::new();
+            for iteration in 0..140 {
+                index.nodes.clear();
+                let started = std::time::Instant::now();
+                index.root = std::hint::black_box(index.build(&mut entries));
+                let ms = started.elapsed().as_secs_f64() * 1000.;
+                if iteration >= 20 {
+                    samples.push(ms);
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "index_runs={count} p50_ms={:.3} p99_ms={:.3}",
+                samples[samples.len() / 2],
+                samples[samples.len() * 99 / 100],
+            );
+            assert!(samples[samples.len() * 99 / 100] < 20.);
+        }
+    }
+
     #[test]
     fn mixed_follow_runs_have_no_cull_bound_and_pinned_bounds_keep_pixel_margins() {
         let batches = [crate::Batch {
