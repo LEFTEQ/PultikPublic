@@ -275,7 +275,9 @@ fn retained_1000_resident_publish_cost() {
     gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
         .unwrap();
     let stats = off.target().retained_stats();
-    for mode in ["same-order", "rotating-order"] {
+    // A label-band change: every chunk gets a new list (equal content, new Arc).
+    let bands = [resident_lists(1000), lists.clone()];
+    for mode in ["same-order", "rotating-order", "band-change"] {
         let mut order = order.clone();
         let mut samples = Vec::new();
         let mut phases: [Vec<f64>; 4] = Default::default();
@@ -284,8 +286,15 @@ fn retained_1000_resident_publish_cost() {
                 order.rotate_left(37);
             }
             off.target_mut().begin_chunks();
-            for (id, list) in order.iter().zip(&lists) {
-                gpu.upsert_chunk(off.target_mut(), *id, list.clone(), &mut text)
+            let lists = if mode == "band-change" {
+                &bands[iteration % 2]
+            } else {
+                &lists
+            };
+            // Each id keeps its own list: a rotated order alone must rebuild nothing.
+            for id in &order {
+                let list = lists[*id as usize].clone();
+                gpu.upsert_chunk(off.target_mut(), *id, list, &mut text)
                     .unwrap();
             }
             let started = std::time::Instant::now();
@@ -323,7 +332,15 @@ fn retained_1000_resident_publish_cost() {
                 values[values.len() * 99 / 100],
             );
         }
-        assert_eq!(stats, off.target().retained_stats());
+        if mode == "band-change" {
+            assert!(off.target().retained_publish_profile().index_rebuilt);
+            // Only the last publication's retirements wait: the upserts before it
+            // reclaimed every earlier one.
+            assert_eq!(off.target_mut().reclaim_chunks(0), lists.len());
+            assert_eq!(off.target_mut().reclaim_chunks(usize::MAX), 0);
+        } else {
+            assert_eq!(stats, off.target().retained_stats());
+        }
         assert!(p99 < 10., "resident publication p99 {p99:.3} ms >= 10 ms");
     }
 }

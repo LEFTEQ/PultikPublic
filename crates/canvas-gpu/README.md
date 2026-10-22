@@ -89,10 +89,14 @@ Each clip run retains conservative geometry bounds and its Follow class when its
 bundles are built. Bounds come from prepared shapes, glyph anchors/pixel extents,
 cells and tessellated path vertices, so pinned geometry and fixed-size text keep
 their screen-space margins at every zoom. Mixed-Follow or unknown bounds remain
-unculled. Publication builds a balanced spatial hierarchy per Follow class and
-caches aggregate path/animation/uniform flags. Camera changes query those indexes,
-restore painter order, and retain the selection allocation; an unchanged camera
-and publication reuse the selection without walking all chunks.
+unculled. The index has two levels. Preparing a chunk (`upsert_chunk`, a refresh)
+builds its own median-split hierarchy per Follow class over its runs. Publication
+builds only the top level: one hierarchy per Follow class over the visible chunks'
+bounds, O(C log C) in chunks rather than O(R log R) in runs. It also caches the
+aggregate path/animation/uniform flags. Camera changes query the top level, then
+each hit chunk's own hierarchy, restore painter order as (chunk position, run)
+and retain the selection allocation; an unchanged camera and publication reuse
+the selection without walking all chunks.
 
 Consecutive selected runs sharing a scissor execute in one bundle call. Culling
 never reorders runs, changes a clip, removes the overlay ordering or uploads a
@@ -131,10 +135,20 @@ set and resident resources use a hash map. It still rejects unknown/duplicate ke
 before consuming staging or changing the published clear, overlay or geometry.
 
 An identical painter order reuses the visible Arcs, hierarchy and camera selection.
-Changed orders/subsets retain the existing median-split hierarchy builder and its
-O(R log R) work, preserving its qualified culling behavior. Hierarchy nodes and
-per-Follow input entries retain their allocations. Unchanged transactions skip
-old-map pointer lookups and spare retention scans. Refresh
+A changed order or subset (a label-band change replaces every chunk) rebuilds only
+the top level over chunk bounds; each chunk keeps the median-split hierarchy it
+was prepared with, so culling selects exactly the runs the flat hierarchy did.
+Top-level nodes and per-Follow input entries retain their allocations. Spare
+recycling is recorded when it happens: an upsert that replaces a published
+resource and a removal each note their key, and the commit visits only those keys
+instead of scanning the old map and every spare. The commit drops nothing either:
+it queues the retired resources (and a removed key's orphaned spare) because
+dropping ~1,000 replaced chunks' bundles and frames inside the swap cost 5.6 ms
+native. Each building `upsert_chunk` reclaims two queued entries, oldest first
+(a replaced key's buffers become its spare, the rest is dropped), so preparation
+pays for them. `Target::reclaim_chunks(max)` reclaims more from a host's idle or
+reclaim budget and answers how many remain; a host that removes chunks without
+preparing new ones calls it, or they wait until the next upsert. Refresh
 remembers the validated viewport/atlas generation; unchanged epochs skip the
 resource walk, while new resources, viewport changes and atlas resets invalidate
 that shortcut. Atlas upload draining still occurs on a skipped refresh.
@@ -146,19 +160,29 @@ cargo test -p canvas-gpu --profile perf --test retained retained_1000_resident_p
 ```
 
 The CPU-only bookkeeping and index measurements need no adapter. Bookkeeping uses
-1,000 synthetic resident resources with shape/label lists and 3,000 indexed runs;
-it calls the production validation, order-publication, map-commit and refresh-epoch
-helpers, asserts same-order index skipping and applies a generous 20 ms p99 bound.
-A separate CPU test compares queries from the preserved index to a full rebuild.
+1,000 synthetic resident resources with 3,000 indexed runs; it calls the
+production validation, order-publication, map-commit and refresh-epoch helpers in
+two modes, same-order (asserting the index skip) and band-change (every chunk
+replaced outside the timer, asserting every replaced chunk recycles), each with a
+generous 20 ms p99 bound. A separate CPU test checks the two-level selection
+against every run's own bounds test across 100 cameras after a reordering.
 The ignored GPU publication fixture requires
 one explicitly (it never reports a skipped run as measured), builds 1,000 chunks
 with labels and rounded shapes, publishes, re-upserts the same Arcs and times only
-publication. It prints p50/p99 for the total and each phase, both for unchanged and
-rotating painter orders. Its generous p99 regression ceiling is 10 ms; qualification
+publication. It prints p50/p99 for the total and each phase for unchanged and
+rotating painter orders, and for a band change that upserts a new list into every
+chunk before each publication. Its generous p99 regression ceiling is 10 ms; qualification
 target is well below 2 ms in an optimized native build. The non-ignored pixel test
 also checks second-publication equality, overlay-last order, rejected-publication
 retry, reordered resident chunks, resize and atlas-reset refresh invalidation.
 No native GPU measurement or browser qualification is implied by these fixtures.
+
+Apple M3 Max / Metal, perf profile, 2026-10-23 (Mac under load ~16), 120 samples
+after 20 warmups: a band change over 1,000 chunks published at p50 0.197 ms / p99
+1.434 ms (index 0.150 / 1.379, swap/spare 0.010 / 0.054). With the two-level
+index but drops still inside the commit, the same publication spent 5.6 / 10.3 ms
+in swap/spare. A rotated order of unchanged chunks published at 0.093 / 0.707 ms,
+an identical one at 0.018 / 0.019 ms.
 
 ## Browser host
 
