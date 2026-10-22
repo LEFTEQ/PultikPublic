@@ -7,7 +7,7 @@ use crate::term::{RunGlyph, TermMetrics};
 use crate::{FontSpec, Metrics, ShapedGlyph, ShapedLine, Weight};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
+use web_sys::{CanvasRenderingContext2d, ContextAttributes2d, HtmlCanvasElement};
 
 #[derive(Clone, PartialEq)]
 struct Face {
@@ -32,6 +32,7 @@ impl Face {
 pub(crate) struct Platform {
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
+    selected: Option<(u16, f32)>,
     faces: Vec<Face>,
     runs: Vec<String>,
     run_ids: HashMap<String, u32>,
@@ -48,8 +49,10 @@ impl Platform {
             .expect("create text canvas")
             .dyn_into()
             .expect("canvas element");
+        let options = ContextAttributes2d::new();
+        options.set_will_read_frequently(true);
         let context = canvas
-            .get_context("2d")
+            .get_context_with_context_options("2d", &options)
             .expect("query Canvas2D")
             .expect("Canvas2D is required for text rasterization")
             .dyn_into()
@@ -57,6 +60,7 @@ impl Platform {
         Self {
             canvas,
             context,
+            selected: None,
             faces: Vec::new(),
             runs: Vec::new(),
             run_ids: HashMap::new(),
@@ -82,10 +86,15 @@ impl Platform {
         id
     }
 
-    fn select(&self, font: u16, px: f32) {
+    fn select(&mut self, font: u16, px: f32) {
+        if self.selected == Some((font, px)) {
+            return;
+        }
         self.context.set_font(&self.faces[font as usize].css(px));
         self.context.set_text_baseline("alphabetic");
         self.context.set_text_align("left");
+        self.context.set_fill_style_str("white");
+        self.selected = Some((font, px));
     }
 
     pub(crate) fn metrics(&mut self, spec: FontSpec) -> Metrics {
@@ -192,8 +201,10 @@ impl Platform {
 
     pub(crate) fn rasterize(&mut self, key: &GlyphKey) -> RasterGlyph {
         self.select(key.font, key.size_px());
-        let text = &self.runs[key.glyph as usize];
-        let m = self.context.measure_text(text).expect("measure ink bounds");
+        let m = self
+            .context
+            .measure_text(&self.runs[key.glyph as usize])
+            .expect("measure ink bounds");
         let sub = f64::from(key.subpixel) * 0.25;
         let left = (sub - m.actual_bounding_box_left()).floor() as i32 - 1;
         let right = (sub + m.actual_bounding_box_right()).ceil() as i32 + 1;
@@ -211,12 +222,23 @@ impl Platform {
             );
             return RasterGlyph::empty();
         }
-        self.canvas.set_width(width);
-        self.canvas.set_height(height);
+        if width > self.canvas.width() {
+            self.canvas.set_width(width);
+            self.selected = None;
+        }
+        if height > self.canvas.height() {
+            self.canvas.set_height(height);
+            self.selected = None;
+        }
         self.select(key.font, key.size_px());
-        self.context.set_fill_style_str("white");
         self.context
-            .fill_text(text, -f64::from(left) + sub, f64::from(top))
+            .clear_rect(0.0, 0.0, f64::from(width), f64::from(height));
+        self.context
+            .fill_text(
+                &self.runs[key.glyph as usize],
+                -f64::from(left) + sub,
+                f64::from(top),
+            )
             .expect("rasterize text run");
         let rgba = self
             .context

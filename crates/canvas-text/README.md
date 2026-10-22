@@ -8,6 +8,8 @@ One shaping/cache/atlas owner for `canvas-gpu`.
   into the existing alpha atlas. No font assets or second GPU stack are bundled.
   Construct `TextSystem` on the browser main thread, after required web fonts
   have loaded. Browser font selection and rasterization are platform-dependent.
+  The text canvas requests frequent CPU readback and keeps a grow-only backing
+  store, clearing and reading only each run's ink rectangle.
 
 Browser UI labels are shaped as whole runs, preserving contextual shaping and
 ligatures. Runs must fit a 1022-pixel atlas interior; use `max_width`/truncation
