@@ -27,7 +27,7 @@ objc2-core-graphics.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 unicode-segmentation.workspace = true
 wasm-bindgen = "0.2.129"
-web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlCanvasElement", "CanvasRenderingContext2d", "TextMetrics", "ImageData"] }
+web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlCanvasElement", "CanvasRenderingContext2d", "ContextAttributes2d", "TextMetrics", "ImageData"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest.workspace = true
