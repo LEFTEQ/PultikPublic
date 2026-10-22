@@ -96,7 +96,8 @@ and publication reuse the selection without walking all chunks.
 
 Consecutive selected runs sharing a scissor execute in one bundle call. Culling
 never reorders runs, changes a clip, removes the overlay ordering or uploads a
-resource. Publication/atlas refresh invalidates the index and camera cache.
+resource. Changed publications and atlas refreshes invalidate the index and camera
+cache; republishing the same resource pointers in the same order preserves both.
 `CpuFrameProfile` additionally exposes `cull_ms`, `retained_runs`, `executed_runs`
 and `bundle_calls` for qualification.
 
@@ -119,6 +120,45 @@ The Devbox Rust image has no native graphics adapter: portable GPU integration
 tests return early there. The retained pixel/culling tests and both measurements
 above were therefore also run against the actual Metal adapter. The Wasm browser
 harness build passed on Devbox; no browser execution is claimed by this change.
+
+### Resident publication bookkeeping
+
+`Target::retained_publish_profile` reports validation, visible-list/index work,
+resource swap/spare recycling and refresh wall time for the last successful
+publication. Preparation (`begin_chunks`, upserts and overlay changes), GPU
+submission and readback are outside these timings. Validation uses a reusable hash
+set and resident resources use a hash map. It still rejects unknown/duplicate keys
+before consuming staging or changing the published clear, overlay or geometry.
+
+An identical painter order reuses the visible Arcs, hierarchy and camera selection.
+Changed orders/subsets retain the existing median-split hierarchy builder and its
+O(R log R) work, preserving its qualified culling behavior. Hierarchy nodes and
+per-Follow input entries retain their allocations. Unchanged transactions skip
+old-map pointer lookups and spare retention scans. Refresh
+remembers the validated viewport/atlas generation; unchanged epochs skip the
+resource walk, while new resources, viewport changes and atlas resets invalidate
+that shortcut. Atlas upload draining still occurs on a skipped refresh.
+
+```sh
+cargo test -p canvas-gpu --profile perf --lib retained_resident_bookkeeping_cost -- --nocapture
+cargo test -p canvas-gpu --profile perf --lib retained_index_build_cost -- --ignored --nocapture
+cargo test -p canvas-gpu --profile perf --test retained retained_1000_resident_publish_cost -- --ignored --nocapture
+```
+
+The CPU-only bookkeeping and index measurements need no adapter. Bookkeeping uses
+1,000 synthetic resident resources with shape/label lists and 3,000 indexed runs;
+it calls the production validation, order-publication, map-commit and refresh-epoch
+helpers, asserts same-order index skipping and applies a generous 20 ms p99 bound.
+A separate CPU test compares queries from the preserved index to a full rebuild.
+The ignored GPU publication fixture requires
+one explicitly (it never reports a skipped run as measured), builds 1,000 chunks
+with labels and rounded shapes, publishes, re-upserts the same Arcs and times only
+publication. It prints p50/p99 for the total and each phase, both for unchanged and
+rotating painter orders. Its generous p99 regression ceiling is 10 ms; qualification
+target is well below 2 ms in an optimized native build. The non-ignored pixel test
+also checks second-publication equality, overlay-last order, rejected-publication
+retry, reordered resident chunks, resize and atlas-reset refresh invalidation.
+No native GPU measurement or browser qualification is implied by these fixtures.
 
 ## Browser host
 
