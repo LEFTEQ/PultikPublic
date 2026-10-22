@@ -83,6 +83,43 @@ readback/GPU fences are outside every measured region. It does not claim a GPU
 duration, compositor measurement or CAMetalLayer present latency. The MSAA path
 remains one pass and one resolve, never one per chunk.
 
+### Viewport-selected retained submissions
+
+Each clip run retains conservative geometry bounds and its Follow class when its
+bundles are built. Bounds come from prepared shapes, glyph anchors/pixel extents,
+cells and tessellated path vertices, so pinned geometry and fixed-size text keep
+their screen-space margins at every zoom. Mixed-Follow or unknown bounds remain
+unculled. Publication builds a balanced spatial hierarchy per Follow class and
+caches aggregate path/animation/uniform flags. Camera changes query those indexes,
+restore painter order, and retain the selection allocation; an unchanged camera
+and publication reuse the selection without walking all chunks.
+
+Consecutive selected runs sharing a scissor execute in one bundle call. Culling
+never reorders runs, changes a clip, removes the overlay ordering or uploads a
+resource. Publication/atlas refresh invalidates the index and camera cache.
+`CpuFrameProfile` additionally exposes `cull_ms`, `retained_runs`, `executed_runs`
+and `bundle_calls` for qualification.
+
+Apple M3 Max / Metal, optimized native measurement: the 20,000-key grid with a
+320×180 viewport executed 252 runs in one bundle call. Over 200 measured camera
+submissions after 40 warmups, p50 was 0.411 ms, p99 2.161 ms, max 34.290 ms;
+selection-query p99 was 0.022 ms. GPU readback/fences were outside the timer and
+resource upload/build/tessellation counters stayed unchanged. This is CPU
+submission evidence, not a browser or GPU-duration claim. The existing 64-chunk
+5k-label/15k-edge gate measured camera p99 0.287 ms and single-key replacement
+p99 0.641 ms (1,200 samples after 120 warmups), preserving the earlier native
+camera level within measurement variation.
+
+```sh
+cargo test -p canvas-gpu --profile perf --test retained retained_20k_visible_submission_cost -- --ignored --nocapture
+cargo test -p canvas-gpu --profile perf --test retained retained_cpu_frame_cost -- --ignored --nocapture
+```
+
+The Devbox Rust image has no native graphics adapter: portable GPU integration
+tests return early there. The retained pixel/culling tests and both measurements
+above were therefore also run against the actual Metal adapter. The Wasm browser
+harness build passed on Devbox; no browser execution is claimed by this change.
+
 ## Browser host
 
 Call `Gpu::for_canvas(canvas, backing_scale).await` on the main thread. It selects

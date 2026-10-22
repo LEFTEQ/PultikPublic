@@ -286,6 +286,159 @@ fn atlas_reset_refreshes_only_atlas_dependent_chunks() {
 }
 
 #[test]
+fn viewport_culls_and_camera_reincludes_edge_straddling_runs_without_uploads() {
+    let Some(gpu) = gpu() else { return };
+    let mut text = TextSystem::new();
+    let mut off = gpu.offscreen(viewport());
+    off.target_mut().begin_chunks();
+    for (id, x) in [(1, 8.), (2, 90.), (3, 500.)] {
+        gpu.upsert_chunk(off.target_mut(), id, rect(Rgba::WHITE, x), &mut text)
+            .unwrap();
+    }
+    gpu.publish_chunks(off.target_mut(), &[1, 2, 3], Rgba::BLACK, &mut text)
+        .unwrap();
+    gpu.redraw_offscreen(&mut off).unwrap();
+    let profile = off.target().cpu_profile();
+    assert_eq!(profile.retained_runs, 3);
+    assert_eq!(profile.executed_runs, 2);
+    assert_eq!(profile.bundle_calls, 1);
+    assert_eq!(pixel(&gpu, &off, 94, 20), [255, 255, 255, 255]);
+    let before = off.target().retained_stats();
+    gpu.set_camera(
+        off.target_mut(),
+        Camera {
+            offset: Point::new(-490., 0.),
+            ..Camera::IDENTITY
+        },
+    );
+    gpu.redraw_offscreen(&mut off).unwrap();
+    assert_eq!(off.target().cpu_profile().executed_runs, 1);
+    assert_eq!(pixel(&gpu, &off, 20, 20), [255, 255, 255, 255]);
+    assert_eq!(before, off.target().retained_stats());
+}
+#[test]
+fn culling_keeps_painter_scissors_and_follow_pixels_equal_to_immediate() {
+    let Some(gpu) = gpu() else { return };
+    let mut text = TextSystem::new();
+    let mut off = gpu.offscreen(viewport());
+    let mut immediate = gpu.offscreen(viewport());
+    let mut all = DisplayList::new(Rgba::BLACK);
+    off.target_mut().begin_chunks();
+    let mut order = Vec::new();
+    for (i, follow) in [Follow::NONE, Follow::X, Follow::Y, Follow::BOTH]
+        .into_iter()
+        .enumerate()
+    {
+        let mut dl = DisplayList::new(Rgba::BLACK);
+        dl.push_camera(follow);
+        dl.push_clip(Rect::new(10., 4., 70., 50.));
+        dl.rect(RoundedRect::new(
+            Rect::new(4., 8., 40., 32.),
+            0.,
+            Rgba::hex(0x885522).with_alpha(0.5),
+        ));
+        dl.pop_clip();
+        dl.rect(RoundedRect::new(
+            Rect::new(35., 12., 24., 24.),
+            0.,
+            Rgba::hex(0x225588).with_alpha(0.5),
+        ));
+        dl.pop_camera();
+        all.ops.extend(dl.ops.iter().cloned());
+        let id = i as u64;
+        order.push(id);
+        gpu.upsert_chunk(off.target_mut(), id, Arc::new(dl), &mut text)
+            .unwrap();
+    }
+    gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
+        .unwrap();
+    gpu.render_offscreen(&mut immediate, &all, &mut text)
+        .unwrap();
+    for camera in [
+        Camera::IDENTITY,
+        Camera {
+            offset: Point::new(-30., 12.),
+            scale: Point::new(0.4, 1.3),
+        },
+        Camera {
+            offset: Point::new(120., 0.),
+            ..Camera::IDENTITY
+        },
+    ] {
+        gpu.set_camera(off.target_mut(), camera);
+        gpu.set_camera(immediate.target_mut(), camera);
+        gpu.redraw_offscreen(&mut off).unwrap();
+        gpu.redraw_offscreen(&mut immediate).unwrap();
+        assert_eq!(
+            gpu.read_offscreen(&off).unwrap().2,
+            gpu.read_offscreen(&immediate).unwrap().2
+        );
+    }
+}
+#[test]
+#[ignore = "20k retained culling measurement: --profile perf -- --ignored --nocapture"]
+fn retained_20k_visible_submission_cost() {
+    let gpu = Gpu::new().expect("measurement requires GPU");
+    println!("adapter={}", gpu.adapter_info());
+    let mut text = TextSystem::new();
+    let mut off = gpu.offscreen(Viewport {
+        width_px: 320,
+        height_px: 180,
+        scale: 1.,
+    });
+    off.target_mut().begin_chunks();
+    let order: Vec<_> = (0..20000).collect();
+    for id in &order {
+        let mut list = DisplayList::new(Rgba::BLACK);
+        list.push_camera(Follow::BOTH);
+        list.rect(RoundedRect::new(
+            Rect::new((*id % 200) as f32 * 16., (*id / 200) as f32 * 16., 12., 12.),
+            0.,
+            Rgba::WHITE,
+        ));
+        list.pop_camera();
+        gpu.upsert_chunk(off.target_mut(), *id, Arc::new(list), &mut text)
+            .unwrap();
+    }
+    gpu.publish_chunks(off.target_mut(), &order, Rgba::BLACK, &mut text)
+        .unwrap();
+    let before = off.target().retained_stats();
+    let mut samples = Vec::new();
+    let mut cull = Vec::new();
+    for iteration in 0..240 {
+        let start = std::time::Instant::now();
+        gpu.set_camera(
+            off.target_mut(),
+            Camera {
+                offset: Point::new(-(iteration % 10) as f32, 0.),
+                ..Camera::IDENTITY
+            },
+        );
+        gpu.submit_offscreen(&mut off).unwrap();
+        if iteration >= 40 {
+            samples.push(start.elapsed().as_secs_f64() * 1000.);
+            cull.push(off.target().cpu_profile().cull_ms);
+        }
+        gpu.read_offscreen(&off).unwrap();
+    }
+    samples.sort_by(f64::total_cmp);
+    cull.sort_by(f64::total_cmp);
+    let p = off.target().cpu_profile();
+    println!(
+        "chunks=20000 executed={} bundle_calls={} frames={} p50_ms={:.3} p99_ms={:.3} max_ms={:.3} cull_p99_ms={:.3}",
+        p.executed_runs,
+        p.bundle_calls,
+        samples.len(),
+        samples[samples.len() / 2],
+        samples[samples.len() * 99 / 100],
+        samples.last().unwrap(),
+        cull[cull.len() * 99 / 100]
+    );
+    assert!(p.executed_runs < 400);
+    assert_eq!(p.bundle_calls, 1);
+    assert_eq!(before, off.target().retained_stats());
+}
+#[test]
 #[ignore = "D12 CPU gate: run with --profile perf -- --ignored --nocapture"]
 fn retained_cpu_frame_cost() {
     let gpu = Gpu::new().expect("CPU submission gate needs an actual GPU");
