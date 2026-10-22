@@ -132,6 +132,10 @@ pub struct CpuFrameProfile {
     pub rebuild_ms: f64,
     pub upload_ms: f64,
     pub bundle_ms: f64,
+    pub cull_ms: f64,
+    pub retained_runs: usize,
+    pub executed_runs: usize,
+    pub bundle_calls: usize,
 }
 
 /// A render destination: a configured surface, or none (offscreen capture).
@@ -848,7 +852,13 @@ impl Gpu {
     /// the only writes, so a camera move or a clock tick costs this alone.
     fn encode(&self, target: &mut Target, frame: &Frame, view: &wgpu::TextureView) {
         if target.retained.active() {
-            let scene = std::mem::take(&mut target.retained);
+            let mut scene = std::mem::take(&mut target.retained);
+            let started = Instant::now();
+            scene.select(target.camera, target.viewport);
+            target.profile.cull_ms = started.elapsed().as_secs_f64() * 1000.;
+            target.profile.retained_runs = scene.run_count();
+            target.profile.executed_runs = scene.selected().len();
+            target.profile.bundle_calls = 0;
             self.encode_lists(target, scene.frames(), scene.clear(), view, Some(&scene));
             target.retained = scene;
         } else {
@@ -908,7 +918,10 @@ impl Gpu {
         }
         target.profile.uniforms_ms = started.elapsed().as_secs_f64() * 1000.0;
         let commands = Instant::now();
-        let multisampled = frames.clone().any(|(frame, _)| frame.has_paths());
+        let multisampled = scene.map_or_else(
+            || frames.clone().any(|(frame, _)| frame.has_paths()),
+            |scene| scene.has_paths(),
+        );
         let msaa = multisampled.then(|| self.msaa_view(target));
         let pipes = if multisampled {
             self.multisampled()
@@ -950,18 +963,25 @@ impl Gpu {
                 ..Default::default()
             });
             if let Some(scene) = scene {
-                for run in scene.bundles() {
-                    pass.set_scissor_rect(
-                        run.scissor[0],
-                        run.scissor[1],
-                        run.scissor[2],
-                        run.scissor[3],
-                    );
-                    pass.execute_bundles(std::iter::once(if multisampled {
-                        &run.msaa
-                    } else {
-                        run.single.as_ref().expect("single-sampled chunk")
+                let selected = scene.selected();
+                let mut start = 0;
+                while start < selected.len() {
+                    let scissor = scene.bundle(selected[start]).scissor;
+                    let mut end = start + 1;
+                    while end < selected.len() && scene.bundle(selected[end]).scissor == scissor {
+                        end += 1;
+                    }
+                    target.profile.bundle_calls += 1;
+                    pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+                    pass.execute_bundles(selected[start..end].iter().map(|id| {
+                        let run = scene.bundle(*id);
+                        if multisampled {
+                            &run.msaa
+                        } else {
+                            run.single.as_ref().expect("single-sampled chunk")
+                        }
                     }));
+                    start = end;
                 }
             } else {
                 pass.set_bind_group(1, &self.atlas_bind, &[]);
