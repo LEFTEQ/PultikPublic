@@ -4,9 +4,9 @@ import Carbon.HIToolbox
 /// Global summon hotkey via Carbon's `RegisterEventHotKey` — the one global
 /// hotkey API that needs no Accessibility/Input Monitoring permission.
 ///
-/// The combo comes from settings.json (`"hotkey": "option+space"`); an
-/// unparseable spec falls back to the ⌥Space default so the app is never
-/// summonless. Note: another app holding the same combo through a CGEvent
+/// The combo comes from settings.json (`"hotkey": "option+space"`), else the
+/// profile's (example ⌥Space, genesis ⌃Space); an unparseable spec falls back
+/// to the profile's so the app is never summonless. Note: another app holding the same combo through a CGEvent
 /// tap (e.g. ChatGPT's launcher) wins regardless of registration order.
 enum HotKey {
     static let defaultSpec = "option+space"
@@ -15,7 +15,7 @@ enum HotKey {
     nonisolated(unsafe) private static var handlerRef: EventHandlerRef?
     nonisolated(unsafe) static var onPress: (@MainActor () -> Void)?
 
-    static func register(spec: String = defaultSpec) {
+    static func register(spec: String = defaultSpec, fallback: String = defaultSpec) {
         guard hotKeyRef == nil else { return }
 
         var eventType = EventTypeSpec(
@@ -31,8 +31,8 @@ enum HotKey {
         }, 1, &eventType, nil, &handlerRef)
 
         let combo = parse(spec) ?? {
-            NSLog("pultik: unparseable hotkey %@ — falling back to %@", spec, defaultSpec)
-            return parse(defaultSpec)!
+            NSLog("pultik: unparseable hotkey %@ — falling back to %@", spec, fallback)
+            return parse(fallback) ?? parse(defaultSpec)!
         }()
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x504C_544B) /* 'PLTK' */, id: 1)

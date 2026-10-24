@@ -66,7 +66,7 @@ extension StatusStore {
     // MARK: Keys
 
     var prodSnapshotKey: QueryKey? {
-        hlidacConfigured ? QueryKey(resource: Snapshots.prod.name, identity: hlidacBase.absoluteString) : nil
+        hlidacBase.map { QueryKey(resource: Snapshots.prod.name, identity: $0.absoluteString) }
     }
 
     /// `slugs`: the pinned set a request ran for — captured before its awaits,
@@ -77,7 +77,18 @@ extension StatusStore {
 
     func eveSnapshotKey(settingsToken: String?) -> QueryKey {
         let token = settingsToken ?? ""
-        return QueryKey(resource: Snapshots.eve.name, identity: QueryKey.digest("eve\u{0}\(token)"))
+        // example's eve keeps the key it always had; any other host is part
+        // of the identity, so its answer never restores under another's.
+        let origin = Self.hostIdentity(RuntimeConfig.current.eve, shipped: PultikProfile.example.eveURL)
+        let seed = origin.map { "eve\u{0}\($0)\u{0}\(token)" } ?? "eve\u{0}\(token)"
+        return QueryKey(resource: Snapshots.eve.name, identity: QueryKey.digest(seed))
+    }
+
+    /// nil for the host example ships (its keys predate profiles and stay as
+    /// they were), else the configured host's URL.
+    static func hostIdentity(_ url: URL?, shipped: String) -> String? {
+        let configured = url?.absoluteString ?? ""
+        return configured == shipped ? nil : configured
     }
 
     /// Every query-relevant field of the configured servers and services —
@@ -86,7 +97,14 @@ extension StatusStore {
     var infraSnapshotKey: QueryKey {
         let servers = preferences.servers.map { "s|\($0.name)|\($0.ref)|\($0.semafor ?? "")" }
         let services = preferences.services.map { "p|\($0.name)|\($0.ref)|\($0.host ?? "")|\($0.job ?? "")" }
-        return QueryKey(resource: Snapshots.infra.name, identity: "mesh",
+        // `firing` holds both Prometheus's and the Loki ruler's alerts, so
+        // both hosts are the identity; example's pair keeps its old "mesh".
+        let config = RuntimeConfig.current
+        let shipped = Self.hostIdentity(config.prometheus, shipped: PultikProfile.example.prometheusURL) == nil
+            && Self.hostIdentity(config.loki, shipped: PultikProfile.example.lokiURL) == nil
+        let identity = shipped ? "mesh"
+            : "\(config.prometheus?.absoluteString ?? "")\u{0}\(config.loki?.absoluteString ?? "")"
+        return QueryKey(resource: Snapshots.infra.name, identity: identity,
                         scope: QueryKey.digest((servers + services).joined(separator: "\n")))
     }
 
@@ -95,10 +113,20 @@ extension StatusStore {
         return QueryKey(resource: Snapshots.vitrinka.name, identity: identity, scope: vitrinkaWorkspace)
     }
 
-    /// One ssh identity (`~/.ssh/pultik_devbox`) reaches every box this Mac
-    /// discovers, so the mesh is the identity; the boxes are in the value.
+    /// One ssh identity reaches every box this Mac discovers, so the key and
+    /// the fallback boxes are the identity; the boxes are in the value.
+    /// example's (`~/.ssh/pultik_devbox`, box c) keeps its old "mesh", so a
+    /// changed estate never restores another's boxes.
     var devboxSnapshotKey: QueryKey {
-        QueryKey(resource: Snapshots.devbox.name, identity: "mesh")
+        let identity = RuntimeConfig.current.devboxIdentityFile ?? ""
+        let fallback = preferences.resolvedDevboxFallbackBoxes
+        if identity == ExecutableSearch.expand(PultikProfile.example.devboxIdentityFile),
+           fallback == PultikProfile.example.devboxFallbackBoxes {
+            return QueryKey(resource: Snapshots.devbox.name, identity: "mesh")
+        }
+        let seed = ([identity] + fallback.map { "\($0.name)|\($0.sshAlias)|\($0.host)|\($0.port)" })
+            .joined(separator: "\n")
+        return QueryKey(resource: Snapshots.devbox.name, identity: QueryKey.digest(seed))
     }
 
     // MARK: Restore
@@ -139,6 +167,7 @@ extension StatusStore {
     }
 
     private func restoreEve() async {
+        guard RuntimeConfig.current.eve != nil else { return }
         if let snapshot = await QueryRepository.shared.restore(Snapshots.eve, key: eveSnapshotKey(settingsToken: eveToken)),
            eveSessions.isEmpty, eveAlerts.isEmpty, eveApprovals.isEmpty {
             eveSessions = snapshot.value.sessions
@@ -148,6 +177,7 @@ extension StatusStore {
     }
 
     private func restoreInfra() async {
+        guard RuntimeConfig.current.prometheus != nil else { return }
         if let snapshot = await QueryRepository.shared.restore(Snapshots.infra, key: infraSnapshotKey),
            serverMetrics.isEmpty, serviceStatuses.isEmpty {
             let state = snapshot.value

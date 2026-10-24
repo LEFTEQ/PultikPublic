@@ -1015,7 +1015,17 @@ struct EveSession: Codable, Identifiable {
     }
 
     var consoleUrl: String {
-        "https://app.assistant.example.invalid/sessions/\(id)"
+        "\(EveLinks.console)/sessions/\(id)"
+    }
+}
+
+/// eve's console, the configured host (`RuntimeConfig`), no trailing slash;
+/// example's when none is set, since a session or approval only exists once
+/// some eve answered.
+enum EveLinks {
+    static var console: String {
+        let base = RuntimeConfig.current.eve?.absoluteString ?? PultikProfile.example.eveURL
+        return base.hasSuffix("/") ? String(base.dropLast()) : base
     }
 }
 
@@ -1090,7 +1100,7 @@ struct EveApproval: Codable, Equatable, Identifiable, Sendable {
 
     /// eve's Approvals page for the node it answers.
     var url: URL {
-        URL(string: "https://app.assistant.example.invalid/approvals/\(display.id)")!
+        URL(string: "\(EveLinks.console)/approvals/\(display.id)")!
     }
 
     /// Groups the view's rows by top-level root, walking `parentSessionId`

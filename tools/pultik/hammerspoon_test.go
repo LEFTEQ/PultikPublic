@@ -63,6 +63,178 @@ func TestParseInstallOptionsHammerspoon(t *testing.T) {
 	if err != nil || opts.hammerspoon {
 		t.Fatalf("--skills-only must not install hammerspoon: %+v err=%v", opts, err)
 	}
+	opts, _, _ = parseInstallOptions(nil)
+	if opts.replaceHammerspoon {
+		t.Fatalf("a full install must not replace a foreign Hammerspoon config: %+v", opts)
+	}
+	for _, flag := range []string{"--hammerspoon", "--hammerspoon-only"} {
+		opts, _, _ = parseInstallOptions([]string{flag})
+		if opts.replaceHammerspoon {
+			t.Fatalf("%s alone must not replace a foreign config: %+v", flag, opts)
+		}
+	}
+	// --hammerspoon-force is a modifier: it survives a focused mode in either
+	// order, and a full install keeps every step.
+	for _, args := range [][]string{{"--hammerspoon-force", "--hammerspoon-only"}, {"--hammerspoon-only", "--hammerspoon-force"}} {
+		opts, _, _ = parseInstallOptions(args)
+		if !opts.replaceHammerspoon || !opts.hammerspoon || opts.app {
+			t.Fatalf("%v: %+v", args, opts)
+		}
+	}
+	opts, _, _ = parseInstallOptions([]string{"--hammerspoon-force"})
+	if !opts.replaceHammerspoon || !opts.app || !opts.hooks || !opts.hammerspoon {
+		t.Fatalf("--hammerspoon-force must not narrow the install: %+v", opts)
+	}
+}
+
+func TestHammerspoonOnlyKeepsAForeignConfigWithoutForce(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte("-- hand-written"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	only, _, _ := parseInstallOptions([]string{"--hammerspoon-only"})
+	if err := installHammerspoonStep(only); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(link); err != nil || string(data) != "-- hand-written" {
+		t.Fatalf("--hammerspoon-only replaced a foreign config without --hammerspoon-force: %q err=%v", data, err)
+	}
+}
+
+func writeDotfilesHammerspoon(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "dotfiles", "hammerspoon")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "init.lua")
+	if err := os.WriteFile(target, []byte("-- someone else's config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func TestFullInstallKeepsAForeignHammerspoonConfig(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotfiles := writeDotfilesHammerspoon(t)
+	if err := os.Symlink(dotfiles, link); err != nil {
+		t.Fatal(err)
+	}
+	full, _, _ := parseInstallOptions(nil)
+	if err := installHammerspoonStep(full); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(link); err != nil || target != dotfiles {
+		t.Fatalf("a foreign symlink was replaced: %q err=%v", target, err)
+	}
+
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte("-- hand-written"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installHammerspoonStep(full); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(link); err != nil || string(data) != "-- hand-written" {
+		t.Fatalf("a hand-written init.lua was replaced: %q err=%v", data, err)
+	}
+	if matches, _ := filepath.Glob(link + ".pultik-backup*"); len(matches) != 0 {
+		t.Fatalf("a kept config must not leave backups: %v", matches)
+	}
+}
+
+func TestExplicitHammerspoonBacksUpAForeignSymlink(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotfiles := writeDotfilesHammerspoon(t)
+	if err := os.Symlink(dotfiles, link); err != nil {
+		t.Fatal(err)
+	}
+	explicit, _, _ := parseInstallOptions([]string{"--hammerspoon-only", "--hammerspoon-force"})
+	if err := installHammerspoonStep(explicit); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(link + ".pultik-backup"); err != nil || target != dotfiles {
+		t.Fatalf("the foreign link was not kept as a backup: %q err=%v", target, err)
+	}
+	managed := filepath.Join(home, "Library", "Application Support", "Pultik", "hammerspoon", "init.lua")
+	if target, err := os.Readlink(link); err != nil || target != managed {
+		t.Fatalf("init.lua was not linked to pultik: %q err=%v", target, err)
+	}
+}
+
+// A dotfiles folder that copied all three modules is still somebody else's
+// config: only a checkout (tools/pultik beside it) or the managed copy is ours.
+func TestACopiedModuleSetIsNotPultiks(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotfiles := writeDotfilesHammerspoon(t)
+	for _, name := range []string{"organize.lua", "cmux.lua"} {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(dotfiles), name), []byte("-- copy"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(dotfiles, link); err != nil {
+		t.Fatal(err)
+	}
+	full, _, _ := parseInstallOptions(nil)
+	if err := installHammerspoonStep(full); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(link); err != nil || target != dotfiles {
+		t.Fatalf("a full install took over a copied config: %q err=%v", target, err)
+	}
+	explicit, _, _ := parseInstallOptions([]string{"--hammerspoon-force"})
+	if err := installHammerspoonStep(explicit); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(link + ".pultik-backup"); err != nil || target != dotfiles {
+		t.Fatalf("--hammerspoon-force did not keep the copied config as a backup: %q err=%v", target, err)
+	}
+	managed := filepath.Join(home, "Library", "Application Support", "Pultik", "hammerspoon", "init.lua")
+	if target, err := os.Readlink(link); err != nil || target != managed {
+		t.Fatalf("--hammerspoon-force did not link pultik: %q err=%v", target, err)
+	}
+}
+
+// A checkout that moved leaves a dangling link; that link is still pultik's,
+// so a full install repairs it instead of keeping it.
+func TestFullInstallRepairsAMovedPultikLink(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/gone/Projects/pultik/hammerspoon/init.lua", link); err != nil {
+		t.Fatal(err)
+	}
+	full, _, _ := parseInstallOptions(nil)
+	if err := installHammerspoonStep(full); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(home, "Library", "Application Support", "Pultik", "hammerspoon", "init.lua")
+	if target, err := os.Readlink(link); err != nil || target != managed {
+		t.Fatalf("the moved pultik link was not repaired: %q err=%v", target, err)
+	}
+	if matches, _ := filepath.Glob(link + ".pultik-backup*"); len(matches) != 0 {
+		t.Fatalf("pultik's own link needs no backup: %v", matches)
+	}
 }
 
 func TestInstallHammerspoonEmbeddedFallback(t *testing.T) {
@@ -156,6 +328,10 @@ func TestInstallHammerspoonKeepsExistingRepoLink(t *testing.T) {
 	repo := t.TempDir()
 	dir := filepath.Join(repo, "hammerspoon")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A checkout carries tools/pultik beside its hammerspoon package.
+	if err := os.MkdirAll(filepath.Join(repo, "tools", "pultik"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range hammerspoonFiles {
@@ -253,5 +429,70 @@ func TestCheckHammerspoonRelativeSymlink(t *testing.T) {
 	}
 	if check := checkHammerspoon(); check.Status != "ok" {
 		t.Fatalf("relative symlink must resolve against the link dir, got %+v", check)
+	}
+}
+
+// Only a moved checkout's exact link shape is pultik's. Dangling links that
+// merely pass through a directory named pultik belong to the user: a full
+// install keeps them, and --hammerspoon-force keeps them as a backup.
+func TestDanglingForeignLinksThroughAPultikDirectoryAreKept(t *testing.T) {
+	for _, target := range []string{
+		"/Volumes/dotfiles/pultik/custom/init.lua",
+		"/srv/pultik/dotfiles/hammerspoon/init.lua",
+	} {
+		t.Run(target, func(t *testing.T) {
+			home := isolateHammerspoonHome(t)
+			link := filepath.Join(home, ".hammerspoon", "init.lua")
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			full, _, _ := parseInstallOptions(nil)
+			if err := installHammerspoonStep(full); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.Readlink(link); err != nil || got != target {
+				t.Fatalf("a full install replaced the user's link: %q err=%v", got, err)
+			}
+			forced, _, _ := parseInstallOptions([]string{"--hammerspoon-only", "--hammerspoon-force"})
+			if err := installHammerspoonStep(forced); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.Readlink(link + ".pultik-backup"); err != nil || got != target {
+				t.Fatalf("the forced install did not keep the user's link: %q err=%v", got, err)
+			}
+		})
+	}
+}
+
+// A forced replace of a hand-written file keeps it as a hard link under a
+// new name and never touches an older backup.
+func TestForcedReplaceKeepsAHandWrittenFileBesideOlderBackups(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link+".pultik-backup", []byte("-- older"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte("-- hand-written"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	forced, _, _ := parseInstallOptions([]string{"--hammerspoon-only", "--hammerspoon-force"})
+	if err := installHammerspoonStep(forced); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(link + ".pultik-backup"); err != nil || string(data) != "-- older" {
+		t.Fatalf("the older backup was overwritten: %q err=%v", data, err)
+	}
+	matches, _ := filepath.Glob(link + ".pultik-backup-*")
+	if len(matches) != 1 {
+		t.Fatalf("expected one new timestamped backup, got %v", matches)
+	}
+	if data, err := os.ReadFile(matches[0]); err != nil || string(data) != "-- hand-written" {
+		t.Fatalf("the new backup is not the hand-written file: %q err=%v", data, err)
 	}
 }

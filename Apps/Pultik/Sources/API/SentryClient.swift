@@ -6,7 +6,16 @@ import Foundation
 actor SentryClient {
     static let shared = SentryClient()
 
-    private let base = URL(string: "https://sentry.ops.example.invalid")!
+    /// settings.json `sentryURL` over the profile's (example: the self-hosted
+    /// Sentry); none, and every call answers "not configured" unsent.
+    private nonisolated var base: URL? {
+        RuntimeConfig.current.sentry
+    }
+
+    private func requireBase() throws -> URL {
+        guard let base else { throw UnconfiguredHost(key: "sentryURL") }
+        return base
+    }
     private let org = "sentry"
 
     /// Every Sentry environment that IS production. Booking SK reports as
@@ -45,6 +54,7 @@ actor SentryClient {
     /// classified failure (nil = healthy) — a 401/403 must re-arm the pause
     /// as `.rejected`, not be flattened to "not answering".
     func probeHealth(settingsToken: String?) async -> ProbeFailure? {
+        guard let base else { return .classify(UnconfiguredHost(key: "sentryURL")) }
         guard let token = try? requireToken(settingsToken) else {
             return .classify(Self.missingToken)
         }
@@ -67,6 +77,7 @@ actor SentryClient {
 
     /// Unresolved production issues for one project, newest activity first.
     func unresolvedIssues(project: String, settingsToken: String?) async throws -> [SentryIssue] {
+        let base = try requireBase()
         let token = try requireToken(settingsToken)
         var components = URLComponents(
             url: base.appending(path: "api/0/projects/\(org)/\(project)/issues/"),
@@ -113,6 +124,7 @@ actor SentryClient {
     }
 
     private func orgIssues(query: String, settingsToken: String?) async throws -> [SentryIssue] {
+        let base = try requireBase()
         let token = try requireToken(settingsToken)
         var components = URLComponents(
             url: base.appending(path: "api/0/organizations/\(org)/issues/"),
@@ -140,6 +152,7 @@ actor SentryClient {
     /// range instead of statsPeriod.
     func archiveIssues(project: String, settingsToken: String?,
                        start: Date, end: Date) async throws -> [SentryIssue] {
+        let base = try requireBase()
         let token = try requireToken(settingsToken)
         let iso = ISO8601DateFormatter()
         var components = URLComponents(

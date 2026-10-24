@@ -7,9 +7,14 @@ import Foundation
 actor EveNotificationsClient {
     static let shared = EveNotificationsClient()
     /// The ledger's host — Now's identity for its notifications.
-    static let origin = "app.assistant.example.invalid"
+    static var origin: String {
+        RuntimeConfig.current.eve?.host() ?? ""
+    }
 
-    private let base = URL(string: "https://\(EveNotificationsClient.origin)")!
+    /// `EveClient`'s host: settings.json `eveURL` over the profile's.
+    private nonisolated var base: URL? {
+        RuntimeConfig.current.eve
+    }
     private let session: URLSession
 
     init() {
@@ -29,6 +34,7 @@ actor EveNotificationsClient {
     /// The same signal drives `ProbeGate` — this is the only eve call that can
     /// tell a refusal from silence, so both of eve's rails back off on it.
     func recent(settingsToken: String?) async -> ProbeResult<[EveAlert]> {
+        guard let base else { return .failed(.classify(UnconfiguredHost(key: "eveURL"))) }
         var request = URLRequest(url: base.appending(path: "eve/v1/notifications")
             .appending(queryItems: [URLQueryItem(name: "limit", value: "50")]))
         request.timeoutInterval = 10

@@ -46,11 +46,21 @@ extension StatusStore {
     /// breaker: same host, so a refusal on either is a refusal for both, and
     /// the health endpoint is the cheapest way back in.
     func refreshEve() async {
+        // No eve in settings.json or the profile: quiet, not failing.
+        guard RuntimeConfig.current.eve != nil else {
+            eveSessions = []
+            eveApprovals = []
+            eveAlerts = []
+            NowStore.shared.forget(.eveNotifications)
+            NowStore.shared.forget(.eveApprovals)
+            return
+        }
         // One credential for the whole pass: both reads and the snapshot key,
         // so a token changed mid-flight never files one account's answer
         // under another.
         let token = eveToken
         let snapshotKey = eveSnapshotKey(settingsToken: token)
+        let eve = RuntimeConfig.current.eve
         await gated(.eve, probe: {
             await EveClient.shared.probeHealth(settingsToken: token)
         }) {
@@ -70,7 +80,9 @@ extension StatusStore {
             // The ledger's verdict wins when it has one — it distinguishes a
             // refusal from silence, which the sessions call cannot.
             let verdict = await refreshEveAlerts(settingsToken: token, account: snapshotKey.identity) ?? failure
-            if verdict == nil { recordEveSnapshot(key: snapshotKey) }
+            // A reload that moved eve mid-pass mixed two hosts' answers: never
+            // file them under the key this pass captured.
+            if verdict == nil, RuntimeConfig.current.eve == eve { recordEveSnapshot(key: snapshotKey) }
             return verdict
         }
     }

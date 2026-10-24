@@ -27,6 +27,9 @@ final class ProdArchive {
         let fetchedAt: Date
     }
     private var cache: [Int: CachedWindow] = [:]
+    /// The Sentry the cached windows came from: another (or none) empties
+    /// them, so the archive never mixes two estates' issues.
+    private var cacheOrigin: URL?
     private var loadTask: Task<Void, Never>?
 
     private init() {}
@@ -36,6 +39,13 @@ final class ProdArchive {
     func load() {
         guard loadTask == nil else { return }
         error = nil
+        let origin = RuntimeConfig.current.sentry
+        if origin != cacheOrigin {
+            cache = [:]
+            issues = []
+            loadedDays = 0
+            cacheOrigin = origin
+        }
         loadTask = Task {
             defer { loadTask = nil }
             isLoading = true
@@ -46,13 +56,17 @@ final class ProdArchive {
                     publish(upTo: window)
                     continue
                 }
-                await fetchWindow(window)
+                await fetchWindow(window, origin: origin)
                 publish(upTo: window)
             }
         }
     }
 
-    private func fetchWindow(_ window: Int) async {
+    private func fetchWindow(_ window: Int, origin: URL?) async {
+        guard origin != nil else {
+            if window == 0 { error = "no Sentry configured (settings.json sentryURL)" }
+            return
+        }
         // Three windows × every project is the heaviest burst Pultík makes at
         // Sentry, so it takes a real gate verdict — not just an isPaused peek
         // that goes quiet the moment a pause expires. A half-open breaker gets
@@ -111,6 +125,8 @@ final class ProdArchive {
             // old failures survives every successful archive sweep.
             ProbeGate.shared.succeeded(.sentry)
         }
+        // A reload that moved Sentry mid-burst: the next load starts over.
+        guard RuntimeConfig.current.sentry == origin else { return }
         cache[window] = CachedWindow(issues: collected, fetchedAt: Date())
     }
 

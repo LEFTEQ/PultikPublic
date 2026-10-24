@@ -1025,10 +1025,10 @@ mod tests {
         assert_eq!(*kinds.last().unwrap(), Pipeline::Rect);
         assert_eq!(f.batches.last().unwrap().scissor, Some([0, 0, 10, 10]));
         assert_eq!(f.rects.len(), 4);
-        // Text splits the rect batch only where it has ink: canvas-text's non-macOS
+        // Text splits the rect batch only where it has ink: canvas-text's non-Apple native
         // fallback shapes without ink (until parley, M8), so there the first three rects
         // are one batch and only the clip starts another.
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         {
             assert_eq!(f.batches[0].instances, 0..2, "adjacent rects share a batch");
             assert_eq!(
@@ -1041,7 +1041,7 @@ mod tests {
                 ]
             );
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         {
             assert!(f.glyphs.is_empty(), "the fallback text backend has no ink");
             assert_eq!(f.batches[0].instances, 0..3, "adjacent rects share a batch");
@@ -1088,7 +1088,7 @@ mod tests {
         ));
         let mut ts = TextSystem::new();
         let f = Frame::build(&dl, &mut ts, vp());
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         assert!(f.atlas_reset, "the glyph set must overflow the atlas");
         let overlap = |a: &GlyphInstance, b: &GlyphInstance| {
             a.page == b.page
@@ -1218,7 +1218,7 @@ mod tests {
             ],
             "the selection takes the text colour as its background; the current match wins"
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         assert_eq!(
             f.glyphs[0].color,
             Rgba::BLACK.premultiplied(),
@@ -1256,7 +1256,7 @@ mod tests {
             Pipeline::Cell,
             "drawn under its glyph"
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         assert_eq!(
             block.glyphs[1].color,
             Rgba::BLACK.premultiplied(),
@@ -1369,8 +1369,8 @@ mod tests {
             (32.0, 32.0),
             "a bar at row 1, column 2"
         );
-        // The fallback shaper of non-macOS builds has no ink.
-        #[cfg(target_os = "macos")]
+        // The fallback shaper of non-Apple native builds has no ink.
+        #[cfg(target_vendor = "apple")]
         {
             assert_eq!(f.glyphs.len(), 2, "the tab has no glyph");
             assert_eq!(f.glyphs[0].color, premul(Rgba::WHITE));

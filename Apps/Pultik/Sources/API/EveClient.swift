@@ -9,7 +9,13 @@ import Foundation
 actor EveClient {
     static let shared = EveClient()
 
-    private let base = URL(string: "https://app.assistant.example.invalid")!
+    /// settings.json `eveURL` over the profile's (example: app.assistant.example.invalid);
+    /// none, and every call answers "not configured" without a request.
+    private nonisolated var base: URL? {
+        RuntimeConfig.current.eve
+    }
+
+    private static let unconfigured = UnconfiguredHost(key: "eveURL")
     private let session: URLSession
 
     init() {
@@ -21,6 +27,7 @@ actor EveClient {
     /// on a half-open trial re-arms the breaker as `.rejected`, not
     /// `.unreachable` — the same contract as the GitHub and Sentry probes.
     func probeHealth(settingsToken: String?) async -> ProbeFailure? {
+        guard let base else { return .classify(Self.unconfigured) }
         var request = URLRequest(url: base.appending(path: "eve/v1/health"))
         request.timeoutInterval = 3
         EveAuth.apply(settingsToken, to: &request)
@@ -49,6 +56,7 @@ actor EveClient {
     /// alerts rail hidden this is the ONLY eve call a refresh makes, and a
     /// breaker can't back off from a failure nobody told it about.
     func prSessions(settingsToken: String?) async -> ProbeResult<[EveSession]> {
+        guard let base else { return .failed(.classify(Self.unconfigured)) }
         var request = URLRequest(url: base.appending(path: "eve/v1/sessions")
             .appending(queryItems: [
                 URLQueryItem(name: "flow", value: "pr_review"),
@@ -85,6 +93,7 @@ actor EveClient {
     /// unpaginated, so a read that answers is complete. Same breaker as the
     /// other eve reads.
     func approvals(settingsToken: String?) async -> ProbeResult<[EveApproval]> {
+        guard let base else { return .failed(.classify(Self.unconfigured)) }
         var request = URLRequest(url: base.appending(path: "eve/v1/sessions")
             .appending(queryItems: [URLQueryItem(name: "view", value: "approvals")]))
         request.timeoutInterval = 10
@@ -132,6 +141,7 @@ actor EveClient {
                 do {
                     // One token for the whole exchange — create + stream.
                     let token = settingsToken
+                    guard let base = self.base else { throw Self.unconfigured }
                     var create = URLRequest(url: base.appending(path: "eve/v1/session"))
                     create.httpMethod = "POST"
                     create.setValue("application/json", forHTTPHeaderField: "Content-Type")

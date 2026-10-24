@@ -113,7 +113,11 @@ struct FanDeckView: View {
 
     /// Both privileged calls block on an osascript password prompt, so they
     /// run off the main actor; only the resulting state lands back on it.
-    private func runHelperInstall() { runPrivileged(HelperInstaller.install) }
+    /// The install first asks before it removes a GenesisFanControl helper.
+    private func runHelperInstall() {
+        guard let removeLegacy = HelperInstaller.askToRemoveLegacyHelper() else { return }
+        runPrivileged { try HelperInstaller.install(removeLegacy: removeLegacy) }
+    }
     private func runHelperRemove() { runPrivileged(HelperInstaller.uninstall) }
 
     private func runPrivileged(_ work: @escaping @Sendable () throws -> Void) {

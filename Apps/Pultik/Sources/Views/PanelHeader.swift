@@ -147,7 +147,7 @@ struct AlertPulse: View {
 
     var body: some View {
         Button {
-            if let url = URL(string: "https://app.assistant.example.invalid") {
+            if let url = RuntimeConfig.current.eve {
                 NSWorkspace.shared.open(url)
             }
         } label: {

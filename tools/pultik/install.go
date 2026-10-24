@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -38,8 +40,15 @@ const (
 type installOptions struct {
 	app, cli, skills, hooks, hammerspoon bool
 	replaceSkills                        bool
+	// replaceHammerspoon is set by --hammerspoon-force: only that flag
+	// replaces an init.lua that pultik did not put there.
+	replaceHammerspoon bool
 	// dryRun prints every step's plan and writes nothing.
 	dryRun bool
+	// profile runs the profile step (profile.go): a full install, --app-only,
+	// or any run given --profile. profileName is that flag's value.
+	profile     bool
+	profileName string
 }
 
 type commandHook struct {
@@ -65,6 +74,13 @@ func installCmd(args []string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("Pultik requires macOS")
 	}
+	// First: a run that needs a profile it cannot get fails before it
+	// installs anything.
+	if opts.profile {
+		if err := runProfileStep(opts); err != nil {
+			return err
+		}
+	}
 	if opts.cli {
 		if opts.dryRun {
 			step("would install the CLI (dry run)")
@@ -83,9 +99,7 @@ func installCmd(args []string) error {
 		}
 	}
 	if opts.hammerspoon {
-		if opts.dryRun {
-			step("would link ~/.hammerspoon/init.lua (dry run)")
-		} else if err := installHammerspoon(); err != nil {
+		if err := installHammerspoonStep(opts); err != nil {
 			return err
 		}
 	}
@@ -105,14 +119,16 @@ func installCmd(args []string) error {
 }
 
 func parseInstallOptions(args []string) (installOptions, bool, error) {
-	opts := installOptions{app: true, cli: true, skills: true, hooks: true, hammerspoon: true}
+	opts := installOptions{app: true, cli: true, skills: true, hooks: true, hammerspoon: true, profile: true}
 	only := func(name string) {
 		// A focused mode narrows WHAT installs; it never cancels modifier
 		// flags, whatever order they were typed in.
-		opts = installOptions{replaceSkills: opts.replaceSkills, dryRun: opts.dryRun}
+		opts = installOptions{replaceSkills: opts.replaceSkills, dryRun: opts.dryRun,
+			replaceHammerspoon: opts.replaceHammerspoon, profileName: opts.profileName}
 		switch name {
 		case "app":
-			opts.app = true
+			// The profile is the app's: installing it records one.
+			opts.app, opts.profile = true, true
 		case "cli":
 			opts.cli = true
 		case "skills":
@@ -123,8 +139,22 @@ func parseInstallOptions(args []string) (installOptions, bool, error) {
 			opts.hammerspoon = true
 		}
 	}
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if value, found := strings.CutPrefix(arg, "--profile="); found {
+			if value == "" {
+				return opts, false, fmt.Errorf("--profile needs a value: %s", strings.Join(installProfiles, ", "))
+			}
+			opts.profileName = value
+			continue
+		}
 		switch arg {
+		case "--profile":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return opts, false, fmt.Errorf("--profile needs a value: %s", strings.Join(installProfiles, ", "))
+			}
+			i++
+			opts.profileName = args[i]
 		case "--app-only":
 			only("app")
 		case "--cli-only":
@@ -137,6 +167,8 @@ func parseInstallOptions(args []string) (installOptions, bool, error) {
 			// --hammerspoon is the documented spelling (README, decision log,
 			// PersonalSetup's pointer); both narrow to just the symlink step.
 			only("hammerspoon")
+		case "--hammerspoon-force":
+			opts.replaceHammerspoon = true
 		case "--no-app":
 			opts.app = false
 		case "--no-hooks":
@@ -153,7 +185,44 @@ func parseInstallOptions(args []string) (installOptions, bool, error) {
 			return opts, false, fmt.Errorf("unknown flag %q", arg)
 		}
 	}
+	if opts.profileName != "" {
+		if !validProfile(opts.profileName) {
+			return opts, false, fmt.Errorf("unknown profile %q: use %s", opts.profileName, strings.Join(installProfiles, ", "))
+		}
+		opts.profile = true
+	}
 	return opts, false, nil
+}
+
+// runProfileStep reads Pultik's settings.json, decides the profile and
+// records it. A dry run never asks.
+func runProfileStep(opts installOptions) error {
+	state, err := readProfileState()
+	var dangling danglingSettings
+	if errors.As(err, &dangling) {
+		if opts.dryRun {
+			fmt.Fprintf(uiOut, "%s! %s links to %s, which does not exist; the install would stop here%s\n",
+				yellow, dangling.path, dangling.target, reset)
+			return nil
+		}
+		return err
+	}
+	if err != nil {
+		if opts.profileName != "" {
+			return fmt.Errorf("%s: %w", state.path, err)
+		}
+		// Unreadable is not absent: never ask, never write; say why.
+		fmt.Fprintf(uiOut, "%s! cannot read %s (%v): profile step skipped%s\n", yellow, state.path, err, reset)
+		return nil
+	}
+	choice := ""
+	if !opts.dryRun || opts.profileName != "" {
+		pick := func() (string, error) { return pickProfile(os.Stdin, uiOut) }
+		if choice, err = chooseProfile(opts.profileName, state.exists, interactive(), pick); err != nil {
+			return err
+		}
+	}
+	return installProfileStep(state, choice, opts.dryRun)
 }
 
 func installUsage() {
@@ -161,10 +230,29 @@ func installUsage() {
 
 FLAGS
   --app-only | --cli-only | --skills-only | --hooks-only | --hammerspoon-only
+  --profile <name>    example | genesis | custom: whose defaults the app gets,
+                      recorded as "profile" in Pultik's settings.json; a full
+                      install and --app-only need one only on a Mac with no
+                      settings.json yet (a terminal asks, any other run fails)
   --no-app            skip the released macOS app
   --no-hooks          skip Claude SessionStart hooks
   --no-hammerspoon    skip the ~/.hammerspoon/init.lua symlink
+  --hammerspoon-force replace a ~/.hammerspoon/init.lua pultik did not install
+                      (the old one is kept as init.lua.pultik-backup, or a
+                      timestamped name when that backup exists); combines with
+                      a full install or --hammerspoon-only
   --dry-run           print every step's plan (hook lines included), write nothing
+
+The hooks step edits only hooks.SessionStart in settings.json: the rest of the
+file keeps its bytes, a file that already holds the hooks is left untouched,
+and a backup never replaces an older one. The profile step edits only
+"profile" in Pultik's settings.json (~/Library/Application Support/Pultik;
+custom also adds every profile key it lacks, each at the custom profile's own
+default: no host, ssh key, login item or repos, and the app's option+space
+hotkey); a settings.json without the key reads as example and is never asked.
+Without --hammerspoon-force, the
+Hammerspoon step keeps a hand-written ~/.hammerspoon/init.lua (or a link to
+another config) and says so.
 
 The SessionStart hooks run "vitrinka hook-context todo|schedule" — the todo
 and reminder skills (/todo, /todo-list, /todo-done, /todo-milestone, /remind)
@@ -337,9 +425,30 @@ func installClaudeHooks(dryRun bool) error {
 		}
 	}
 	path := filepath.Join(dir, "settings.json")
-	raw, err := os.ReadFile(path)
+	// A settings.json symlinked from a dotfiles checkout stays a symlink: the
+	// edit lands in the file it points to, never on top of the link. A link
+	// whose target is missing is refused: writing would replace the link.
+	file := path
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			target, _ := os.Readlink(path)
+			if dryRun {
+				fmt.Fprintf(uiOut, "%s! %s links to %s, which does not exist; the install would stop here%s\n", yellow, path, target, reset)
+				return nil
+			}
+			return fmt.Errorf("%s links to %s, which does not exist: create that file or remove the link, then rerun", path, target)
+		}
+		file = resolved
+	}
+	raw, err := os.ReadFile(file)
+	exists := err == nil
+	mode := fs.FileMode(0o600)
+	if info, statErr := os.Stat(file); statErr == nil {
+		mode = info.Mode().Perm()
+	}
 	if os.IsNotExist(err) {
-		raw = []byte("{}")
+		raw = []byte("{}\n")
 	} else if err != nil {
 		return err
 	}
@@ -351,7 +460,12 @@ func installClaudeHooks(dryRun bool) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
+	current := exists && bytes.Equal(merged, raw)
 	if dryRun {
+		if current {
+			step("SessionStart hooks already current; would leave " + path + " untouched")
+			return nil
+		}
 		for _, command := range pultikHookCommands(raw) {
 			step("would remove SessionStart hook: " + command)
 		}
@@ -359,76 +473,86 @@ func installClaudeHooks(dryRun bool) error {
 		step("would write SessionStart hook: " + hookCommand(binary, "schedule"))
 		return nil
 	}
-	if _, err := os.Stat(path); err == nil {
-		if err := copyFileAtomic(path, path+".pultik-backup", 0o600); err != nil {
-			return err
-		}
+	if current {
+		ok("Claude SessionStart hooks already current in %s", path)
+		return nil
 	}
-	if err := writeFileAtomic(path, merged, 0o600); err != nil {
+	if exists {
+		backup, err := placeBackup(path, func(candidate string) error {
+			return copyFileExclusive(file, candidate, 0o600)
+		})
+		if err != nil {
+			return fmt.Errorf("back up %s: %w", path, err)
+		}
+		step("backed up " + path + " → " + backup)
+	}
+	if err := writeFileAtomic(file, merged, mode); err != nil {
 		return err
 	}
 	ok("merged Claude SessionStart hooks into %s", path)
 	return nil
 }
 
-func mergeClaudeSettings(raw []byte, binary string) ([]byte, error) {
-	var settings map[string]any
-	if err := json.Unmarshal(raw, &settings); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-	hooks, okType := settings["hooks"].(map[string]any)
-	if settings["hooks"] != nil && !okType {
-		return nil, fmt.Errorf("hooks must be an object")
-	}
-	if hooks == nil {
-		hooks = map[string]any{}
-	}
-	groups, okType := hooks["SessionStart"].([]any)
-	if hooks["SessionStart"] != nil && !okType {
-		return nil, fmt.Errorf("hooks.SessionStart must be an array")
-	}
-	kept := make([]any, 0, len(groups)+2)
-	for _, group := range groups {
-		cleaned, keep := withoutPultikHooks(group)
-		if keep {
-			kept = append(kept, cleaned)
+// placeBackup puts a backup under a name no older backup holds: the plain
+// .pultik-backup first, then a timestamped name, so a second install keeps
+// the copy the first install made of the user's original file. place must
+// create the name exclusively (O_EXCL, symlink, hard link) and fail with
+// fs.ErrExist when it is taken, so two installs at once never share a name.
+func placeBackup(path string, place func(candidate string) error) (string, error) {
+	candidate := path + ".pultik-backup"
+	stamp := time.Now().Format("20060102-150405")
+	for n := 1; n <= 1000; n++ {
+		err := place(candidate)
+		if err == nil {
+			return candidate, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		candidate = fmt.Sprintf("%s.pultik-backup-%s", path, stamp)
+		if n > 1 {
+			candidate = fmt.Sprintf("%s-%d", candidate, n)
 		}
 	}
-	todo := hookCommand(binary, "todo")
-	timed := hookCommand(binary, "schedule")
-	kept = append(kept,
-		hookGroup{Hooks: []commandHook{{Type: "command", Command: todo, Timeout: 15}}},
-		hookGroup{Hooks: []commandHook{{Type: "command", Command: timed, Timeout: 15}}},
-	)
-	hooks["SessionStart"] = kept
-	settings["hooks"] = hooks
-	return json.MarshalIndent(settings, "", "  ")
+	return "", fmt.Errorf("no free backup name beside %s", path)
 }
 
-func withoutPultikHooks(group any) (any, bool) {
-	object, ok := group.(map[string]any)
-	if !ok {
-		return group, true
+// copyFileExclusive copies source to a destination that must not exist yet.
+func copyFileExclusive(source, destination string, mode fs.FileMode) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
 	}
-	hooks, ok := object["hooks"].([]any)
-	if !ok {
-		return group, true
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
 	}
-	kept := make([]any, 0, len(hooks))
-	for _, hook := range hooks {
-		if !isPultikHook(hook) {
-			kept = append(kept, hook)
-		}
+	if _, err := io.Copy(output, input); err != nil {
+		output.Close()
+		os.Remove(destination)
+		return err
 	}
-	if len(kept) == 0 {
-		return nil, false
+	if err := output.Sync(); err != nil {
+		output.Close()
+		os.Remove(destination)
+		return err
 	}
-	copy := make(map[string]any, len(object))
-	for key, value := range object {
-		copy[key] = value
+	return output.Close()
+}
+
+// mergeClaudeSettings retires every generation of pultik's SessionStart hooks
+// and appends the current pair. Only hooks.SessionStart changes; the rest of
+// the file keeps its bytes (settings_edit.go), and a file that already holds
+// exactly our hooks comes back unchanged.
+func mergeClaudeSettings(raw []byte, binary string) ([]byte, error) {
+	if err := checkSettingsShape(raw); err != nil {
+		return nil, err
 	}
-	copy["hooks"] = kept
-	return copy, true
+	return editSessionStart(raw, []hookGroup{
+		{Hooks: []commandHook{{Type: "command", Command: hookCommand(binary, "todo"), Timeout: 15}}},
+		{Hooks: []commandHook{{Type: "command", Command: hookCommand(binary, "schedule"), Timeout: 15}}},
+	})
 }
 
 // legacyHookArgs are the pre-tag hooks' exact argument strings.

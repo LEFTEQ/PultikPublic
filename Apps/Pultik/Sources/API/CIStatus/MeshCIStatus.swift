@@ -12,6 +12,9 @@ struct MeshCIStatus: CIStatusSource {
     let head: @Sendable () async -> Set<String>
 
     func snapshot(for runs: Set<CIRunRef>) async throws -> CIStatusSnapshot {
+        // No Prometheus in settings.json or the profile: our CI is invisible,
+        // so every run reads unseen and GitHub confirms it on its own clock.
+        guard RuntimeConfig.current.prometheus != nil else { return CIStatusSnapshot(queued: [:]) }
         let ids = Set(runs.map(\.runID))
         let live = try await metrics.liveJobs()
         var snapshot = CIStatusSnapshot(queued: live.queued)

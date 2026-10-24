@@ -4,7 +4,9 @@ The managed window-management config: orientation-aware grid keys, band keys,
 Space switching, app summon, arrange-all — and the `.organize` workspace
 engine (`organize.lua`). Installed by `pultik install --hammerspoon`, which
 symlinks `~/.hammerspoon/init.lua` here (repo checkout when present, embedded
-copy otherwise). Migrated from PersonalSetup 2026-09-01; decision record:
+copy otherwise). A full `pultik install` keeps an `init.lua` it did not
+install; `--hammerspoon-force` replaces it and keeps it as `init.lua.pultik-backup`.
+Migrated from PersonalSetup 2026-09-01; decision record:
 `../docs/specs/2026-09-01-organize-workspaces-decisions.md`, plus the
 historical grid decision logs still in PersonalSetup's `docs/specs/`.
 

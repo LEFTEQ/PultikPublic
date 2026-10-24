@@ -160,14 +160,14 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "canvas-draw"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "canvas-ffi"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "canvas-draw",
  "canvas-gpu",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-gpu"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "bytemuck",
  "canvas-draw",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-text"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "canvas-draw",
  "code-core",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "code-core"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "imara-diff",
  "proptest",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "code-core-ffi"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "code-core",
  "theme",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "pultik-ffi"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "canvas-ffi",
  "code-core-ffi",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "theme"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "timeline"
-version = "4.3.0"
+version = "4.4.0"
 dependencies = [
  "canvas-draw",
  "canvas-text",

@@ -16,7 +16,9 @@ package main
 //go:generate cp ../../hammerspoon/init.lua ../../hammerspoon/organize.lua ../../hammerspoon/cmux.lua installassets/hammerspoon/
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,11 +88,89 @@ func hammerspoonRepoDir() string {
 			target = filepath.Join(filepath.Dir(linkPath), target)
 		}
 		dir := filepath.Dir(target)
-		if dir != managed && isCheckout(dir) {
+		if dir != managed && isPultikCheckoutDir(dir) {
 			return dir
 		}
 	}
 	return ""
+}
+
+// installHammerspoonStep is the install's Hammerspoon step. A full install
+// links a fresh machine and refreshes pultik's own link, but keeps a config
+// someone else wrote; --hammerspoon-force replaces that one too, with a backup.
+func installHammerspoonStep(opts installOptions) error {
+	if foreign, found := foreignHammerspoonConfig(); found && !opts.replaceHammerspoon {
+		fmt.Fprintf(uiOut, "%s! kept your own Hammerspoon config (%s); `pultik install --hammerspoon-force` replaces it and keeps the old one as a backup%s\n", yellow, foreign, reset)
+		return nil
+	}
+	if opts.dryRun {
+		step("would link ~/.hammerspoon/init.lua (dry run)")
+		return nil
+	}
+	return installHammerspoon()
+}
+
+// foreignHammerspoonConfig reports an init.lua that pultik did not put there:
+// a hand-written file, or a symlink to somebody else's config.
+func foreignHammerspoonConfig() (string, bool) {
+	linkPath, err := hammerspoonLinkPath()
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		return "", false
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return linkPath, true
+	}
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		return linkPath, true
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(linkPath), target)
+	}
+	if isPultikHammerspoonTarget(target) {
+		return "", false
+	}
+	return linkPath + " → " + target, true
+}
+
+// isPultikHammerspoonTarget recognizes every link pultik writes: into the
+// managed copies, into a checkout's hammerspoon package, and into a checkout
+// that has since moved. A moved checkout's link dangles, so only its exact
+// shape counts: <dir named pultik>/hammerspoon/init.lua, and only when the
+// target is gone (ENOENT). Any other dangling or unreadable target, such as
+// a dotfiles link on an unmounted volume, is the user's and is preserved.
+func isPultikHammerspoonTarget(target string) bool {
+	if filepath.Base(target) != "init.lua" {
+		return false
+	}
+	dir := filepath.Dir(target)
+	if managed, err := hammerspoonManagedDir(); err == nil && dir == managed {
+		return true
+	}
+	if isPultikCheckoutDir(dir) {
+		return true
+	}
+	if _, err := os.Stat(target); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return filepath.Base(dir) == "hammerspoon" && strings.EqualFold(filepath.Base(filepath.Dir(dir)), "pultik")
+}
+
+// isPultikCheckoutDir is a checkout's hammerspoon package: the three modules
+// with tools/pultik beside the directory, so a dotfiles folder that copied
+// the modules is not taken for a checkout.
+func isPultikCheckoutDir(dir string) bool {
+	for _, name := range hammerspoonFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return false
+		}
+	}
+	_, err := os.Stat(filepath.Join(filepath.Dir(dir), "tools", "pultik"))
+	return err == nil
 }
 
 func installHammerspoon() error {
@@ -122,18 +202,31 @@ func installHammerspoon() error {
 				ok("hammerspoon config already linked → %s", target)
 				return nil
 			}
-		} else {
-			if info.IsDir() {
-				return fmt.Errorf("%s is a directory; move it aside first", linkPath)
-			}
-			// A hand-written config is user property: keep a copy the same way
-			// installClaudeHooks keeps settings.json.pultik-backup.
-			if err := copyFileAtomic(linkPath, linkPath+".pultik-backup", 0o644); err != nil {
+		} else if info.IsDir() {
+			return fmt.Errorf("%s is a directory; move it aside first", linkPath)
+		}
+		if _, foreign := foreignHammerspoonConfig(); foreign {
+			// A hand-written config, or a link to one, is user property: keep
+			// it under a name no earlier backup holds (a second link or hard
+			// link, created exclusively), then drop the original name.
+			backup, err := placeBackup(linkPath, func(candidate string) error {
+				if info.Mode()&os.ModeSymlink != 0 {
+					target, err := os.Readlink(linkPath)
+					if err != nil {
+						return err
+					}
+					return os.Symlink(target, candidate)
+				}
+				return os.Link(linkPath, candidate)
+			})
+			if err != nil {
 				return fmt.Errorf("back up existing init.lua: %w", err)
 			}
-			step("backed up existing init.lua → " + linkPath + ".pultik-backup")
-		}
-		if err := os.Remove(linkPath); err != nil {
+			if err := os.Remove(linkPath); err != nil {
+				return err
+			}
+			step("backed up existing init.lua → " + backup)
+		} else if err := os.Remove(linkPath); err != nil {
 			return err
 		}
 	} else if !os.IsNotExist(err) {

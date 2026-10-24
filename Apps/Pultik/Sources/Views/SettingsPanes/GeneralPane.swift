@@ -12,7 +12,17 @@ struct GeneralPane: View {
     /// Read once, not per body evaluation: `Preferences.load()` is a file read,
     /// a full JSON decode and every migration, and a SwiftUI body can run many
     /// times a second. The hotkey only applies after a relaunch anyway.
-    @State private var hotkey = Preferences.load().hotkey
+    @State private var preferences = Preferences.load()
+
+    /// The profile, and what settings.json says when it names no known one.
+    private var profileLabel: String {
+        let resolved = preferences.resolvedProfile.rawValue
+        switch preferences.profile {
+        case nil: return "\(resolved) (no profile key)"
+        case resolved?: return resolved
+        case let raw?: return "\(resolved) (unknown \"\(raw)\")"
+        }
+    }
 
     var body: some View {
         Form {
@@ -35,12 +45,17 @@ struct GeneralPane: View {
 
             Section {
                 LabeledContent("Summon") {
-                    Text(hotkey)
+                    Text(preferences.hotkey)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("Profile") {
+                    Text(profileLabel)
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
             } footer: {
-                Text("Edit \"hotkey\" in settings.json (e.g. \"cmd+option+space\") — applies after relaunch. Default: option+space.")
+                Text("Edit \"hotkey\" in settings.json (e.g. \"cmd+option+space\") — applies after relaunch. Default: \(preferences.resolvedProfile.hotkey). The profile fills every key settings.json leaves out; change it with pultik install --profile.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

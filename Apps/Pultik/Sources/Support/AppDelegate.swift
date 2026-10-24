@@ -96,7 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             BrightnessStore.shared.wake()
             AppDelegate.shared?.togglePanel(nil)
         }
-        HotKey.register(spec: Preferences.load().hotkey)
+        let preferences = Preferences.load()
+        HotKey.register(spec: preferences.hotkey, fallback: preferences.resolvedProfile.hotkey)
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.isVisible = true

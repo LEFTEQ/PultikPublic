@@ -20,7 +20,10 @@ extension StatusStore {
     /// (spec 2026-09-25): a silent box drops out of the merge and is marked
     /// silent, and never blanks the rail or delays the other box.
     func refreshDevbox() async {
-        guard isSectionVisible("devbox") else {
+        // No ssh key, no lane: discovery would find boxes nothing can poll,
+        // and ssh without its key is a refused login fail2ban counts. Every
+        // profile, every box (docs/specs/2026-10-23-pultik-profiles-decisions.md).
+        guard isSectionVisible("devbox"), RuntimeConfig.current.devboxIdentity() != nil else {
             devboxWorkspaces = []
             devboxSummary = nil
             devboxFetchedAt = nil
@@ -78,13 +81,14 @@ extension StatusStore {
 
     /// `devbox boxes --json` at launch and every `DevboxDiscovery.interval`.
     /// A failed discovery (older CLI, no answer) keeps the last good list;
-    /// with none, today's single endpoint stays. The stamp is taken before
+    /// with none, the profile's fallback boxes stay. The stamp is taken before
     /// the await so an overlapping refresh does not discover twice.
     func discoverDevboxBoxesIfDue() async {
         if let last = devboxDiscoveredAt, Date().timeIntervalSince(last) < DevboxDiscovery.interval { return }
         devboxDiscoveredAt = Date()
         let discovered = await DevboxClient.shared.discoverBoxes()
-        let boxes = DevboxDiscovery.resolve(discovered: discovered, previous: devboxBoxes)
+        let boxes = DevboxDiscovery.resolve(discovered: discovered, previous: devboxBoxes,
+                                            fallback: preferences.resolvedDevboxFallbackBoxes)
         if boxes != devboxBoxes {
             NSLog("pultik: devbox boxes → %@",
                   boxes.map { "\($0.name)=\($0.host):\($0.port)" }.joined(separator: ", "))

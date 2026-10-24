@@ -39,7 +39,16 @@ extension StatusStore {
         settingsWritable = snapshot.writable
         // Not clean, the snapshot is the last good copy with any skipped
         // entries standing in — still the best view, just never written.
+        let devboxBefore = (preferences.resolvedDevboxFallbackBoxes, preferences.runtimeConfig.devboxIdentityFile)
         preferences = snapshot.value
+        // A new devbox key or fallback set is another estate: drop the old
+        // boxes and answers, and discover again on the next poll.
+        if devboxBefore != (preferences.resolvedDevboxFallbackBoxes, preferences.runtimeConfig.devboxIdentityFile) {
+            devboxBoxes = preferences.resolvedDevboxFallbackBoxes
+            devboxSnapshots = [:]
+            devboxDiscoveredAt = nil
+            publishDevboxEstate()
+        }
         if pinned != snapshot.value.pinnedRepos {
             // `pinned`'s didSet writes back: the same value, one harmless save
             // (refused while the file is not clean).
@@ -51,6 +60,9 @@ extension StatusStore {
     }
 
     func enableLoginItemOnFirstRun() {
+        // settings.json `loginItemOnFirstRun`, else the profile's: example
+        // registers it, genesis and custom leave it to Settings ▸ General.
+        guard preferences.resolvedLoginItemOnFirstRun else { return }
         let bundleId = Bundle.main.bundleIdentifier ?? "pultik"
         // A cache standing in for an unclean file may lack the opt-out that
         // the real file records — never re-enable on its say-so.

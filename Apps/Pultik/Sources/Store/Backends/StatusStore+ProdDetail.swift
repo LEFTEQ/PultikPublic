@@ -47,8 +47,7 @@ extension StatusStore {
     /// selection reads anew (a concurrent reader still shares the flight):
     /// an answer from memory could predate the digest generation on screen.
     func hlidacDeployment(_ key: String) async throws -> HlidacDigest.Deployment? {
-        guard hlidacConfigured, prodUnconfirmedSince == nil else { return nil }
-        let base = hlidacBase
+        guard prodUnconfirmedSince == nil, let base = hlidacBase else { return nil }
         return try await QueryRepository.shared.load(
             ProdDetailResources.deployment,
             key: QueryKey(resource: ProdDetailResources.deployment.name, identity: base.absoluteString, scope: key),
@@ -61,12 +60,21 @@ extension StatusStore {
     /// then a revalidation when it is older than its schedule. A failure
     /// keeps what is drawn, "as of"; with nothing drawn the section hides.
     func refreshShelf() async {
+        // No shelf in settings.json or the profile: no request, and the
+        // section hides (it draws only releases).
+        guard let origin = AppsShelfClient.origin else {
+            shelfReleases = []
+            shelfFetchedAt = nil
+            return
+        }
         let resource = ProdDetailResources.shelf
-        let key = QueryKey(resource: resource.name, identity: AppsShelfClient.origin.absoluteString)
-        let fetch: @Sendable () async throws -> [ShelfRelease] = { try await AppsShelfClient.shared.releases() }
+        let key = QueryKey(resource: resource.name, identity: origin.absoluteString)
+        let fetch: @Sendable () async throws -> [ShelfRelease] = { try await AppsShelfClient.shared.releases(from: origin) }
         do {
             for maxAge in [TimeInterval.infinity, resource.staleAfter] {
                 let releases = try await QueryRepository.shared.load(resource, key: key, maxAge: maxAge, fetch: fetch)
+                // A reload that moved the shelf mid-flight: the next refresh reads it.
+                guard AppsShelfClient.origin == origin else { return }
                 if releases != shelfReleases { shelfReleases = releases }
                 shelfFetchedAt = QueryRepository.shared.cached([ShelfRelease].self, key: key)?.fetchedAt
             }

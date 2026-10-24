@@ -6,6 +6,11 @@ extension StatusStore {
     /// Unresolved production issues across the configured projects — throttled
     /// to every 5 minutes; new issues (after the first load) notify.
     func refreshSentryIfStale() async {
+        // No Sentry in settings.json or the profile: quiet, not failing.
+        guard RuntimeConfig.current.sentry != nil else {
+            prodIssues = []
+            return
+        }
         // Decision log (Settled): while Hlídač serves prod Sentry the Mac
         // stops sweeping it — no polling, no new-issue banners. The first
         // sweep after Hlídač goes away is a silent baseline, so what arrived

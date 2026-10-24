@@ -30,7 +30,13 @@ extension StatusStore {
     func refreshToolkit() async {
         guard visibleModule == .toolkit else { return }
         guard let executable = ToolkitClient.executable() else {
-            toolkit.failed(.missing)
+            // A configured path is the only candidate: say it is unusable
+            // rather than "not installed".
+            if let configured = RuntimeConfig.current.toolkitPath {
+                toolkit.failed(.failed("settings.json toolkitPath \(configured) is not an executable absolute path"))
+            } else {
+                toolkit.failed(.missing)
+            }
             return
         }
         let key = toolkitSnapshotKey(executable)

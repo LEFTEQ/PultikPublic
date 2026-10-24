@@ -353,3 +353,13 @@ func TestWriteSettingsRefusesAConcurrentChange(t *testing.T) {
 		t.Fatalf("the concurrent write was lost: %s", now)
 	}
 }
+
+// `"hlidacURL": ""` turns the app's board off, whatever the profile: validate
+// says so and sends nothing, rather than falling back to example's Hlídač.
+func TestProdValidateHonorsADisabledHlidac(t *testing.T) {
+	writeSettings(t, `{"profile":"example","hlidacURL":""}`)
+	err := prodValidate(nil)
+	if exitCode(err) != exitProdSettings || err == nil || !strings.Contains(err.Error(), "board is off") {
+		t.Fatalf("validate with hlidacURL \"\": exit %d err=%v, want %d and the board-off diagnostic", exitCode(err), err, exitProdSettings)
+	}
+}

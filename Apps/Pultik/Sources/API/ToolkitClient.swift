@@ -11,24 +11,53 @@ enum ToolkitClient {
     static let outputLimit = 4 << 20
 
     /// A GUI app inherits no shell PATH, so `toolkit` is looked up where its
-    /// installers put it: the Homebrew cask, then `~/.local/bin`.
+    /// installers put it: the Homebrew cask, Intel Homebrew, then
+    /// `~/.local/bin`, the order Pultík always used.
     static let installPaths = [
         "/opt/homebrew/bin/toolkit",
         "/usr/local/bin/toolkit",
         NSHomeDirectory() + "/.local/bin/toolkit",
     ]
 
+    /// Where the Toolkit module and Stop… run `toolkit` from; nil = not
+    /// installed. settings.json's `toolkitPath` alone when it is set (a
+    /// relative, missing or non-executable one is nil, never another copy);
+    /// otherwise `installPaths` in the order Pultík always used, with no
+    /// PATH step (docs/specs/2026-10-23-pultik-profiles-decisions.md P12).
+    static func path(configured: String? = RuntimeConfig.current.toolkitPath,
+                     isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)) -> String? {
+        ExecutableSearch.find("toolkit", configured: configured, fallbacks: installPaths,
+                              environment: [:], isExecutable: isExecutable)
+    }
+
+    /// The PATH Sessions' Focus always ran `/usr/bin/env toolkit` under.
+    static let focusPATH = "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/.local/bin:/usr/bin:/bin"
+
+    /// Sessions' Focus: settings.json's `toolkitPath` when it is set (nil when
+    /// it is unusable, never another copy), else `/usr/bin/env toolkit` over
+    /// `focusPATH`, exactly as before.
+    static func focusCommand(_ arguments: [String], configured: String? = RuntimeConfig.current.toolkitPath,
+                             isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:))
+        -> (executable: URL, arguments: [String])? {
+        guard let configured = ExecutableSearch.expand(configured) else {
+            return (URL(filePath: "/usr/bin/env"), ["toolkit"] + arguments)
+        }
+        return ExecutableSearch.usable(configured, isExecutable: isExecutable)
+            ? (URL(filePath: configured), arguments) : nil
+    }
+
     /// The binary to run; nil = not installed. A Debug build reads
     /// `PULTIK_TOOLKIT_EXECUTABLE` (an absolute path) first, so native QA can
-    /// point it at a provider built in a worktree.
+    /// point it at a provider built in a worktree; then `path`.
     static func executable(environment: [String: String] = ProcessInfo.processInfo.environment,
+                           configured: String? = RuntimeConfig.current.toolkitPath,
                            isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)) -> URL? {
         #if DEBUG
         if let path = environment["PULTIK_TOOLKIT_EXECUTABLE"], path.hasPrefix("/") {
             return isExecutable(path) ? URL(filePath: path) : nil
         }
         #endif
-        return installPaths.first(where: isExecutable).map { URL(filePath: $0) }
+        return path(configured: configured, isExecutable: isExecutable).map { URL(filePath: $0) }
     }
 
     /// One read, detached from the caller's actor: the run blocks.
