@@ -66,7 +66,7 @@ struct ProjectPageView: View {
                         text: "▲ Prod",
                         count: projectIssues.count,
                         tone: .red,
-                        action: { OverviewURL.open(OverviewURL.sentryIssues) },
+                        action: { if let url = OverviewURL.sentryIssues { OverviewURL.open(url) } },
                         actionRole: .link,
                         actionHelp: "Open the Sentry issue overview"
                     )

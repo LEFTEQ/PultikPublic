@@ -3,7 +3,10 @@ import SwiftUI
 
 enum OverviewURL {
     static let githubPulls = URL(string: "https://github.com/pulls")!
-    static let sentryIssues = URL(string: "https://sentry.ops.example.invalid/organizations/sentry/issues/")!
+    /// The configured Sentry's issue overview; nil without one.
+    static var sentryIssues: URL? {
+        RuntimeConfig.current.sentry?.appending(path: "organizations/sentry/issues/")
+    }
 
     static func repoPulls(_ slug: String) -> URL {
         slug.split(separator: "/").reduce(URL(string: "https://github.com")!) { url, component in

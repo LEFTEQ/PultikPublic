@@ -8,12 +8,20 @@ import Foundation
 /// ~/Library/Application Support/Pultik/settings.json survives all of that,
 /// and is editable and backup-able by hand.
 struct Preferences: Codable {
+    /// Whose defaults this Mac gets (`PultikProfile`, docs/specs/2026-10-23-
+    /// pultik-profiles-decisions.md): "example", "genesis" or "custom". Absent
+    /// is example, so a file that predates profiles keeps its defaults. Kept as
+    /// written, so a hand edit round-trips; `resolvedProfile` reads it.
+    var profile: String?
     var pinnedRepos: [String] = []
     /// Bundle id the login item was auto-enabled for. Keyed to the bundle id
     /// (not a plain flag) because SMAppService registration is per-bundle:
     /// after a bundle-id change the auto-enable must run once more, while a
     /// manual opt-out in Settings is still never silently re-enabled.
     var loginItemConfiguredFor: String?
+    /// Whether the first run registers the login item. Nil = the profile's
+    /// (example: yes; genesis and custom: no).
+    var loginItemOnFirstRun: Bool?
     /// Legacy plaintext Sentry token: `StatusStore.sentryToken` moves it into
     /// the login keychain (`pultik-sentry`) and blanks it on first read.
     var sentryToken: String?
@@ -27,7 +35,7 @@ struct Preferences: Codable {
 
     /// Summon combo, e.g. "option+space", "cmd+option+space", "control+p".
     /// Applied at launch; unparseable values fall back to the default.
-    var hotkey: String = HotKey.defaultSpec
+    var hotkey: String = PultikProfile.example.hotkey
     /// Panel sections the user switched off (Settings toggles). Known keys:
     /// prod, servers, services, ci, runners, alerts.
     var hiddenSections: [String] = []
@@ -38,10 +46,35 @@ struct Preferences: Codable {
     /// The on-call registry: what each product is made of.
     var projects: [ProjectSpec] = Preferences.defaultProjects
     /// Hlídač, the prod digest API on BuildServer (decision D13). Nil = the
-    /// default endpoint; set only to point a build at a staging Hlídač.
+    /// profile's endpoint (example: BuildServer's); "" turns the board off.
     var hlidacURL: String?
 
-    static let defaultHlidacURL = "https://hlidac.ops.example.invalid"
+    static let defaultHlidacURL = PultikProfile.exampleHlidacURL
+
+    /// The other estate hosts, each nil = the profile's (example: the mesh
+    /// Prometheus and its Loki ruler, eve, the self-hosted Sentry) and "" =
+    /// none: the lane that reads it sends nothing.
+    var prometheusURL: String?
+    var lokiURL: String?
+    var eveURL: String?
+    var sentryURL: String?
+    /// The apps shelf Prod's Releases section reads (example: downloads.example.invalid);
+    /// "" = none, and the section hides.
+    var shelfURL: String?
+
+    /// The devbox lane, each nil = the profile's. The forced-command ssh key
+    /// ("" = none: no ssh at all; a key that does not exist, or a relative
+    /// path, is none too); the `devbox` CLI ("" = search; set, it is the only
+    /// candidate, and a relative or missing one runs nothing); the boxes
+    /// polled while `devbox boxes --json` has never answered.
+    var devboxIdentityFile: String?
+    var devboxExecutable: String?
+    var devboxFallbackBoxes: [DevboxEndpoint]?
+
+    /// toolkit's absolute path, the only candidate when set (relative or
+    /// missing runs nothing). Nil = each call site's old search
+    /// (`ToolkitClient.path`, `ToolkitClient.focusCommand`).
+    var toolkitPath: String?
     /// Fixed main-list order: repos whose slug contains one of these names
     /// (case-insensitive) come first, in exactly this sequence; everything
     /// else follows by recency. Predictability over cleverness.
@@ -455,25 +488,39 @@ struct Preferences: Codable {
     /// make an older settings.json unreadable and get it overwritten empty.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // First: every absent key below takes this profile's default.
+        profile = try container.decodeIfPresent(String.self, forKey: .profile)
+        let defaults = PultikProfile.named(profile)
         pinnedRepos = try container.decodeIfPresent([String].self, forKey: .pinnedRepos) ?? []
         loginItemConfiguredFor = try container.decodeIfPresent(String.self, forKey: .loginItemConfiguredFor)
+        loginItemOnFirstRun = try container.decodeIfPresent(Bool.self, forKey: .loginItemOnFirstRun)
         sentryToken = try container.decodeIfPresent(String.self, forKey: .sentryToken)
         eveToken = try container.decodeIfPresent(String.self, forKey: .eveToken)
         sentryProjects = try container.decodeIfPresent([String].self, forKey: .sentryProjects)
-            ?? Preferences.defaultSentryProjects
-        hotkey = try container.decodeIfPresent(String.self, forKey: .hotkey) ?? HotKey.defaultSpec
+            ?? Preferences.defaultSentryProjects(for: defaults)
+        hotkey = try container.decodeIfPresent(String.self, forKey: .hotkey) ?? defaults.hotkey
         hiddenSections = try container.decodeIfPresent([String].self, forKey: .hiddenSections) ?? []
         // Lossy: one malformed entry is skipped and reported (ConfigIssueSink),
         // never a reason to lose the whole estate.
         servers = try container.decodeIfPresent(LossyArray<NamedRef>.self, forKey: .servers)?.elements
-            ?? Preferences.defaultServers
+            ?? Preferences.defaultServers(for: defaults)
         services = try container.decodeIfPresent(LossyArray<NamedRef>.self, forKey: .services)?.elements
-            ?? Preferences.defaultServices
+            ?? Preferences.defaultServices(for: defaults)
         projects = try container.decodeIfPresent(LossyArray<ProjectSpec>.self, forKey: .projects)?.elements
-            ?? Preferences.defaultProjects
+            ?? Preferences.defaultProjects(for: defaults)
         hlidacURL = try container.decodeIfPresent(String.self, forKey: .hlidacURL)
+        prometheusURL = try container.decodeIfPresent(String.self, forKey: .prometheusURL)
+        lokiURL = try container.decodeIfPresent(String.self, forKey: .lokiURL)
+        eveURL = try container.decodeIfPresent(String.self, forKey: .eveURL)
+        sentryURL = try container.decodeIfPresent(String.self, forKey: .sentryURL)
+        shelfURL = try container.decodeIfPresent(String.self, forKey: .shelfURL)
+        devboxIdentityFile = try container.decodeIfPresent(String.self, forKey: .devboxIdentityFile)
+        devboxExecutable = try container.decodeIfPresent(String.self, forKey: .devboxExecutable)
+        devboxFallbackBoxes = try container.decodeIfPresent(
+            LossyArray<DevboxEndpoint>.self, forKey: .devboxFallbackBoxes)?.elements
+        toolkitPath = try container.decodeIfPresent(String.self, forKey: .toolkitPath)
         repoOrder = try container.decodeIfPresent([String].self, forKey: .repoOrder)
-            ?? Preferences.defaultRepoOrder
+            ?? Preferences.defaultRepoOrder(for: defaults)
         visibleAlertLanes = try container.decodeIfPresent([String].self, forKey: .visibleAlertLanes)
             ?? Preferences.defaultAlertLanes
         notifyFiring = try container.decodeIfPresent(Bool.self, forKey: .notifyFiring) ?? true
@@ -519,6 +566,109 @@ struct Preferences: Codable {
         self.loginItemConfiguredFor = loginItemConfiguredFor
     }
 
+    /// Nothing but a profile, its defaults filling every other key: what a
+    /// launch runs on when settings.json does not decode and no clean copy
+    /// exists. Absent is example, exactly `Preferences()`.
+    init(profile: String?) {
+        self.profile = profile
+        let defaults = PultikProfile.named(profile)
+        hotkey = defaults.hotkey
+        sentryProjects = Self.defaultSentryProjects(for: defaults)
+        servers = Self.defaultServers(for: defaults)
+        services = Self.defaultServices(for: defaults)
+        projects = Self.defaultProjects(for: defaults)
+        repoOrder = Self.defaultRepoOrder(for: defaults)
+    }
+
+    /// The `profile` of a settings.json the full decode refuses
+    /// (`PultikProfile.peek`: its text when the JSON is broken, custom for a
+    /// `profile` of the wrong type); nil (example) only when the file names
+    /// no profile at all, or cannot be read.
+    static func peekProfile(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return PultikProfile.peek(data)
+    }
+
+    // MARK: Profile defaults
+
+    var resolvedProfile: PultikProfile {
+        PultikProfile.named(profile)
+    }
+
+    var resolvedLoginItemOnFirstRun: Bool {
+        loginItemOnFirstRun ?? resolvedProfile.loginItemOnFirstRun
+    }
+
+    /// settings.json's Hlídač, else the profile's; "" = the board is off.
+    var resolvedHlidacURL: String {
+        hlidacURL ?? resolvedProfile.hlidacURL
+    }
+
+    /// Hlídač's base; nil = the board is off: none configured ("" or a
+    /// profile without one), or a value that is no URL, which never falls
+    /// back to another Hlídač. example takes any value `URL(string:)` takes,
+    /// a scheme-less one included, exactly as before profiles; genesis and
+    /// custom need a scheme and a host (`RuntimeConfig.host`). `override` (a
+    /// Debug build's PULTIK_HLIDAC_URL) replaces a configured Hlídač, never
+    /// turns an off board on.
+    func hlidacBase(override: String? = nil) -> URL? {
+        let resolved = resolvedHlidacURL
+        guard !resolved.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let configured = override.flatMap { $0.isEmpty ? nil : $0 } ?? resolved
+        if resolvedProfile == .example { return URL(string: configured) }
+        return RuntimeConfig.host(configured, default: "")
+    }
+
+    /// The boxes polled until discovery answers. Every value reaches ssh's
+    /// argv, so a box with an unsafe name, alias, host or port is dropped.
+    var resolvedDevboxFallbackBoxes: [DevboxEndpoint] {
+        (devboxFallbackBoxes ?? resolvedProfile.devboxFallbackBoxes).filter {
+            DevboxDiscovery.isSafeWord($0.name) && DevboxDiscovery.isSafeWord($0.sshAlias)
+                && DevboxDiscovery.isSafeHost($0.host) && (1 ... 65535).contains($0.port)
+        }
+    }
+
+    /// What the clients read (`RuntimeConfig.current`).
+    var runtimeConfig: RuntimeConfig {
+        let defaults = resolvedProfile
+        return RuntimeConfig(
+            profile: defaults,
+            prometheus: RuntimeConfig.host(prometheusURL, default: defaults.prometheusURL),
+            loki: RuntimeConfig.host(lokiURL, default: defaults.lokiURL),
+            eve: RuntimeConfig.host(eveURL, default: defaults.eveURL),
+            sentry: RuntimeConfig.host(sentryURL, default: defaults.sentryURL),
+            shelf: RuntimeConfig.host(shelfURL, default: defaults.shelfURL),
+            devboxIdentityFile: ExecutableSearch.expand(devboxIdentityFile ?? defaults.devboxIdentityFile),
+            devboxExecutable: ExecutableSearch.expand(devboxExecutable),
+            devboxSearchesPath: defaults.devboxSearchesPath,
+            toolkitPath: ExecutableSearch.expand(toolkitPath)
+        )
+    }
+
+    static func defaultSentryProjects(for profile: PultikProfile) -> [String] {
+        profile == .example ? defaultSentryProjects : []
+    }
+
+    static func defaultServers(for profile: PultikProfile) -> [NamedRef] {
+        profile == .example ? defaultServers : []
+    }
+
+    static func defaultServices(for profile: PultikProfile) -> [NamedRef] {
+        profile == .example ? defaultServices : []
+    }
+
+    static func defaultProjects(for profile: PultikProfile) -> [ProjectSpec] {
+        switch profile {
+        case .example: defaultProjects
+        case .genesis: PultikProfile.genesisProjects
+        case .custom: []
+        }
+    }
+
+    static func defaultRepoOrder(for profile: PultikProfile) -> [String] {
+        profile == .example ? defaultRepoOrder : []
+    }
+
     static func load() -> Preferences {
         loadSnapshot().value
     }
@@ -537,7 +687,8 @@ struct Preferences: Codable {
     /// owns the policy; never moved aside, never replaced by a legacy file).
     static func loadSnapshot() -> SettingsSnapshot<Preferences> {
         guard let snapshot = SettingsFile.snapshot(
-            at: fileURL, lastGoodURL: lastGoodURL, memory: memory, fallback: { Preferences() }
+            at: fileURL, lastGoodURL: lastGoodURL, memory: memory,
+            fallback: { Preferences(profile: peekProfile(at: fileURL)) }
         ) else {
             let fallback = loadAbsent()
             memory.remember(fallback)
@@ -585,16 +736,19 @@ struct Preferences: Codable {
     /// each `load()` path gets all of them and none can drift. Returns whether
     /// anything changed, so a file is only rewritten when it actually needs it.
     mutating func applyMigrations() -> Bool {
-        // Deliberately not short-circuited: every migration must run.
+        // Deliberately not short-circuited: every migration must run. The
+        // three that add example's hosts, tiles and prod pointers run only
+        // for example: another profile's file must never gain its estate.
+        let example = resolvedProfile.seedsShippedEstate
         let retired = retireDeadSSHAliases()
         let servers = migrateServerEstate()
-        let next = migrateBuildServerNext()
+        let next = example ? migrateBuildServerNext() : false
         let semafor = migrateBuildServerNextSemafor()
-        let services = migrateServiceEstate()
+        let services = example ? migrateServiceEstate() : false
         let presets = migrateDisplayPresets()
         let repos = migrateRepoSlugs()
         let probes = migrateRetiredServiceRefs()
-        let prod = seedProdPointers()
+        let prod = example ? seedProdPointers() : false
         let modules = seedModules()
         let eve = migrateEveConsole()
         return retired || servers || next || semafor || services || presets || repos || probes || prod || modules || eve

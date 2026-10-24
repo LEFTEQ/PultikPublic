@@ -8,7 +8,11 @@ import Foundation
 /// entering Prod at most every `ShelfRelease.staleAfter`, never on a poll.
 actor AppsShelfClient {
     static let shared = AppsShelfClient()
-    static let origin = URL(string: "https://downloads.example.invalid")!
+    /// settings.json `shelfURL` over the profile's (example: downloads.example.invalid;
+    /// `RuntimeConfig`); nil = no shelf, and nothing is read.
+    static var origin: URL? {
+        RuntimeConfig.current.shelf
+    }
 
     private let session: URLSession
 
@@ -16,11 +20,13 @@ actor AppsShelfClient {
         session = PollingSession.make(timeout: 10)
     }
 
-    func releases() async throws -> [ShelfRelease] {
-        let (data, response) = try await session.data(from: Self.origin.appending(path: "api/releases"))
+    /// `origin`: the shelf the caller keyed its cache on, so a settings
+    /// reload mid-flight never files one shelf's releases under another.
+    func releases(from origin: URL) async throws -> [ShelfRelease] {
+        let (data, response) = try await session.data(from: origin.appending(path: "api/releases"))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw HTTPStatusError(status: status) }
-        return try ShelfRelease.decodeIndex(data, origin: Self.origin)
+        return try ShelfRelease.decodeIndex(data, origin: origin)
     }
 }
 
@@ -52,7 +58,11 @@ struct ShelfRelease: Codable, Equatable, Identifiable, Sendable {
 
     var id: String { key }
     /// The shelf's deep-linkable detail sheet (`/app/:id`).
-    var pageURL: URL { AppsShelfClient.origin.appending(path: "app/\(builds[0].appID)") }
+    /// A row exists only once a shelf answered; example's names the page
+    /// should the shelf be switched off while it is drawn.
+    var pageURL: URL {
+        (AppsShelfClient.origin ?? URL(string: PultikProfile.example.shelfURL)!).appending(path: "app/\(builds[0].appID)")
+    }
 
     static let staleAfter: TimeInterval = 600
 

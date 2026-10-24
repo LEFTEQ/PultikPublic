@@ -54,7 +54,8 @@ func TestMergeClaudeSettingsPreservesMixedHookGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(merged)
-	if !strings.Contains(text, "printf unrelated") || !strings.Contains(text, `"matcher": "startup"`) {
+	// The user's group keeps its own bytes, compact spacing included.
+	if !strings.Contains(text, `{"matcher":"startup","hooks":[{"type":"command","command":"printf unrelated"}]}`) {
 		t.Fatalf("mixed group was not preserved: %s", merged)
 	}
 	if strings.Contains(text, "todo list --open") {
@@ -186,8 +187,7 @@ func TestMergeClaudeSettingsMigratesPultikTaggedHooks(t *testing.T) {
 	if !strings.Contains(text, "deployik context --hook") {
 		t.Fatalf("an unrelated hook was removed: %s", merged)
 	}
-	// Compared after decoding: json.Marshal escapes `>` as >, so the
-	// exact line is only visible through the parsed document.
+	// Compared after decoding, so the check holds whatever the file's spacing.
 	counts := map[string]int{}
 	for _, command := range pultikHookCommands(merged) {
 		counts[command]++

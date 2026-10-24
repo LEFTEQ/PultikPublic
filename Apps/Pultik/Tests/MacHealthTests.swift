@@ -106,16 +106,19 @@ final class MacHealthTests: XCTestCase {
         }
     }
 
-    /// A GUI app has no shell PATH: `toolkit` resolves to the first installed
-    /// copy, anything else bare is refused rather than searched for.
+    /// A GUI app has no shell PATH: `toolkit` resolves to settings.json's
+    /// `toolkitPath` alone when set, else the install paths in their old order
+    /// (no PATH step); anything else bare is refused rather than searched for.
     func testStopResolvesToolkitToAnAbsolutePath() {
         let argv = ["toolkit", "macwatch", "stop", "--json", "--pid", "22504"]
         let local = NSHomeDirectory() + "/.local/bin/toolkit"
-        XCTAssertEqual(MacHealthStop.resolve(argv) { $0 == local }, [local] + argv.dropFirst())
-        XCTAssertEqual(MacHealthStop.resolve(argv) { _ in true }?.first, "/opt/homebrew/bin/toolkit")
-        XCTAssertNil(MacHealthStop.resolve(argv) { _ in false })
-        XCTAssertNil(MacHealthStop.resolve(["kill", "22504"]) { _ in true })
-
+        XCTAssertEqual(MacHealthStop.resolve(argv, configured: nil) { $0 == local }, [local] + argv.dropFirst())
+        XCTAssertEqual(MacHealthStop.resolve(argv, configured: nil) { _ in true }?.first, "/opt/homebrew/bin/toolkit")
+        XCTAssertNil(MacHealthStop.resolve(argv, configured: nil) { _ in false })
+        XCTAssertNil(MacHealthStop.resolve(["kill", "22504"], configured: nil) { _ in true })
+        XCTAssertEqual(MacHealthStop.resolve(argv, configured: "/opt/pinned/toolkit") { _ in true }?.first,
+                       "/opt/pinned/toolkit")
+        XCTAssertNil(MacHealthStop.resolve(argv, configured: "/opt/pinned/toolkit") { $0 != "/opt/pinned/toolkit" })
     }
 
     /// `macwatch stop --json` answers per process; any refusal is the

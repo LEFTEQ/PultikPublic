@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -48,6 +49,8 @@ type manifest struct {
 	Description string   `yaml:"description"`
 	Platform    string   `yaml:"platform"`
 	Channel     string   `yaml:"channel"`
+	Audience    string   `yaml:"audience"`
+	GitHubOrg   string   `yaml:"github_org"`
 	Build       string   `yaml:"build"`
 	Artifact    string   `yaml:"artifact"`
 	VersionCmd  string   `yaml:"version_cmd"`
@@ -69,6 +72,8 @@ type release struct {
 	Description string `json:"description"`
 	Platform    string `json:"platform"`
 	Channel     string `json:"channel"`
+	Audience    string `json:"audience"`
+	GitHubOrg   string `json:"github_org,omitempty"`
 	Version     string `json:"version"`
 	Artifact    string `json:"artifact"`
 	Size        int64  `json:"size"`
@@ -80,6 +85,7 @@ type release struct {
 }
 
 var segmentRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var githubOrgRe = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
 
 // Progress goes here. Under --json it moves to stderr so stdout carries
 // nothing but the result object — an agent can parse stdout blind.
@@ -385,8 +391,8 @@ func ship(args []string) error {
 func trainApps(m manifest, file, only string) ([]manifest, error) {
 	apps := []manifest{m}
 	if len(m.Apps) > 0 {
-		if m.App != "" || m.Build != "" || m.Artifact != "" {
-			return nil, fmt.Errorf("%s: a release train sets `app`, `build` and `artifact` on each entry of `apps`, never at the top", file)
+		if m.App != "" || m.Build != "" || m.Artifact != "" || m.Audience != "" || m.GitHubOrg != "" {
+			return nil, fmt.Errorf("%s: a release train sets `app`, `build`, `artifact`, `audience` and `github_org` on each entry of `apps`, never at the top", file)
 		}
 		apps = make([]manifest, 0, len(m.Apps))
 		for _, a := range m.Apps {
@@ -414,6 +420,21 @@ func trainApps(m manifest, file, only string) ([]manifest, error) {
 		}
 		if !segmentRe.MatchString(a.App) {
 			return nil, fmt.Errorf("app id %q must match %s", a.App, segmentRe)
+		}
+		if a.Audience == "" {
+			a.Audience = "public"
+		}
+		switch a.Audience {
+		case "public":
+			if a.GitHubOrg != "" {
+				return nil, fmt.Errorf("%s: %q sets `github_org` without `audience: team` — remove `github_org` or set `audience: team`", file, a.App)
+			}
+		case "team":
+			if len(a.GitHubOrg) > 39 || !githubOrgRe.MatchString(a.GitHubOrg) {
+				return nil, fmt.Errorf("%s: %q needs a valid `github_org` for `audience: team` (1–39 alphanumeric characters or single internal hyphens)", file, a.App)
+			}
+		default:
+			return nil, fmt.Errorf("%s: %q has unsupported audience %q — set `audience` to public or team", file, a.App, a.Audience)
 		}
 		if seen[a.App] {
 			return nil, fmt.Errorf("%s lists app %q twice", file, a.App)
@@ -451,10 +472,16 @@ func prepareShip(m manifest, version, dir string, o shipOpts) (shipJob, error) {
 		return shipJob{m: m, channel: channel}, nil
 	}
 
+	if m.Audience == "team" {
+		if err := requireTeamAudience(m); err != nil {
+			return shipJob{}, err
+		}
+	}
+
 	// Refuse to quietly replace a published release. Re-running a ship after a
 	// mid-flight failure is normal; overwriting what users already downloaded
 	// is not — say so before the build, when it still costs nothing.
-	if !o.allowOverwrite && !o.dryRun && alreadyShipped(m.App, version) {
+	if !o.allowOverwrite && !o.dryRun && alreadyShipped(m.App, version, m.Audience) {
 		return shipJob{}, fmt.Errorf("%s %s is already on the counter — bump the version, or pass --allow-overwrite to replace it", m.Name, version)
 	}
 
@@ -529,7 +556,7 @@ func publishShip(job shipJob, version, dir string, o shipOpts) (shipResult, erro
 
 	rel := release{
 		App: m.App, Name: m.Name, Icon: m.Icon, Description: m.Description,
-		Platform: m.Platform, Channel: channel, Version: version,
+		Platform: m.Platform, Channel: channel, Audience: m.Audience, GitHubOrg: m.GitHubOrg, Version: version,
 		Artifact: filepath.Base(artifact), Size: info.Size(), Sha256: sum,
 		Notes: notes, Ts: time.Now().Unix(), Commit: headCommit(dir),
 	}
@@ -619,21 +646,67 @@ func printShipJSON(v any) {
 	}
 }
 
-// alreadyShipped reports whether this exact version is on the counter. It
-// reads the index, not /api/releases/<app>/<version> — that path isn't an API
-// route at all: it falls through to the SPA and answers 200 with HTML for a
-// version that was never shipped, so a status-code check would block every
-// ship. Unknown (offline, malformed) answers false: never block a release on
-// a failed lookup, the upload itself is the backstop.
-func alreadyShipped(app, version string) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(baseURL() + "/api/releases")
+func requireTeamAudience(m manifest) error {
+	resp, err := publisherGet("/api/releases/capabilities")
 	if err != nil {
-		return false
+		return fmt.Errorf("team audience unsupported: capability lookup failed: %w — deploy and verify the shelf gate and publisher credential before retrying", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return false
+	var capabilities struct {
+		Version    int      `json:"version"`
+		TeamAccess bool     `json:"team_access"`
+		Audience   []string `json:"audience"`
+		GitHubOrg  string   `json:"github_org"`
+		Policies   map[string]struct {
+			Audience  string `json:"audience"`
+			GitHubOrg string `json:"github_org"`
+		} `json:"policies"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK || decoder.Decode(&capabilities) != nil || decoder.Decode(new(json.RawMessage)) != io.EOF {
+		return fmt.Errorf("team audience unsupported: GET %s/api/releases/capabilities did not return valid capabilities — deploy and verify the shelf gate before retrying", baseURL())
+	}
+	policy, exists := capabilities.Policies[m.App]
+	if capabilities.Version != 1 || !capabilities.TeamAccess || !exists || policy.Audience != m.Audience || policy.GitHubOrg != m.GitHubOrg {
+		return fmt.Errorf("team audience unsupported: shelf version, team access or policy for %s does not match audience %q and github_org %q — deploy and verify the matching shelf gate before retrying", m.App, m.Audience, m.GitHubOrg)
+	}
+	return nil
+}
+
+func publisherGet(path string) (*http.Response, error) {
+	token, err := readToken()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, baseURL()+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	return client.Do(req)
+}
+
+func releaseInventory(audience ...string) ([]struct {
+	ID       string    `json:"id"`
+	Releases []release `json:"releases"`
+}, error) {
+	var resp *http.Response
+	var err error
+	if len(audience) > 0 && audience[0] == "team" {
+		resp, err = publisherGet("/api/releases/publisher")
+	} else {
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err = client.Get(baseURL() + "/api/releases")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("release inventory: HTTP %d", resp.StatusCode)
 	}
 	var data struct {
 		Apps []struct {
@@ -642,9 +715,23 @@ func alreadyShipped(app, version string) bool {
 		} `json:"apps"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	return data.Apps, nil
+}
+
+// alreadyShipped reports whether this exact version is on the counter. It
+// reads the index, not /api/releases/<app>/<version> — that path isn't an API
+// route at all: it falls through to the SPA and answers 200 with HTML for a
+// version that was never shipped, so a status-code check would block every
+// ship. Unknown (offline, malformed) answers false: never block a release on
+// a failed lookup, the upload itself is the backstop.
+func alreadyShipped(app, version string, audience ...string) bool {
+	apps, err := releaseInventory(audience...)
+	if err != nil {
 		return false
 	}
-	for _, a := range data.Apps {
+	for _, a := range apps {
 		if a.ID != app {
 			continue
 		}
@@ -854,7 +941,7 @@ func resolveNotes(mode string, given bool, dir string, m manifest, version strin
 // after it (rebase, squash, cherry-pick, a long-lived branch) sits outside
 // `--since` and would silently go unmentioned.
 func notesLog(dir string, m manifest) (log string, fresh bool) {
-	prev := lastShipped(m.App)
+	prev := lastShipped(m.App, m.Audience)
 	logCmd := "git log --oneline --no-decorate -n 30"
 	switch {
 	case prev.Commit != "" && haveCommit(dir, prev.Commit):
@@ -883,7 +970,24 @@ func notesLog(dir string, m manifest) (log string, fresh bool) {
 
 // lastShipped is the app's most recent release as the server knows it; a zero
 // value means never shipped, offline, or an answer we couldn't read.
-func lastShipped(app string) release {
+func lastShipped(app string, audience ...string) release {
+	if len(audience) > 0 && audience[0] == "team" {
+		apps, err := releaseInventory(audience...)
+		if err != nil {
+			return release{}
+		}
+		var latest release
+		for _, a := range apps {
+			if a.ID == app {
+				for _, rel := range a.Releases {
+					if latest.Version == "" || rel.Ts > latest.Ts {
+						latest = rel
+					}
+				}
+			}
+		}
+		return latest
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(baseURL() + "/api/releases/" + app + "/latest")
 	if err != nil {
@@ -1180,10 +1284,48 @@ func putJSON(token, url string, body []byte) error {
 	return doUpload(req)
 }
 
+// doUpload sends req with no overall deadline (see upload.go): a stall
+// watchdog bounds the body and ResponseHeaderTimeout bounds the answer.
 func doUpload(req *http.Request) error {
-	client := &http.Client{Timeout: 10 * time.Minute}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = uploadHeaderLimit
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	ctx, cancel := context.WithCancelCause(req.Context())
+	defer cancel(nil)
+	meter := newUploadMeter(req.ContentLength)
+	req = req.WithContext(ctx)
+	if req.Body != nil && req.Body != http.NoBody {
+		req.Body = meter.wrap(req.Body)
+		if getBody := req.GetBody; getBody != nil {
+			// A redirect or an HTTP/2 retry resends from zero: meter that copy too.
+			req.GetBody = func() (io.ReadCloser, error) {
+				body, err := getBody()
+				if err != nil {
+					return nil, err
+				}
+				meter.restart()
+				return meter.wrap(body), nil
+			}
+		}
+	}
+	stop, watched := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watched)
+		meter.watch(stop, cancel)
+	}()
 	resp, err := client.Do(req)
+	close(stop)
+	<-watched
 	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, errUploadStalled) {
+			return cause
+		}
+		var timeout net.Error
+		if meter.finished() && errors.As(err, &timeout) && timeout.Timeout() {
+			return fmt.Errorf("sent the whole %s body, then the server did not answer within %s: %w", humanSize(meter.sent.Load()), uploadHeaderLimit, err)
+		}
 		return err
 	}
 	defer resp.Body.Close()

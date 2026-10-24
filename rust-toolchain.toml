@@ -2,4 +2,4 @@
 channel = "1.96.0"
 components = ["rustfmt", "clippy", "rust-analyzer"]
 # x86_64-apple-darwin: Pultík ships universal, so its Release links code-core for both arches.
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-ios", "aarch64-apple-ios-sim"]

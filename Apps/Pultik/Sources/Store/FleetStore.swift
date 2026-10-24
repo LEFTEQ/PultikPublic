@@ -75,12 +75,19 @@ final class FleetStore {
     /// Runs a fleet verb (`focus`) for a session; failures are logged, the
     /// panel never alerts.
     func focus(_ session: FleetSession) {
+        // settings.json `toolkitPath` when set, else `/usr/bin/env toolkit`
+        // as always (`ToolkitClient.focusCommand`).
+        guard let command = ToolkitClient.focusCommand(["fleet", "focus", "--session", session.sessionId]) else {
+            NSLog("pultik: fleet focus %@ — settings.json toolkitPath is not an executable absolute path",
+                  session.sessionId)
+            return
+        }
         Task.detached {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["toolkit", "fleet", "focus", "--session", session.sessionId]
+            process.executableURL = command.executable
+            process.arguments = command.arguments
             process.environment = ProcessInfo.processInfo.environment.merging(
-                ["PATH": "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/.local/bin:/usr/bin:/bin"]) { _, new in new }
+                ["PATH": ToolkitClient.focusPATH]) { _, new in new }
             do {
                 try process.run()
                 process.waitUntilExit()

@@ -119,14 +119,18 @@ extension ProbeIntegration {
     }
 
     static func devbox() -> ProbeIntegration {
-        ProbeIntegration(
+        // The profile's first box (example: box c); none, and the test says so
+        // without any ssh.
+        let box = StatusStore.shared.preferences.resolvedDevboxFallbackBoxes.first
+        return ProbeIntegration(
             id: "devbox", title: "devbox (ssh)", symbol: "terminal",
             blurb: "Remote ws-v2 workspaces on the devbox, over ssh. Failures here back off hard — sshd sits behind fail2ban.",
             // The primary box's breaker (box c); other boxes back off on
             // their own breakers and show in the footer's pause list.
-            target: .devbox(box: DevboxEndpoint.fallback.name)
+            target: .devbox(box: box?.name ?? DevboxEndpoint.fallback.name)
         ) {
-            if case .failed(let failure) = await DevboxClient.shared.status(.fallback) {
+            guard let box else { return .unreachable("no devbox box in settings.json (devboxFallbackBoxes)") }
+            if case .failed(let failure) = await DevboxClient.shared.status(box) {
                 return failure
             }
             return nil

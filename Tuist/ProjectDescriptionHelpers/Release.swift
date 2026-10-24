@@ -6,7 +6,7 @@
 /// The version both apps carry.
 public enum Release {
     /// CFBundleShortVersionString of every app and helper, and the Cargo workspace version.
-    public static let version = "4.3.0"
+    public static let version = "4.4.0"
     /// CFBundleVersion of every app and helper.
-    public static let build = "35"
+    public static let build = "36"
 }

@@ -1,6 +1,6 @@
 [package]
 name = "canvas-text"
-description = "Text shaping and glyph rasterization (Core Text on macOS) into an atlas; a cell row's run shaping."
+description = "Text shaping and glyph rasterization (Core Text on Apple platforms) into an atlas; a cell row's run shaping."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,7 +19,7 @@ tracing.workspace = true
 code-core.workspace = true
 theme.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(target_vendor = "apple")'.dependencies]
 objc2-core-text.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true

@@ -27,13 +27,13 @@ public enum HelperConstants {
 
     /// The GenesisFanControl-era daemon pultik replaces. Two root SMC writers
     /// with independent 1 Hz re-assertion loops would fight over setpoints, so
-    /// installing ours sweeps this one — the same way GenesisFanControl swept
-    /// up its own MacsFanControl-era predecessor.
+    /// installing ours sweeps this one, but only after the user agrees in the
+    /// app (fan deck D7): on another Mac it belongs to GenesisFanControl itself.
     public enum Legacy {
         public static let label = "dev.example.legacy-fan-control.helper"
         public static let launchDaemonPath = "/Library/LaunchDaemons/dev.example.legacy-fan-control.helper.plist"
-        public static let installedHelperPath = "/usr/local/sbin/genesis-fan-control-helper"
-        public static let socketPath = "/var/run/genesis-fan-control.sock"
+        public static let installedHelperPath = "/usr/local/sbin/example-legacy-fan-control-helper"
+        public static let socketPath = "/var/run/example-legacy-fan-control.sock"
     }
     /// Bumped whenever the helper's behavior changes in a way the GUI
     /// needs to know about — even bug-fix-only changes (like the AUTO

@@ -255,6 +255,10 @@ type pointerRef struct {
 type settingsView struct {
 	pointers  []pointerRef
 	hlidacURL string
+	// hlidacSet: settings.json names hlidacURL, "" included (the board is
+	// off); unset, the profile supplies it.
+	hlidacSet bool
+	profile   string   // settings.json `profile`; absent reads as example
 	issues    []string // entries the app skips or misreads → exit 7
 	notes     []string // how the app fills gaps (shipped pointers)
 }
@@ -304,14 +308,30 @@ func readSettings(raw []byte) (settingsView, error) {
 	if err := checkTopLevelKinds(top); err != nil {
 		return view, err
 	}
+	if rawProfile, ok := top["profile"]; ok && !isNull(rawProfile) {
+		_ = json.Unmarshal(rawProfile, &view.profile)
+		// The app reads a present "" as it reads any name no profile has:
+		// custom (PultikProfile.named). Only an absent profile is example.
+		if view.profile == "" {
+			view.profile = "custom"
+		}
+	}
+	// Only example's defaults name deployments: another profile's app seeds
+	// no shipped project and no shipped pointer (Preferences.applyMigrations).
+	shipsPointers := namesShippedEstate(view.profile)
 	if rawURL, ok := top["hlidacURL"]; ok && !isNull(rawURL) {
 		var url string
 		if json.Unmarshal(rawURL, &url) != nil {
 			return view, fmt.Errorf("hlidacURL is not a string — the app cannot decode settings.json at all")
 		}
 		view.hlidacURL = strings.TrimSpace(url)
+		view.hlidacSet = true
 	}
 	rawProjects, ok := top["projects"]
+	if (!ok || isNull(rawProjects)) && !shipsPointers {
+		view.notes = append(view.notes, fmt.Sprintf("no projects in settings.json — profile %s ships no prod pointers", view.profile))
+		return view, nil
+	}
 	if !ok || isNull(rawProjects) {
 		for _, key := range shippedProjectOrder {
 			for _, p := range shippedProdPointers[key] {
@@ -330,6 +350,9 @@ func readSettings(raw []byte) (settingsView, error) {
 		view.issues = append(view.issues, issues...)
 		if err != nil {
 			view.issues = append(view.issues, fmt.Sprintf("projects[%d]: %v — the app skips this project", i, err))
+			continue
+		}
+		if !prodSet && !shipsPointers {
 			continue
 		}
 		if !prodSet {
@@ -495,6 +518,10 @@ var topLevelKinds = map[string]jsonKind{
 	"workspaces": kindObject, "displayPresets": kindArray, "externalBrightnessOffset": kindInteger,
 	"dimBrightness": kindNumber, "neverSleep": kindBool, "codeUnwrapped": kindBool, "codeSplit": kindBool,
 	"codeTheme": kindString, "modules": kindArray, "homeAfterMinutes": kindInteger,
+	// Profiles (docs/specs/2026-10-23-pultik-profiles-decisions.md).
+	"profile": kindString, "loginItemOnFirstRun": kindBool, "prometheusURL": kindString, "lokiURL": kindString,
+	"eveURL": kindString, "sentryURL": kindString, "shelfURL": kindString, "devboxIdentityFile": kindString,
+	"devboxExecutable": kindString, "devboxFallbackBoxes": kindArray, "toolkitPath": kindString,
 }
 
 func checkTopLevelKinds(top map[string]json.RawMessage) error {
@@ -810,8 +837,20 @@ func prodValidate(args []string) error {
 		return finish(exitProdSettings, err)
 	}
 	report.Issues, report.Notes = append(report.Issues, view.issues...), append(report.Notes, view.notes...)
-	base := firstNonEmpty(urlFlag, os.Getenv("PULTIK_HLIDAC_URL"), view.hlidacURL, defaultHlidacURL)
+	// settings.json's hlidacURL when it names one ("" is the app's board
+	// off), else the profile's; --url and PULTIK_HLIDAC_URL override either.
+	configured := profileHlidacURL(view.profile)
+	if view.hlidacSet {
+		configured = view.hlidacURL
+	}
+	base := firstNonEmpty(urlFlag, os.Getenv("PULTIK_HLIDAC_URL"), configured)
 	report.Hlidac = base
+	if base == "" {
+		if view.hlidacSet {
+			return finish(exitProdSettings, errors.New("no Hlídač: settings.json hlidacURL is empty, so the app's board is off — pass --url to check one"))
+		}
+		return finish(exitProdSettings, fmt.Errorf("no Hlídač: profile %s names none — set hlidacURL in settings.json or pass --url", view.profile))
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -907,6 +946,21 @@ func printValidateReport(r validateReport) {
 		fmt.Fprintf(uiOut, "%s· %s%s\n", dim, note, reset)
 	}
 	// r.Error reaches stderr through main; --json carries it in the object.
+}
+
+// namesShippedEstate mirrors PultikProfile.named: an absent profile is
+// example, any value other than example names none of its estate.
+func namesShippedEstate(profile string) bool {
+	return profile == "" || profile == "example"
+}
+
+// profileHlidacURL is the Hlídač a profile supplies when settings.json sets
+// no hlidacURL: example's, or none.
+func profileHlidacURL(profile string) string {
+	if namesShippedEstate(profile) {
+		return defaultHlidacURL
+	}
+	return ""
 }
 
 func firstNonEmpty(values ...string) string {

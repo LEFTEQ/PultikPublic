@@ -32,9 +32,10 @@ extension StatusStore {
     }
 
     /// `hlidacURL: ""` in settings.json turns the prod board off; unset means
-    /// the default Hlídač.
+    /// the profile's Hlídač (example: BuildServer's; genesis and custom: none,
+    /// so the board is off). A value that is no URL is off too.
     var hlidacConfigured: Bool {
-        preferences.hlidacURL.map { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? true
+        hlidacBase != nil
     }
 
     /// The menu bar's health strip (WP7 draws it).
@@ -53,7 +54,7 @@ extension StatusStore {
         guard !isRefreshingProd else { return }
         isRefreshingProd = true
         defer { isRefreshingProd = false }
-        guard hlidacConfigured else {
+        guard let base = hlidacBase else {
             // `hlidacURL: ""` turns the board off — no request, no digest,
             // so no card claims an alert, no dot draws and FiringWatch keeps
             // every alert and announcement.
@@ -64,7 +65,6 @@ extension StatusStore {
             recordProdNeeds(answered: false)
             return
         }
-        let base = hlidacBase
         let snapshotKey = prodSnapshotKey
         var answered = false
         await gated(.hlidac, probe: { await HlidacClient.shared.probe(base: base) }) {
@@ -98,16 +98,15 @@ extension StatusStore {
 }
 
 extension StatusStore {
-    /// Hlídač's base: settings.json `hlidacURL`, else the default.
-    var hlidacBase: URL {
-        var configured = preferences.hlidacURL ?? Preferences.defaultHlidacURL
+    /// Hlídač's base: settings.json `hlidacURL`, else the profile's; nil =
+    /// the board is off (`Preferences.hlidacBase`).
+    var hlidacBase: URL? {
+        var override: String?
         #if DEBUG
             // Hands-off verification serves the golden digest locally
             // (CLAUDE.md "Verification"); release builds never read this.
-            if let override = ProcessInfo.processInfo.environment["PULTIK_HLIDAC_URL"], !override.isEmpty {
-                configured = override
-            }
+            override = ProcessInfo.processInfo.environment["PULTIK_HLIDAC_URL"]
         #endif
-        return URL(string: configured) ?? URL(string: Preferences.defaultHlidacURL)!
+        return preferences.hlidacBase(override: override)
     }
 }

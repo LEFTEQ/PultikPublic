@@ -69,7 +69,7 @@ struct ProdDeploymentDetail: View {
         do {
             let fresh = try await store.hlidacDeployment(card.key)
             try Task.checkCancellation()
-            guard let fresh, fresh.key == card.key, base == store.hlidacBase else { return }
+            guard let fresh, fresh.key == card.key, let base, base == store.hlidacBase else { return }
             detail = Detail(base: base, deployment: fresh, at: Date(), generation: generation)
         } catch is CancellationError {
         } catch {

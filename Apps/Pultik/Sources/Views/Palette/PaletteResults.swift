@@ -263,7 +263,7 @@ extension StatusPanelView {
         if searchActive, store.isSearchingSentry || !matches.isEmpty {
             HStack(spacing: 6) {
                 Kicker(text: "Sentry", count: matches.count,
-                       action: { OverviewURL.open(OverviewURL.sentryIssues) },
+                       action: { if let url = OverviewURL.sentryIssues { OverviewURL.open(url) } },
                        actionRole: .link,
                        actionHelp: "Open the Sentry issue overview")
                 if store.isSearchingSentry {

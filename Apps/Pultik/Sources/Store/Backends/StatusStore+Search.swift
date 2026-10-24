@@ -175,7 +175,8 @@ extension StatusStore {
 
         // A paused breaker holds for typing too: a keystroke-driven search is
         // the fastest way to turn one refused request into fifty.
-        guard query.count >= 2, isSectionVisible("prod"), !gate.isPaused(.sentry) else {
+        guard query.count >= 2, isSectionVisible("prod"), !gate.isPaused(.sentry),
+              RuntimeConfig.current.sentry != nil else {
             sentryResults = []
             isSearchingSentry = false
             return

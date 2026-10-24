@@ -1,7 +1,7 @@
-//! Text shaping and glyph rasterization (Core Text on macOS) into an atlas.
+//! Text shaping and glyph rasterization (Core Text on Apple platforms) into an atlas.
 //!
 //! - [`TextSystem`]: fonts, shaping with a cache, glyph rasterization into the [`Atlas`].
-//!   On macOS shaping is Core Text `CTLine` (bidi, fallback fonts, caret offsets from the
+//!   On Apple platforms shaping is Core Text `CTLine` (bidi, fallback fonts, caret offsets from the
 //!   system); browsers rasterize Canvas2D runs into the same atlas, while other native
 //!   targets retain a fixed-advance fallback. Browser limits are in this crate's README.
 //!   [`ShapedLine`]'s carets and [`nearest`] are what an editor's line layout builds its
@@ -32,10 +32,10 @@ pub mod merge_view;
 pub mod sprite;
 pub mod term;
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 #[path = "coretext.rs"]
 mod platform;
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+#[cfg(all(not(target_vendor = "apple"), not(target_arch = "wasm32")))]
 #[path = "fallback.rs"]
 mod platform;
 #[cfg(target_arch = "wasm32")]
@@ -141,7 +141,7 @@ pub struct ShapedLine {
     pub width: f32,
     pub ascent: f32,
     pub descent: f32,
-    /// Primary caret x for every char boundary `0..=chars` (from `CTLine` on macOS, so
+    /// Primary caret x for every char boundary `0..=chars` (from `CTLine` on Apple platforms, so
     /// right-to-left runs place carets correctly).
     pub carets: Vec<f32>,
 }
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(line.index_at(line.width + 5.0), 5);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     #[test]
     fn italic_text_gets_a_face_of_its_own() {
         let mut ts = TextSystem::new();
@@ -551,7 +551,7 @@ mod tests {
         assert!(cut.width < full.width);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     #[test]
     fn glyphs_rasterize_into_the_atlas() {
         let mut ts = TextSystem::new();
@@ -570,6 +570,24 @@ mod tests {
         let e = ts.glyph(key(&line.glyphs[1])).expect("emoji has ink");
         assert_eq!(e.kind, PageKind::Color, "emoji go to the RGBA page");
         assert_eq!(ts.atlas_mut().take_uploads().len(), 2);
+    }
+
+    #[cfg(all(not(target_vendor = "apple"), not(target_arch = "wasm32")))]
+    #[test]
+    fn native_fallback_shapes_without_glyph_ink() {
+        let mut ts = TextSystem::new();
+        let line = ts.shape("A", FontSpec::ui(14.0));
+        assert!(line.width > 0.0);
+        let glyph = line.glyphs[0];
+        assert!(
+            ts.glyph(GlyphKey {
+                font: glyph.font,
+                glyph: glyph.glyph,
+                size_q: GlyphKey::ui_size(14.0, 2.0),
+                subpixel: 0,
+            })
+            .is_none()
+        );
     }
 
     fn cells(text: &str) -> Vec<Cell> {
@@ -639,11 +657,12 @@ mod tests {
         assert!(ink(&mut ts, b.font) > ink(&mut ts, r.font), "bold is wider");
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     #[test]
     fn cjk_and_emoji_fall_back_and_fit_their_cells() {
         use canvas_draw::cells::flags::{WIDE, WIDE_SPACER};
         let mut ts = TextSystem::new();
+        #[cfg(target_os = "macos")]
         ts.set_term_font(Some("Monaco"), 13.0);
         let wide = |s: &str| {
             vec![

@@ -2,8 +2,8 @@
 
 One shaping/cache/atlas owner for `canvas-gpu`.
 
-- macOS uses Core Text; its backend and font metrics are unchanged.
-- Other native targets retain the existing fixed-advance, inkless fallback.
+- Apple platforms (macOS and iOS) use Core Text, including the shared glyph atlas.
+- Non-Apple native targets retain the existing fixed-advance, inkless fallback.
 - `wasm32-unknown-unknown` uses browser Canvas2D to measure and rasterize text
   into the existing alpha atlas. No font assets or second GPU stack are bundled.
   Construct `TextSystem` on the browser main thread, after required web fonts

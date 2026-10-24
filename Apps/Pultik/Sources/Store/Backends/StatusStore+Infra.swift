@@ -80,6 +80,16 @@ extension StatusStore {
     /// A dozen PromQL queries per refresh — by far the widest fan-out Pultík
     /// has, and worth the cheapest possible way back after a pause.
     func refreshInfraMetrics() async {
+        // No Prometheus in settings.json or the profile: the lane is quiet,
+        // not failing — no request, no breaker, nothing in Now.
+        guard RuntimeConfig.current.prometheus != nil else {
+            serverMetrics = []
+            serviceStatuses = []
+            laneBoard = CILaneBoard()
+            firingAlerts = []
+            NowStore.shared.forget(.estateAlerts)
+            return
+        }
         let snapshotKey = infraSnapshotKey
         let servers = preferences.servers.map { (name: $0.name, instance: $0.ref) }
         let services = preferences.services.map { (name: $0.name, probe: $0.ref, host: $0.host, job: $0.job) }
@@ -134,6 +144,7 @@ extension StatusStore {
     /// the 24 h CPU line, read when the detail opens and at most once a
     /// minute while it stays open — never polled, never while hidden.
     func loadMachineHistory(_ server: ServerMetrics) async {
+        guard RuntimeConfig.current.prometheus != nil else { return }
         if let known = machineHistory[server.id], Date().timeIntervalSince(known.fetchedAt) < 60 { return }
         await gated(.prometheus) {
             async let cores = MetricsClient.shared.coreBusy(instance: server.instance, vmHost: server.vmHost)

@@ -77,14 +77,7 @@ struct QuickCommand: Identifiable {
                 keywords: ["vitrinka", "board", "boards"],
                 run: { openVitrinka() }
             ),
-            QuickCommand(
-                id: "eve-console",
-                title: "Open eve console",
-                subtitle: "sessions & approvals",
-                systemImage: "sparkles",
-                keywords: ["eve", "console", "sessions"],
-                run: { open(url: "https://app.assistant.example.invalid") }
-            ),
+        ] + eveConsole + [
             QuickCommand(
                 id: "settings",
                 title: "Pultík Settings",
@@ -94,6 +87,20 @@ struct QuickCommand: Identifiable {
                 run: { AppDelegate.shared?.openSettings() }
             ),
         ]
+    }
+
+    /// Only while settings.json or the profile names an eve.
+    @MainActor
+    private static var eveConsole: [QuickCommand] {
+        guard let eve = RuntimeConfig.current.eve else { return [] }
+        return [QuickCommand(
+            id: "eve-console",
+            title: "Open eve console",
+            subtitle: "sessions & approvals",
+            systemImage: "sparkles",
+            keywords: ["eve", "console", "sessions"],
+            run: { NSWorkspace.shared.open(eve) }
+        )]
     }
 
     @MainActor

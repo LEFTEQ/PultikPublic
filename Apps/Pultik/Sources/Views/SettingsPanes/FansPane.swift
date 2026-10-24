@@ -96,7 +96,8 @@ struct FansPane: View {
                             .foregroundStyle(helperTone)
                         if !fanStore.canWrite {
                             Button(helperBusy ? "Installing…" : "Install…") {
-                                runPrivileged(HelperInstaller.install)
+                                guard let removeLegacy = HelperInstaller.askToRemoveLegacyHelper() else { return }
+                                runPrivileged { try HelperInstaller.install(removeLegacy: removeLegacy) }
                             }
                             .controlSize(.small)
                             .disabled(helperBusy)

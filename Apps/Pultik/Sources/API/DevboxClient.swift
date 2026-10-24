@@ -29,16 +29,14 @@ actor DevboxClient {
     // fails fast and ProbeGate holds that box rather than repeatedly
     // hitting its sshd.
 
-    /// Pultík's dedicated Devbox identity. Its authorized_keys line on the
-    /// guest carries `command=/usr/local/bin/pultik-dispatch,restrict`, so
-    /// this key can only run the dispatcher's allowlisted `devbox` verbs —
-    /// the dashboard never holds shell-grade access. Interactive attachment
-    /// (Warp `devbox shell` / `ws attach`) is a human at a keyboard and
-    /// stays on the full-shell `devops` alias in `DevboxLauncher`.
-    private nonisolated static var identityPath: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: ".ssh/pultik_devbox").path
-    }
+    // Pultík's dedicated Devbox identity is settings.json's
+    // `devboxIdentityFile`, else its profile's (example: ~/.ssh/pultik_devbox;
+    // `RuntimeConfig.devboxIdentity()`). Its authorized_keys line on the
+    // guest carries `command=/usr/local/bin/pultik-dispatch,restrict`, so
+    // this key can only run the dispatcher's allowlisted `devbox` verbs —
+    // the dashboard never holds shell-grade access. Interactive attachment
+    // (Warp `devbox shell` / `ws attach`) is a human at a keyboard and
+    // stays on the full-shell `devops` alias in `DevboxLauncher`.
 
     // MARK: - Process plumbing
 
@@ -96,6 +94,11 @@ actor DevboxClient {
     private nonisolated func ssh(
         _ remoteCommand: String, on box: DevboxEndpoint, timeout: Int = 15
     ) -> Result {
+        // No key, no ssh: without one ssh still connects and fails to log
+        // in, and every refused login counts towards fail2ban.
+        guard let identity = RuntimeConfig.current.devboxIdentity() else {
+            return Result(ok: false, stdout: "", stderr: "no devbox ssh key (settings.json devboxIdentityFile)")
+        }
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/ssh")
         var args = [
@@ -107,7 +110,7 @@ actor DevboxClient {
             // entirely — IdentitiesOnly alone still offers identity files
             // from any matching config block (Host * included).
             "-F", "/dev/null",
-            "-i", Self.identityPath,
+            "-i", identity,
             "-o", "IdentitiesOnly=yes",
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=8",
@@ -136,14 +139,13 @@ actor DevboxClient {
     /// actions/mesh app links but must not hide the remote workspace rail.
     private func localWorkspaceDiscovery() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let executable = home.appending(path: "bin/devbox")
         let infra = home.appending(path: "Work/Projects/example-org/infra/build-server-infra")
-        guard FileManager.default.isExecutableFile(atPath: executable.path),
+        guard let executable = RuntimeConfig.current.devboxCLI(),
               FileManager.default.fileExists(atPath: infra.path)
         else { return nil }
 
         let process = Process()
-        process.executableURL = executable
+        process.executableURL = URL(filePath: executable)
         process.arguments = ["ws", "ls", "--json"]
         process.currentDirectoryURL = infra
         let result = execute(process, timeout: 5)
@@ -162,18 +164,23 @@ actor DevboxClient {
         _ arguments: [String], timeout: Int, currentDirectory: URL? = nil,
         retainFailureOutput: Bool = false
     ) -> Result {
-        var executable = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "bin/devbox")
+        // settings.json's `devboxExecutable`, else the profile's search
+        // (example: ~/bin/devbox alone; others PATH, then ~/bin/devbox).
+        var executable = RuntimeConfig.current.devboxCLI()
         #if DEBUG
         if let path = ProcessInfo.processInfo.environment["PULTIK_DEVBOX_EXECUTABLE"], path.hasPrefix("/") {
-            executable = URL(filePath: path)
+            executable = FileManager.default.isExecutableFile(atPath: path) ? path : nil
         }
         #endif
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            return Result(ok: false, stdout: "", stderr: "~/bin/devbox is missing or not executable")
+        guard let executable else {
+            // A configured path is the only candidate: say it is unusable.
+            let stderr = RuntimeConfig.current.devboxExecutable.map {
+                "settings.json devboxExecutable \($0) is not an executable absolute path"
+            } ?? "no devbox CLI (~/bin/devbox, or settings.json devboxExecutable)"
+            return Result(ok: false, stdout: "", stderr: stderr)
         }
         let process = Process()
-        process.executableURL = executable
+        process.executableURL = URL(filePath: executable)
         process.arguments = arguments
         if let currentDirectory { process.currentDirectoryURL = currentDirectory }
         return execute(process, timeout: timeout, retainFailureOutput: retainFailureOutput)
@@ -956,7 +963,10 @@ enum DevboxLauncher {
     /// — through the full-shell alias of the box the row lives on.
     @MainActor
     static func summonWorkspaceWarp(_ workspace: String, on box: DevboxEndpoint?) {
-        let alias = (box ?? .fallback).sshAlias
+        guard let alias = (box ?? StatusStore.shared.preferences.resolvedDevboxFallbackBoxes.first)?.sshAlias else {
+            NSLog("pultik: refusing Warp workspace — the profile names no devbox box")
+            return
+        }
         guard DevboxName.isValid(workspace), DevboxDiscovery.isSafeWord(alias) else {
             NSLog("pultik: refusing Warp workspace with unsafe name or alias")
             return

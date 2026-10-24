@@ -160,11 +160,13 @@ enum DevboxDiscovery {
     }
 
     /// Discovered wins; a failed discovery keeps the last good list; with
-    /// neither, today's single endpoint.
-    static func resolve(discovered: [DevboxEndpoint]?, previous: [DevboxEndpoint]?) -> [DevboxEndpoint] {
+    /// neither, the profile's fallback boxes (example: today's single
+    /// endpoint; genesis and custom: none, so nothing is polled).
+    static func resolve(discovered: [DevboxEndpoint]?, previous: [DevboxEndpoint]?,
+                        fallback: [DevboxEndpoint] = [.fallback]) -> [DevboxEndpoint] {
         if let discovered, !discovered.isEmpty { return discovered }
         if let previous, !previous.isEmpty { return previous }
-        return [.fallback]
+        return fallback
     }
 
     /// A workspace-name word that also cannot be read as an ssh option.

@@ -1,15 +1,22 @@
 import Foundation
 
 /// Instant PromQL queries against the central Prometheus on the WireGuard
-/// mesh (192.0.2.10:9090 — BuildServer; holds node/cadvisor/blackbox series for
-/// every host, the remote-written ones labelled `cluster`). No auth; off-mesh
-/// every call fails fast and the rails hide.
+/// mesh (example: 192.0.2.10:9090 — BuildServer; holds node/cadvisor/blackbox
+/// series for every host, the remote-written ones labelled `cluster`). The
+/// host is settings.json `prometheusURL` over the profile's
+/// (`RuntimeConfig`); with none, nothing is sent. No auth; off-mesh every
+/// call fails fast and the rails hide.
 actor MetricsClient {
     static let shared = MetricsClient()
     /// The mesh host the estate's rules are read from — Now's identity for them.
-    static let origin = "192.0.2.10"
+    static var origin: String {
+        RuntimeConfig.current.prometheus?.host() ?? ""
+    }
 
-    private let base = URL(string: "http://\(MetricsClient.origin):9090")!
+    private nonisolated var base: URL? {
+        RuntimeConfig.current.prometheus
+    }
+
     private let session: URLSession
 
     init() {
@@ -20,6 +27,7 @@ actor MetricsClient {
     /// runs when a pause expires. A refresh fans out a dozen queries; asking
     /// all twelve just to find out the mesh is still down is the storm.
     func reachable() async -> Bool {
+        guard let base else { return false }
         var components = URLComponents(
             url: base.appending(path: "api/v1/query"), resolvingAgainstBaseURL: false
         )!
@@ -30,7 +38,10 @@ actor MetricsClient {
 
     /// The Loki ruler on the same host — its LogQL rules fire here, not in
     /// Prometheus, and its rules API speaks Prometheus's alert shape.
-    private let lokiBase = URL(string: "http://192.0.2.10:3100")!
+    /// settings.json `lokiURL` over the profile's; none = no LogQL rules.
+    private nonisolated var lokiBase: URL? {
+        RuntimeConfig.current.loki
+    }
 
     /// Both rule evaluators' alerts (the right rail's alert rows). nil when
     /// Prometheus does not answer; a Loki that does not answer drops only its
@@ -38,9 +49,12 @@ actor MetricsClient {
     /// `answered` says which evaluators replied, so the notification watch
     /// never reads a silent Loki as its rules resolving.
     func firingAlerts() async -> (alerts: [FiringAlert], answered: Set<FiringAlert.Source>)? {
-        guard let prometheus = await alerts(at: base.appending(path: "api/v1/alerts"), source: .prometheus) else {
+        guard let base,
+              let prometheus = await alerts(at: base.appending(path: "api/v1/alerts"), source: .prometheus) else {
             return nil
         }
+        // No Loki configured is no LogQL rule at all: an empty, whole answer.
+        guard let lokiBase else { return (prometheus, [.prometheus, .loki]) }
         let loki = await alerts(at: lokiBase.appending(path: "prometheus/api/v1/alerts"), source: .loki)
         if loki == nil { NSLog("pultik: loki ruler alerts unavailable") }
         return (prometheus + (loki ?? []), loki == nil ? [.prometheus] : [.prometheus, .loki])
@@ -59,6 +73,7 @@ actor MetricsClient {
     /// Where a Prometheus alert's row opens: its rules page narrowed to it.
     /// Loki has no UI of its own — its rows open nothing.
     nonisolated func alertsPage(for name: String) -> URL? {
+        guard let base else { return nil }
         var components = URLComponents(url: base.appending(path: "alerts"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "search", value: name)]
         return components?.url
@@ -82,6 +97,7 @@ actor MetricsClient {
     /// Full label sets for an instant query — for series whose identity spans
     /// several labels (`ci_runner_job_info` carries lane/repo/workflow/job).
     private func instantSeries(_ query: String) async throws -> [(labels: [String: String], value: Double)] {
+        guard let base else { throw UnconfiguredHost(key: "prometheusURL") }
         var components = URLComponents(
             url: base.appending(path: "api/v1/query"), resolvingAgainstBaseURL: false
         )!
@@ -248,6 +264,7 @@ actor MetricsClient {
     func cpuDay(instance: String, vmHost: String?, now: Date = Date()) async -> [Double]? {
         let query = #"1 - avg(rate(node_cpu_seconds_total{mode="idle","# + Self.selector(instance: instance, vmHost: vmHost)
             + "}[5m]))"
+        guard let base else { return nil }
         var components = URLComponents(url: base.appending(path: "api/v1/query_range"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "query", value: query),

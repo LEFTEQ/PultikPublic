@@ -20,8 +20,11 @@ final class StatusStore {
 
     /// Read cache for the ~30 settings this store surfaces. It is a snapshot
     /// taken at launch, so it must never be written back wholesale — see
-    /// `mutate`.
-    var preferences: Preferences
+    /// `mutate`. Every change republishes what the clients read: the
+    /// profile's hosts, the devbox key, toolkit (`RuntimeConfig`).
+    var preferences: Preferences {
+        didSet { RuntimeConfig.current = preferences.runtimeConfig }
+    }
 
     /// The only way this store changes a setting: apply the change to the
     /// read cache AND to a freshly loaded file, never `preferences.save()`.
@@ -134,8 +137,8 @@ final class StatusStore {
     /// When the hub payload was generated ON THE BOX — the rail's "as of"
     /// stamp. The user asked for real status; real status carries its age.
     var devboxFetchedAt: Date?
-    /// Every devbox guest to poll (spec 2026-09-25) — today's single
-    /// endpoint until `devbox boxes --json` first answers.
+    /// Every devbox guest to poll (spec 2026-09-25) — the profile's
+    /// fallback boxes (example: box c) until `devbox boxes --json` first answers.
     var devboxBoxes: [DevboxEndpoint] = [.fallback]
     /// Each box's last answer; a box that fails drops out, one on hold
     /// keeps what it had — the one-box rules, per box.
@@ -223,6 +226,9 @@ final class StatusStore {
         let snapshot = Preferences.loadSnapshot()
         let prefs = snapshot.value
         preferences = prefs
+        // Before any lane can run: a client reads its host from this.
+        RuntimeConfig.current = prefs.runtimeConfig
+        devboxBoxes = prefs.resolvedDevboxFallbackBoxes
         pinned = prefs.pinnedRepos
         configIssues = snapshot.issues
         settingsWritable = snapshot.writable

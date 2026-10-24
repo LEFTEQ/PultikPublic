@@ -1,4 +1,4 @@
-//! Non-macOS fallback: fixed advances and no ink. It keeps the crate (and the bar layout
+//! Non-Apple native fallback: fixed advances and no ink. It keeps the crate (and the bar layout
 //! built on it) compiling and testable on Linux until the parley backend lands (M8).
 
 use crate::atlas::{GlyphKey, RasterGlyph};

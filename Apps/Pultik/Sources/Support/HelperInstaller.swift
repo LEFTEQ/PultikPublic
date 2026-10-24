@@ -1,6 +1,7 @@
 // Vendored from GenesisFanControl@f43699d (Sources/GenesisFanControlCore/Privileged/HelperInstaller.swift).
 // DIVERGED ON PURPOSE (2026-08-01): installs pultik's own daemon from inside
-// Pultik.app, and sweeps the GenesisFanControl-era helper on the way in.
+// Pultik.app, and sweeps the GenesisFanControl-era helper on the way in once
+// the user agrees to it (fan deck D7).
 //
 //  HelperInstaller.swift
 //
@@ -13,13 +14,14 @@
 //  the helper at Contents/Library/LaunchDaemons/.
 //
 
-import Foundation
+import AppKit
 
 enum HelperInstallError: Error, CustomStringConvertible {
     case helperBinaryNotFound(searched: [String])
     case osascript(String)
     case cancelled
     case timeout
+    case otherFanDaemon(String)
 
     var description: String {
         switch self {
@@ -31,6 +33,8 @@ enum HelperInstallError: Error, CustomStringConvertible {
             return "Install cancelled."
         case .timeout:
             return "The helper was installed but never answered its socket."
+        case .otherFanDaemon(let path):
+            return "GenesisFanControl's fan helper is installed (\(path)). Install again and choose Remove and Install to replace it."
         }
     }
 }
@@ -52,9 +56,40 @@ enum HelperInstaller {
         return paths
     }
 
+    /// The GenesisFanControl helper's plist or binary, when either is on this
+    /// Mac. Pultík removes it only after the user agrees (fan deck D7).
+    static var legacyHelperPath: String? {
+        [HelperConstants.Legacy.launchDaemonPath, HelperConstants.Legacy.installedHelperPath]
+            .first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Asks before an install removes the GenesisFanControl helper. Returns
+    /// false when there is none, true when the user chose to remove it, and
+    /// nil when they cancelled: then nothing is installed.
+    @MainActor
+    static func askToRemoveLegacyHelper() -> Bool? {
+        guard let path = legacyHelperPath else { return false }
+        let alert = NSAlert()
+        alert.messageText = "Remove the GenesisFanControl fan helper?"
+        alert.informativeText = """
+        This Mac runs GenesisFanControl's fan helper (\(path)). Two fan helpers \
+        fight over the fan speeds, so Pultík's helper replaces it. GenesisFanControl \
+        and its fans CLI lose fan control until they install their own helper again.
+        """
+        alert.addButton(withTitle: "Remove and Install")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn ? true : nil
+    }
+
     /// Pops the system password prompt once and runs the install as root.
-    /// Returns when the helper socket actually answers.
-    static func install() throws {
+    /// Returns when the helper socket actually answers. `removeLegacy` is the
+    /// user's yes from `askToRemoveLegacyHelper()`; without it the install
+    /// refuses while the GenesisFanControl helper is present.
+    static func install(removeLegacy: Bool = false) throws {
+        if !removeLegacy, let path = legacyHelperPath {
+            throw HelperInstallError.otherFanDaemon(path)
+        }
         let helperBinary = try locateHelperBinary()
 
         // Stage the helper into a world-readable temp dir first. The app may
@@ -87,17 +122,24 @@ enum HelperInstaller {
         // depth — strip anything the shell could interpret.
         let labelLiteral = HelperConstants.helperLabel
             .replacingOccurrences(of: "'", with: "'\\''")
-
-        let plistXML = launchdPlistContents()
-        let script = """
-        set -e
-        # Sweep the GenesisFanControl-era helper. Two root SMC writers with
-        # independent 1 Hz re-assertion loops fight over setpoints, so pultik
-        # takes over rather than coexisting.
+        let legacyLabel = HelperConstants.Legacy.label
+            .replacingOccurrences(of: "'", with: "'\\''")
+        // Sweep the GenesisFanControl-era helper, only on the user's yes. Two
+        // root SMC writers with independent 1 Hz re-assertion loops fight
+        // over setpoints, so pultik takes over rather than coexisting. The
+        // label bootout also stops a job whose plist is already gone.
+        let sweep = removeLegacy ? """
+        launchctl bootout system/\(legacyLabel) 2>/dev/null || true
         launchctl bootout system \(legacyPlistQ) 2>/dev/null || true
         rm -f \(legacyPlistQ)
         rm -f \(legacyBinQ)
         rm -f \(legacySocketQ)
+        """ : ""
+
+        let plistXML = launchdPlistContents()
+        let script = """
+        set -e
+        \(sweep)
         mkdir -p /usr/local/sbin
         cp \(helperQ) \(installedQ)
         chown root:wheel \(installedQ)

@@ -9,7 +9,7 @@ import Foundation
 extension StatusStore {
     /// Hlídač's host — the origin every prod incident key carries.
     var hlidacOrigin: String {
-        hlidacBase.host() ?? hlidacBase.absoluteString
+        hlidacBase.map { $0.host() ?? $0.absoluteString } ?? ""
     }
 
     /// The prod lane: Hlídač's blindness and its Sentry issues. `answered`:

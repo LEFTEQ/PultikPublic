@@ -93,9 +93,9 @@ final class MacHealthStore {
 /// `macwatch stop` re-verifies every process itself, and its answer —
 /// stopped, or refused and why — is shown as it came back.
 enum MacHealthStop {
-    /// A GUI app inherits no shell PATH, so a bare `toolkit` is looked up
-    /// where its installers put it (`ToolkitClient.installPaths`).
-    static var toolkitPaths: [String] { ToolkitClient.installPaths }
+    // A GUI app inherits no shell PATH, so a bare `toolkit` is looked up like
+    // the Toolkit module's (`ToolkitClient.path`): settings.json `toolkitPath`
+    // alone when set, else `ToolkitClient.installPaths` in their old order.
 
     enum Outcome: Equatable, Sendable {
         case stopped(String)
@@ -106,11 +106,13 @@ enum MacHealthStop {
     /// is ever run — a bare name the panel cannot place is refused, never
     /// handed to a shell to find.
     static func resolve(_ argv: [String],
+                        configured: String? = RuntimeConfig.current.toolkitPath,
                         isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)) -> [String]?
     {
         guard let command = argv.first else { return nil }
         if command.hasPrefix("/") { return isExecutable(command) ? argv : nil }
-        guard command == "toolkit", let path = toolkitPaths.first(where: isExecutable) else { return nil }
+        guard command == "toolkit", let path = ToolkitClient.path(configured: configured, isExecutable: isExecutable)
+        else { return nil }
         return [path] + argv.dropFirst()
     }
 
