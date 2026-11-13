@@ -305,7 +305,7 @@ func TestProfileStepRefusesADanglingSymlink(t *testing.T) {
 	dry, _, _ := parseInstallOptions([]string{"--dry-run", "--profile", "genesis"})
 	out := captureUI(t)
 	if err := runProfileStep(dry); err != nil || !strings.Contains(out.String(), "which does not exist; the install would stop here") {
-		t.Fatalf("a dry run only warns, as installClaudeHooks does: %v\n%s", err, out.String())
+		t.Fatalf("a dry run only warns: %v\n%s", err, out.String())
 	}
 	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("the link was replaced: %v %v", info, err)

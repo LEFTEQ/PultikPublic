@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,49 +25,37 @@ func TestParseInstallOptions(t *testing.T) {
 	}
 }
 
-func TestMergeClaudeSettingsIsIdempotent(t *testing.T) {
-	input := []byte(`{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"printf unrelated"}]}]}}`)
-	first, err := mergeClaudeSettings(input, "/tmp/pultik")
+func TestRetireClaudeHooksKeepsUnrelatedSettings(t *testing.T) {
+	input := []byte(`{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"printf unrelated"}]},` +
+		`{"hooks":[{"type":"command","command":"'/opt/vitrinka' hook-context todo 2>/dev/null || true; # ` + todoHookTag + `","timeout":15}]},` +
+		`{"hooks":[{"type":"command","command":"'/opt/vitrinka' hook-context schedule 2>/dev/null || true; # ` + timeHookTag + `","timeout":15}]}]}}`)
+	first, err := retireClaudeHooks(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := mergeClaudeSettings(first, "/tmp/pultik")
-	if err != nil {
-		t.Fatal(err)
+	if want := `{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"printf unrelated"}]}]}}`; string(first) != want {
+		t.Fatalf("retired:\n%s\nwant:\n%s", first, want)
 	}
-	if strings.Count(string(second), todoHookTag) != 1 || strings.Count(string(second), timeHookTag) != 1 {
-		t.Fatalf("hooks duplicated: %s", second)
-	}
-	var settings map[string]any
-	if err := json.Unmarshal(second, &settings); err != nil {
-		t.Fatal(err)
-	}
-	if settings["theme"] != "dark" || !strings.Contains(string(second), "printf unrelated") {
-		t.Fatalf("unrelated settings were lost: %s", second)
+	second, err := retireClaudeHooks(first)
+	if err != nil || !bytes.Equal(first, second) {
+		t.Fatalf("a rerun changed the file: %s err=%v", second, err)
 	}
 }
 
-func TestMergeClaudeSettingsPreservesMixedHookGroup(t *testing.T) {
+func TestRetireClaudeHooksPreservesMixedHookGroup(t *testing.T) {
 	input := []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"pultik todo list --open --compact --here"},{"type":"command","command":"printf unrelated"}]}]}}`)
-	merged, err := mergeClaudeSettings(input, "/tmp/it's $(safe)/pultik")
+	retired, err := retireClaudeHooks(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(merged)
 	// The user's group keeps its own bytes, compact spacing included.
-	if !strings.Contains(text, `{"matcher":"startup","hooks":[{"type":"command","command":"printf unrelated"}]}`) {
-		t.Fatalf("mixed group was not preserved: %s", merged)
-	}
-	if strings.Contains(text, "todo list --open") {
-		t.Fatalf("legacy Pultik hook survived: %s", merged)
-	}
-	if !strings.Contains(text, `'/tmp/it'\\''s $(safe)/pultik' hook-context todo`) {
-		t.Fatalf("binary was not safely shell-quoted: %s", merged)
+	if want := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"printf unrelated"}]}]}}`; string(retired) != want {
+		t.Fatalf("mixed group not preserved:\n%s", retired)
 	}
 }
 
-func TestMergeClaudeSettingsRejectsInvalidJSON(t *testing.T) {
-	if _, err := mergeClaudeSettings([]byte(`{"hooks":`), "/tmp/pultik"); err == nil {
+func TestRetireClaudeHooksRejectsInvalidJSON(t *testing.T) {
+	if _, err := retireClaudeHooks([]byte(`{"hooks":`)); err == nil {
 		t.Fatal("invalid settings accepted")
 	}
 }
@@ -168,44 +156,28 @@ func TestInstallReleasedAppRecoversBeforeDownload(t *testing.T) {
 	}
 }
 
-// One `pultik install` after the 2026-09 move must swap the `pultik:` tagged
-// hooks for the vitrinka ones — and stay idempotent from there.
-func TestMergeClaudeSettingsMigratesPultikTaggedHooks(t *testing.T) {
+// Every generation goes: the vitrinka-tagged pair, the `pultik:` tagged pair
+// before it (2026-09), and an unrelated hook stays.
+func TestRetireClaudeHooksRetiresEveryTaggedGeneration(t *testing.T) {
 	input := []byte(`{"hooks":{"SessionStart":[` +
 		`{"hooks":[{"type":"command","command":"'/Users/x/.local/bin/pultik' hook-context todo 2>/dev/null || true; # pultik:todo-session-context","timeout":15}]},` +
 		`{"hooks":[{"type":"command","command":"'/Users/x/.local/bin/pultik' hook-context schedule 2>/dev/null || true; # pultik:schedule-session-context","timeout":15}]},` +
-		`{"hooks":[{"type":"command","command":"deployik context --hook"}]}` +
+		`{"hooks":[{"type":"command","command":"deployik context --hook"}]},` +
+		`{"hooks":[{"type":"command","command":"'/opt/vitrinka' hook-context todo 2>/dev/null || true; # vitrinka:todo-session-context","timeout":15}]},` +
+		`{"hooks":[{"type":"command","command":"'/opt/vitrinka' hook-context schedule 2>/dev/null || true; # vitrinka:schedule-session-context","timeout":15}]}` +
 		`]}}`)
-	merged, err := mergeClaudeSettings(input, "/opt/vitrinka")
+	if listed := pultikHookCommands(input); len(listed) != 4 {
+		t.Fatalf("the dry run should list four hooks to retire, got %v", listed)
+	}
+	retired, err := retireClaudeHooks(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(merged)
-	if strings.Contains(text, legacyTodoHookTag) || strings.Contains(text, legacyTimeHookTag) || strings.Contains(text, "pultik' hook-context") {
-		t.Fatalf("pultik-tagged hooks survived the migration: %s", merged)
+	if left := pultikHookCommands(retired); len(left) != 0 {
+		t.Fatalf("pultik hooks survived: %v\n%s", left, retired)
 	}
-	if !strings.Contains(text, "deployik context --hook") {
-		t.Fatalf("an unrelated hook was removed: %s", merged)
-	}
-	// Compared after decoding, so the check holds whatever the file's spacing.
-	counts := map[string]int{}
-	for _, command := range pultikHookCommands(merged) {
-		counts[command]++
-	}
-	for _, want := range []string{
-		`'/opt/vitrinka' hook-context todo 2>/dev/null || true; # ` + todoHookTag,
-		`'/opt/vitrinka' hook-context schedule 2>/dev/null || true; # ` + timeHookTag,
-	} {
-		if counts[want] != 1 {
-			t.Fatalf("expected exactly one %q, got: %s", want, merged)
-		}
-	}
-	if len(counts) != 2 {
-		t.Fatalf("unexpected pultik hooks after the merge: %v", counts)
-	}
-	retired := pultikHookCommands(input)
-	if len(retired) != 2 {
-		t.Fatalf("dry run should list the two pultik hooks to retire, got %v", retired)
+	if want := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"deployik context --hook"}]}]}}`; string(retired) != want {
+		t.Fatalf("retired:\n%s\nwant:\n%s", retired, want)
 	}
 }
 
@@ -213,39 +185,33 @@ func TestMergeClaudeSettingsMigratesPultikTaggedHooks(t *testing.T) {
 // depend on `pultik` and the verb being adjacent. This is the exact shape found
 // installed in the field on 2026-08-27, where both hook pairs coexisted and the
 // todo context printed twice per session.
-func TestMergeClaudeSettingsRetiresQuotedLegacyHooks(t *testing.T) {
+func TestRetireClaudeHooksRetiresQuotedLegacyHooks(t *testing.T) {
 	input := []byte(`{"hooks":{"SessionStart":[` +
 		`{"hooks":[{"type":"command","command":"out=$(\"$HOME/.local/bin/pultik\" todo list --open --compact --here 2>/dev/null); [ -n \"$out\" ] && printf %s \"$out\" | jq -Rs '{}'; true","timeout":15}]},` +
 		`{"hooks":[{"type":"command","command":"out=$(\"$HOME/.local/bin/pultik\" schedule ripe --claim --compact 2>/dev/null); true","timeout":15}]},` +
 		`{"hooks":[{"type":"command","command":"deployik context --hook"}]}` +
 		`]}}`)
-	merged, err := mergeClaudeSettings(input, "/tmp/pultik")
+	retired, err := retireClaudeHooks(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(merged)
+	text := string(retired)
 	if strings.Contains(text, "todo list --open") || strings.Contains(text, "schedule ripe --claim") {
-		t.Fatalf("quoted legacy hooks survived the merge: %s", merged)
+		t.Fatalf("quoted legacy hooks survived: %s", retired)
 	}
 	if !strings.Contains(text, "deployik context --hook") {
-		t.Fatalf("an unrelated hook was removed: %s", merged)
-	}
-	if strings.Count(text, "hook-context todo") != 1 {
-		t.Fatalf("expected exactly one todo hook, got: %s", merged)
-	}
-	if strings.Count(text, "hook-context schedule") != 1 {
-		t.Fatalf("expected exactly one schedule hook, got: %s", merged)
+		t.Fatalf("an unrelated hook was removed: %s", retired)
 	}
 }
 
 // A user-owned script that happens to mention a todo list is not ours.
-func TestMergeClaudeSettingsLeavesUnrelatedTodoHooks(t *testing.T) {
+func TestRetireClaudeHooksLeavesUnrelatedTodoHooks(t *testing.T) {
 	input := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"mytool todo list --open --compact --here"}]}]}}`)
-	merged, err := mergeClaudeSettings(input, "/tmp/pultik")
+	retired, err := retireClaudeHooks(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(merged), "mytool todo list") {
-		t.Fatalf("an unrelated tool's hook was claimed as ours: %s", merged)
+	if !bytes.Equal(retired, input) {
+		t.Fatalf("an unrelated tool's hook was claimed as ours: %s", retired)
 	}
 }

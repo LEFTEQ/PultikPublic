@@ -1,7 +1,7 @@
 package main
 
-// In-place edit of Claude's settings.json. The installer owns two SessionStart
-// hook groups and nothing else in that file, so it rewrites only the
+// In-place edit of Claude's settings.json. The installer only retires the
+// SessionStart hooks older pultik installs wrote, so it rewrites only the
 // hooks.SessionStart array and leaves every other byte as the user wrote it:
 // key order, indentation, and the `&&`, `<` and `>` in their commands. A
 // decode-and-marshal round trip would sort every key, escape & < > as &
@@ -43,30 +43,24 @@ type jsonLayout struct {
 	newline     string
 }
 
-// editSessionStart returns raw with hooks.SessionStart holding every group it
-// held before minus pultik's hooks, plus ours. raw must be a valid JSON object
-// whose hooks and hooks.SessionStart, when present, are an object and an array.
-func editSessionStart(raw []byte, ours []hookGroup) ([]byte, error) {
+// withoutPultikSessionStartHooks returns raw with every generation of
+// pultik's SessionStart hooks removed (isPultikHook) and every other byte as
+// it was; a file holding none comes back unchanged. raw must be a valid JSON
+// object whose hooks and hooks.SessionStart, when present, are an object and
+// an array (checkSettingsShape).
+func withoutPultikSessionStartHooks(raw []byte) []byte {
 	rootStart := skipJSONSpace(raw, 0)
 	root := byteSpan{rootStart, jsonValueEnd(raw, rootStart)}
 	rootMembers := jsonObjectMembers(raw, root)
 	style := documentStyle(raw, root, rootMembers)
 
 	hooks, found := lastJSONMember(rootMembers, "hooks")
-	if !found {
-		value := map[string]any{"SessionStart": ours}
-		return insertJSONMember(raw, root, rootMembers, "hooks", value, style)
+	if !found || isJSONNull(raw, hooks.value) {
+		return raw
 	}
-	if isJSONNull(raw, hooks.value) {
-		return replaceJSONValue(raw, hooks, map[string]any{"SessionStart": ours}, style)
-	}
-	hookMembers := jsonObjectMembers(raw, hooks.value)
-	sessionStart, found := lastJSONMember(hookMembers, "SessionStart")
-	if !found {
-		return insertJSONMember(raw, hooks.value, hookMembers, "SessionStart", ours, style)
-	}
-	if isJSONNull(raw, sessionStart.value) {
-		return replaceJSONValue(raw, sessionStart, ours, style)
+	sessionStart, found := lastJSONMember(jsonObjectMembers(raw, hooks.value), "SessionStart")
+	if !found || isJSONNull(raw, sessionStart.value) {
+		return raw
 	}
 
 	array := sessionStart.value
@@ -79,18 +73,11 @@ func editSessionStart(raw []byte, ours []hookGroup) ([]byte, error) {
 			items = append(items, text)
 		}
 	}
-	for _, group := range ours {
-		text, err := renderJSON(group, layout.childIndent, style, layout.multiline)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, text)
-	}
 	edited := splice(raw, array, renderJSONArray(items, layout))
 	if sameJSON(raw, edited) {
-		return raw, nil
+		return raw
 	}
-	return edited, nil
+	return edited
 }
 
 // withoutPultikHooksText is withoutPultikHooks on the group's own bytes: a

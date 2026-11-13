@@ -139,8 +139,8 @@ func checkApp() doctorCheck {
 	return doctorCheck{"app", "warning", "Pultik.app is not installed"}
 }
 
-// checkVitrinka is the todo backend's diagnosis: the CLI the SessionStart
-// hooks run must resolve and answer `--version`, and the app must have a
+// checkVitrinka is the todo backend's diagnosis: the CLI vitrinka's
+// SessionStart hook runs must resolve and answer `--version`, and the app must have a
 // credential to read /me/ripe with. The app's ladder is `~/.config/vitrinka/
 // token`, then the CLI's own keychain item / config.json server entry — so a
 // signed-in CLI (`vitrinka login`) is enough; both absent is a warning, not
@@ -148,7 +148,7 @@ func checkApp() doctorCheck {
 func checkVitrinka() doctorCheck {
 	binary, found := vitrinkaBinary()
 	if !found {
-		return doctorCheck{"vitrinka", "warning", "CLI not found — bun add -g @vitrinka/cli (hooks and the panel's todos stay silent)"}
+		return doctorCheck{"vitrinka", "warning", "CLI not found — bun add -g @vitrinka/cli (vitrinka's session cues and the panel's todos stay silent)"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -221,49 +221,51 @@ func checkSkills() doctorCheck {
 	return doctorCheck{"skills", "ok", "/todo* and /remind come from the vitrinka plugin"}
 }
 
+// checkHooks wants none of the SessionStart hooks older installs wrote:
+// vitrinka's own SessionStart hook prints the todo and reminder cues, and a
+// leftover pultik hook prints the todo cue a second time.
 func checkHooks() doctorCheck {
 	configDir, err := claudeConfigDir()
 	if err != nil {
 		return doctorCheck{"hooks", "error", err.Error()}
 	}
-	binary, _ := vitrinkaBinary()
 	path := filepath.Join(configDir, "settings.json")
 	raw, err := os.ReadFile(path)
-	if err != nil {
+	if os.IsNotExist(err) {
+		return doctorCheck{"hooks", "ok", "no Claude settings.json, so no retired pultik SessionStart hook"}
+	} else if err != nil {
 		return doctorCheck{"hooks", "error", "cannot read " + path}
 	}
-	var settings struct {
-		Hooks map[string][]hookGroup `json:"hooks"`
-	}
-	if err := json.Unmarshal(raw, &settings); err != nil {
+	if !json.Valid(raw) {
 		return doctorCheck{"hooks", "error", "invalid settings JSON"}
 	}
-	expected := map[string]int{
-		hookCommand(binary, "todo"):     0,
-		hookCommand(binary, "schedule"): 0,
+	if retired := pultikHookCommands(raw); len(retired) > 0 {
+		return doctorCheck{"hooks", "warning", fmt.Sprintf("%d retired pultik SessionStart hook(s) double vitrinka's todo cue — pultik install --hooks-only removes them", len(retired))}
 	}
-	legacy := 0
-	for _, group := range settings.Hooks["SessionStart"] {
-		for _, hook := range group.Hooks {
-			if hook.Type != "command" {
-				continue
-			}
-			if _, ok := expected[hook.Command]; ok {
-				expected[hook.Command]++
-			} else if isPultikHook(map[string]any{"command": hook.Command}) {
-				legacy++
-			}
+	return doctorCheck{"hooks", "ok", "no retired pultik SessionStart hooks (vitrinka's own hook prints the todo and reminder cues)"}
+}
+
+// vitrinkaBinary resolves the vitrinka CLI the way the app resolves its own
+// helpers: the shim `vitrinka install` writes first, then PATH, then the usual
+// manual-build locations. Nothing here is a personal path. found is false, and
+// the bare name comes back, when nothing resolves.
+func vitrinkaBinary() (path string, found bool) {
+	home, _ := os.UserHomeDir()
+	candidates := []string{filepath.Join(home, ".local", "bin", "vitrinka")}
+	if onPath, err := exec.LookPath("vitrinka"); err == nil {
+		candidates = append(candidates, onPath)
+	}
+	candidates = append(candidates,
+		filepath.Join(home, ".bun", "bin", "vitrinka"),
+		"/opt/homebrew/bin/vitrinka",
+		"/usr/local/bin/vitrinka",
+	)
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, true
 		}
 	}
-	if legacy > 0 {
-		return doctorCheck{"hooks", "error", fmt.Sprintf("%d pre-vitrinka pultik hook(s) still installed — pultik install --hooks-only migrates them", legacy)}
-	}
-	for _, count := range expected {
-		if count != 1 {
-			return doctorCheck{"hooks", "error", "expected exactly one current todo and schedule SessionStart hook (vitrinka hook-context)"}
-		}
-	}
-	return doctorCheck{"hooks", "ok", "vitrinka todo and schedule SessionStart hooks installed"}
+	return "vitrinka", false
 }
 
 func checkGitHubAuth() doctorCheck {

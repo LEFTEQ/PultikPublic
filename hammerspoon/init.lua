@@ -654,4 +654,13 @@ Organize.start({ arrange = arrangeScreen })
 CmuxGrid = dofile(packageDir .. "/cmux.lua")
 CmuxGrid.start()
 
+-- Read-only watcher that alerts and logs when the keyboard input source leaves
+-- Czech (keyboard_watch.lua). Loaded last and guarded: a failure here is printed
+-- to the console and never costs the grid keys or the engines above.
+local watchOk, watchErr = pcall(function()
+  KeyboardWatch = dofile(packageDir .. "/keyboard_watch.lua")
+  KeyboardWatch.start()
+end)
+if not watchOk then print("keyboard_watch failed to load: " .. tostring(watchErr)) end
+
 hs.alert.show("Hammerspoon: Pultík package loaded")

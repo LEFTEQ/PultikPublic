@@ -176,7 +176,7 @@ func TestExplicitHammerspoonBacksUpAForeignSymlink(t *testing.T) {
 	}
 }
 
-// A dotfiles folder that copied all three modules is still somebody else's
+// A dotfiles folder that copied every module is still somebody else's
 // config: only a checkout (tools/pultik beside it) or the managed copy is ours.
 func TestACopiedModuleSetIsNotPultiks(t *testing.T) {
 	home := isolateHammerspoonHome(t)
@@ -185,7 +185,7 @@ func TestACopiedModuleSetIsNotPultiks(t *testing.T) {
 		t.Fatal(err)
 	}
 	dotfiles := writeDotfilesHammerspoon(t)
-	for _, name := range []string{"organize.lua", "cmux.lua"} {
+	for _, name := range []string{"organize.lua", "cmux.lua", "keyboard_watch.lua"} {
 		if err := os.WriteFile(filepath.Join(filepath.Dir(dotfiles), name), []byte("-- copy"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -355,6 +355,51 @@ func TestInstallHammerspoonKeepsExistingRepoLink(t *testing.T) {
 	}
 	if target != filepath.Join(dir, "init.lua") {
 		t.Fatalf("live repo link was downgraded to %s", target)
+	}
+}
+
+// A link the installer made into a checkout of an earlier package (the three
+// modules before keyboard_watch.lua, tools/pultik beside them) is still
+// pultik's: a reinstall from a newer CLI upgrades it to the full package
+// instead of keeping it as somebody else's config.
+func TestReinstallUpgradesALinkIntoAnEarlierCheckout(t *testing.T) {
+	home := isolateHammerspoonHome(t)
+	repo := t.TempDir()
+	dir := filepath.Join(repo, "hammerspoon")
+	if err := os.MkdirAll(filepath.Join(repo, "tools", "pultik"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"init.lua", "organize.lua", "cmux.lua"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("-- earlier"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(home, ".hammerspoon", "init.lua")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(home, "Library", "Application Support", "Pultik", "hammerspoon", "init.lua")
+	for _, args := range [][]string{nil, {"--hammerspoon-only"}} {
+		_ = os.Remove(link)
+		if err := os.Symlink(filepath.Join(dir, "init.lua"), link); err != nil {
+			t.Fatal(err)
+		}
+		opts, _, _ := parseInstallOptions(args)
+		if err := installHammerspoonStep(opts); err != nil {
+			t.Fatal(err)
+		}
+		if target, err := os.Readlink(link); err != nil || target != managed {
+			t.Fatalf("%v: the link into an earlier checkout was not upgraded: %q err=%v", args, target, err)
+		}
+		if check := checkHammerspoon(); check.Status != "ok" {
+			t.Fatalf("%v: upgraded install reported %+v", args, check)
+		}
+	}
+	if matches, _ := filepath.Glob(link + ".pultik-backup*"); len(matches) != 0 {
+		t.Fatalf("pultik's own link was backed up as foreign: %v", matches)
 	}
 }
 

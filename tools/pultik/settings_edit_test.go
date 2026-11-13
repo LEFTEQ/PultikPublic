@@ -35,165 +35,133 @@ const handWrittenSettings = `{
 }
 `
 
-func TestMergeClaudeSettingsKeepsEveryByteOutsideSessionStart(t *testing.T) {
-	raw := []byte(handWrittenSettings)
-	merged, err := mergeClaudeSettings(raw, "/opt/vitrinka")
-	if err != nil {
-		t.Fatal(err)
+// writtenHook is a hook line exactly as installs before 2026-11 wrote it, so
+// the fixtures hold what Macs in the field carry.
+func writtenHook(kind string) string {
+	tag := todoHookTag
+	if kind == "schedule" {
+		tag = timeHookTag
 	}
-	head := handWrittenSettings[:strings.Index(handWrittenSettings, `"SessionStart": [`)]
-	tail := handWrittenSettings[strings.Index(handWrittenSettings, "\n  },\n  \"env\""):]
-	text := string(merged)
-	if !strings.HasPrefix(text, head) || !strings.HasSuffix(text, tail) {
-		t.Fatalf("bytes outside hooks.SessionStart changed:\n%s", merged)
-	}
-	for _, escape := range []string{`\u0026`, `\u003c`, `\u003e`} {
-		if strings.Contains(text, escape) {
-			t.Fatalf("output escapes %s:\n%s", escape, merged)
-		}
-	}
-	if !strings.Contains(text, `{ "type": "command", "command": "deployik context --hook" }`) {
-		t.Fatalf("the user's own SessionStart group was reformatted:\n%s", merged)
-	}
-	if !strings.Contains(text, `'/opt/vitrinka' hook-context todo 2>/dev/null || true; # `+todoHookTag) {
-		t.Fatalf("our hook line is missing or escaped:\n%s", merged)
-	}
-	var settings map[string]any
-	if err := json.Unmarshal(merged, &settings); err != nil {
-		t.Fatalf("output is not JSON: %v\n%s", err, merged)
-	}
+	return "'/opt/vitrinka' hook-context " + kind + " 2>/dev/null || true; # " + tag
 }
 
-func TestMergeClaudeSettingsRerunIsByteIdentical(t *testing.T) {
-	first, err := mergeClaudeSettings([]byte(handWrittenSettings), "/opt/vitrinka")
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := mergeClaudeSettings(first, "/opt/vitrinka")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(first, second) {
-		t.Fatalf("a rerun changed the file:\nfirst:\n%s\nsecond:\n%s", first, second)
-	}
-}
-
-func TestMergeClaudeSettingsInsertsMissingHooksInTheFileStyle(t *testing.T) {
-	for name, input := range map[string]string{
-		"spaces": "{\n    \"model\": \"opus\",\n    \"env\": {\"A\": \"x && y\"}\n}\n",
-		"tabs":   "{\n\t\"model\": \"opus\"\n}\n",
-		"empty":  "{}\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			merged, err := mergeClaudeSettings([]byte(input), "/opt/vitrinka")
-			if err != nil {
-				t.Fatal(err)
-			}
-			var settings map[string]any
-			if err := json.Unmarshal(merged, &settings); err != nil {
-				t.Fatalf("output is not JSON: %v\n%s", err, merged)
-			}
-			if len(pultikHookCommands(merged)) != 2 {
-				t.Fatalf("expected our two hooks:\n%s", merged)
-			}
-			body := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(input, "\n"), "}"), "\n")
-			if !strings.HasPrefix(string(merged), body) {
-				t.Fatalf("existing members changed:\n%s", merged)
-			}
-			if name == "spaces" && !strings.Contains(string(merged), "\n    \"hooks\": {\n        \"SessionStart\": [") {
-				t.Fatalf("four-space indent not followed:\n%s", merged)
-			}
-			if name == "tabs" && !strings.Contains(string(merged), "\n\t\"hooks\": {\n\t\t\"SessionStart\": [") {
-				t.Fatalf("tab indent not followed:\n%s", merged)
-			}
-		})
-	}
-}
-
-func TestMergeClaudeSettingsInsertsSessionStartBesideOtherHooks(t *testing.T) {
-	input := "{\n  \"hooks\": {\n    \"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"a && b\"}]}]\n  }\n}\n"
-	merged, err := mergeClaudeSettings([]byte(input), "/opt/vitrinka")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(merged)
-	if !strings.HasPrefix(text, "{\n  \"hooks\": {\n    \"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"a && b\"}]}],\n    \"SessionStart\": [") {
-		t.Fatalf("SessionStart was not added after the existing hook event:\n%s", merged)
-	}
-	if len(pultikHookCommands(merged)) != 2 {
-		t.Fatalf("expected our two hooks:\n%s", merged)
-	}
-}
-
-func TestMergeClaudeSettingsKeepsASingleLineFileOnOneLine(t *testing.T) {
-	input := `{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x && y"}]}]}}`
-	merged, err := mergeClaudeSettings([]byte(input), "/opt/vitrinka")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.ContainsRune(merged, '\n') {
-		t.Fatalf("a one-line file became multi-line:\n%s", merged)
-	}
-	if !strings.HasPrefix(string(merged), `{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x && y"}]},`) {
-		t.Fatalf("existing text changed:\n%s", merged)
-	}
-}
-
-func TestMergeClaudeSettingsTreatsNullLikeAMissingKey(t *testing.T) {
-	for _, input := range []string{"{\n  \"hooks\": null\n}\n", "{\n  \"hooks\": {\"SessionStart\": null}\n}\n"} {
-		merged, err := mergeClaudeSettings([]byte(input), "/opt/vitrinka")
+// handWrittenWithOurHooks is handWrittenSettings after an older install
+// appended its two groups to hooks.SessionStart.
+func handWrittenWithOurHooks(t *testing.T) string {
+	t.Helper()
+	var groups []string
+	for _, kind := range []string{"todo", "schedule"} {
+		group, err := json.Marshal(map[string]any{"hooks": []map[string]any{{"type": "command", "command": writtenHook(kind), "timeout": 15}}})
 		if err != nil {
-			t.Fatalf("%s: %v", input, err)
+			t.Fatal(err)
 		}
-		if len(pultikHookCommands(merged)) != 2 {
-			t.Fatalf("expected our two hooks:\n%s", merged)
+		groups = append(groups, string(group))
+	}
+	closing := "\n      }\n    ]\n  },\n  \"env\""
+	if !strings.Contains(handWrittenSettings, closing) {
+		t.Fatal("fixture changed shape")
+	}
+	return strings.Replace(handWrittenSettings, closing,
+		"\n      },\n      "+groups[0]+",\n      "+groups[1]+"\n    ]\n  },\n  \"env\"", 1)
+}
+
+func TestRetireClaudeHooksRestoresTheHandWrittenFile(t *testing.T) {
+	input := handWrittenWithOurHooks(t)
+	if len(pultikHookCommands([]byte(input))) != 2 {
+		t.Fatalf("fixture lacks our two hooks:\n%s", input)
+	}
+	retired, err := retireClaudeHooks([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(retired) != handWrittenSettings {
+		t.Fatalf("retiring our hooks changed other bytes:\n%s", retired)
+	}
+	again, err := retireClaudeHooks(retired)
+	if err != nil || !bytes.Equal(again, retired) {
+		t.Fatalf("a rerun changed the file:\n%s err=%v", again, err)
+	}
+}
+
+func TestRetireClaudeHooksLeavesAFileWithoutThemByteIdentical(t *testing.T) {
+	for name, input := range map[string]string{
+		"hand-written":  handWrittenSettings,
+		"spaces":        "{\n    \"model\": \"opus\",\n    \"env\": {\"A\": \"x && y\"}\n}\n",
+		"tabs":          "{\n\t\"model\": \"opus\"\n}\n",
+		"empty":         "{}\n",
+		"null hooks":    "{\n  \"hooks\": null\n}\n",
+		"null start":    "{\n  \"hooks\": {\"SessionStart\": null}\n}\n",
+		"other events":  "{\n  \"hooks\": {\n    \"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"a && b\"}]}]\n  }\n}\n",
+		"crlf":          "{\r\n  \"model\": \"opus\"\r\n}\r\n",
+		"empty session": `{"hooks":{"SessionStart":[]}}`,
+	} {
+		retired, err := retireClaudeHooks([]byte(input))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if string(retired) != input {
+			t.Fatalf("%s: a file without our hooks changed:\n%q", name, retired)
 		}
 	}
 }
 
-// A file the old installer wrote (keys sorted, `>` escaped as \u003e) that
-// already holds the current hooks is left exactly as it is.
-func TestMergeClaudeSettingsLeavesAnOldStyleCurrentFileAlone(t *testing.T) {
-	settings := map[string]any{
-		"theme": "dark",
-		"hooks": map[string]any{"SessionStart": []hookGroup{
-			{Hooks: []commandHook{{Type: "command", Command: hookCommand("/opt/vitrinka", "todo"), Timeout: 15}}},
-			{Hooks: []commandHook{{Type: "command", Command: hookCommand("/opt/vitrinka", "schedule"), Timeout: 15}}},
-		}},
-	}
-	old, err := json.MarshalIndent(settings, "", "  ")
+func TestRetireClaudeHooksKeepsASingleLineFileOnOneLine(t *testing.T) {
+	input := `{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x && y"}]},{"hooks":[{"type":"command","command":"` +
+		writtenHook("todo") + `","timeout":15}]}]}}`
+	retired, err := retireClaudeHooks([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(old), `\u003e`) {
+	if want := `{"theme":"dark","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x && y"}]}]}}`; string(retired) != want {
+		t.Fatalf("retired:\n%s\nwant:\n%s", retired, want)
+	}
+}
+
+// A file the old installer marshalled whole (keys sorted, `>` escaped as
+// >) still has our hooks found and removed.
+func TestRetireClaudeHooksFromAnOldStyleFile(t *testing.T) {
+	var groups []map[string]any
+	for _, kind := range []string{"todo", "schedule"} {
+		groups = append(groups, map[string]any{"hooks": []map[string]any{{"type": "command", "command": writtenHook(kind), "timeout": 15}}})
+	}
+	old, err := json.MarshalIndent(map[string]any{"theme": "dark", "hooks": map[string]any{"SessionStart": groups}}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(old), `\`+"u003e") {
 		t.Fatalf("fixture lost the old escapes: %s", old)
 	}
-	merged, err := mergeClaudeSettings(old, "/opt/vitrinka")
+	retired, err := retireClaudeHooks(old)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(merged, old) {
-		t.Fatalf("an old-style current file was rewritten:\n%s", merged)
+	var settings map[string]any
+	if err := json.Unmarshal(retired, &settings); err != nil || settings["theme"] != "dark" {
+		t.Fatalf("output is not the same settings: %v\n%s", err, retired)
+	}
+	if left := pultikHookCommands(retired); len(left) != 0 {
+		t.Fatalf("our hooks survived: %v", left)
 	}
 }
 
-func TestMergeClaudeSettingsKeepsCRLFLineEndings(t *testing.T) {
-	input := "{\r\n  \"model\": \"opus\"\r\n}\r\n"
-	merged, err := mergeClaudeSettings([]byte(input), "/opt/vitrinka")
+func TestRetireClaudeHooksKeepsCRLFLineEndings(t *testing.T) {
+	input := "{\r\n  \"hooks\": {\r\n    \"SessionStart\": [\r\n      {\"hooks\": [{\"type\": \"command\", \"command\": \"deployik\"}]},\r\n      {\"hooks\": [{\"type\": \"command\", \"command\": \"" +
+		writtenHook("todo") + "\"}]}\r\n    ]\r\n  }\r\n}\r\n"
+	retired, err := retireClaudeHooks([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(merged), "\n") != strings.Count(string(merged), "\r\n") {
-		t.Fatalf("a CRLF file got bare LF lines: %q", merged)
+	if strings.Count(string(retired), "\n") != strings.Count(string(retired), "\r\n") {
+		t.Fatalf("a CRLF file got bare LF lines: %q", retired)
 	}
-	if len(pultikHookCommands(merged)) != 2 {
-		t.Fatalf("expected our two hooks: %q", merged)
+	if left := pultikHookCommands(retired); len(left) != 0 || !strings.Contains(string(retired), "deployik") {
+		t.Fatalf("retired wrongly: %q", retired)
 	}
 }
 
-func TestMergeClaudeSettingsRejectsNonObjects(t *testing.T) {
+func TestRetireClaudeHooksRejectsNonObjects(t *testing.T) {
 	for _, input := range []string{`null`, `[]`, `{"hooks":[]}`, `{"hooks":{"SessionStart":{}}}`} {
-		if _, err := mergeClaudeSettings([]byte(input), "/opt/vitrinka"); err == nil {
+		if _, err := retireClaudeHooks([]byte(input)); err == nil {
 			t.Errorf("accepted %s", input)
 		}
 	}
@@ -208,36 +176,63 @@ func isolateClaudeConfig(t *testing.T) string {
 	return dir
 }
 
-func TestInstallClaudeHooksLeavesACurrentFileAlone(t *testing.T) {
+func TestInstallClaudeHooksLeavesAFileWithoutThemAlone(t *testing.T) {
 	dir := isolateClaudeConfig(t)
 	path := filepath.Join(dir, "settings.json")
-	binary, _ := vitrinkaBinary()
-	current, err := mergeClaudeSettings([]byte(handWrittenSettings), binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, current, 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(handWrittenSettings), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := installClaudeHooks(false); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, current) {
-		t.Fatalf("a current settings.json was rewritten:\n%s", after)
+	if err != nil || string(after) != handWrittenSettings {
+		t.Fatalf("a settings.json without our hooks was rewritten:\n%s err=%v", after, err)
 	}
 	if matches, _ := filepath.Glob(path + ".pultik-backup*"); len(matches) != 0 {
 		t.Fatalf("a no-op run wrote backups: %v", matches)
 	}
 }
 
+// No settings.json means no hook to retire, and the step writes none.
+func TestInstallClaudeHooksNeverCreatesASettingsFile(t *testing.T) {
+	dir := isolateClaudeConfig(t)
+	for _, dry := range []bool{true, false} {
+		if err := installClaudeHooks(dry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("the hooks step created settings.json: %v", err)
+	}
+}
+
+func TestInstallClaudeHooksDryRunListsAndWritesNothing(t *testing.T) {
+	dir := isolateClaudeConfig(t)
+	path := filepath.Join(dir, "settings.json")
+	input := handWrittenWithOurHooks(t)
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := &bytes.Buffer{}
+	uiOut = out
+	t.Cleanup(func() { uiOut = os.Stdout })
+	if err := installClaudeHooks(true); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != input {
+		t.Fatal("a dry run wrote settings.json")
+	}
+	if got := strings.Count(out.String(), "would remove SessionStart hook: "); got != 2 {
+		t.Fatalf("the dry run listed %d hooks, want 2:\n%s", got, out.String())
+	}
+}
+
 func TestInstallClaudeHooksNeverOverwritesABackup(t *testing.T) {
 	dir := isolateClaudeConfig(t)
 	path := filepath.Join(dir, "settings.json")
-	if err := os.WriteFile(path, []byte(handWrittenSettings), 0o600); err != nil {
+	input := handWrittenWithOurHooks(t)
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	older := []byte(`{"the":"first original"}`)
@@ -255,16 +250,18 @@ func TestInstallClaudeHooksNeverOverwritesABackup(t *testing.T) {
 	if len(matches) != 1 {
 		t.Fatalf("expected one new timestamped backup, got %v", matches)
 	}
-	fresh, err := os.ReadFile(matches[0])
-	if err != nil || string(fresh) != handWrittenSettings {
+	if fresh, err := os.ReadFile(matches[0]); err != nil || string(fresh) != input {
 		t.Fatalf("the new backup is not the pre-install file: err=%v", err)
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != handWrittenSettings {
+		t.Fatalf("our hooks were not retired:\n%s err=%v", after, err)
 	}
 }
 
 func TestInstallClaudeHooksWritesThroughASymlinkedSettingsFile(t *testing.T) {
 	dir := isolateClaudeConfig(t)
 	dotfiles := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(dotfiles, []byte(handWrittenSettings), 0o644); err != nil {
+	if err := os.WriteFile(dotfiles, []byte(handWrittenWithOurHooks(t)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "settings.json")
@@ -277,30 +274,26 @@ func TestInstallClaudeHooksWritesThroughASymlinkedSettingsFile(t *testing.T) {
 	if target, err := os.Readlink(path); err != nil || target != dotfiles {
 		t.Fatalf("the settings.json symlink was replaced: target=%q err=%v", target, err)
 	}
-	merged, err := os.ReadFile(dotfiles)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pultikHookCommands(merged)) != 2 {
-		t.Fatalf("the link target did not get our hooks:\n%s", merged)
+	if after, err := os.ReadFile(dotfiles); err != nil || string(after) != handWrittenSettings {
+		t.Fatalf("the link target kept our hooks:\n%s err=%v", after, err)
 	}
 	if info, err := os.Stat(dotfiles); err != nil || info.Mode().Perm() != 0o644 {
 		t.Fatalf("the edit changed the file mode: %v err=%v", info.Mode(), err)
 	}
 }
 
-func TestInstallClaudeHooksRefusesADanglingSettingsLink(t *testing.T) {
+// A dangling settings.json link holds no hook: the step says so and leaves it.
+func TestInstallClaudeHooksLeavesADanglingSettingsLink(t *testing.T) {
 	dir := isolateClaudeConfig(t)
 	missing := filepath.Join(t.TempDir(), "not-yet", "settings.json")
 	path := filepath.Join(dir, "settings.json")
 	if err := os.Symlink(missing, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := installClaudeHooks(true); err != nil {
-		t.Fatalf("a dry run must only warn: %v", err)
-	}
-	if err := installClaudeHooks(false); err == nil {
-		t.Fatal("a dangling settings.json link was accepted")
+	for _, dry := range []bool{true, false} {
+		if err := installClaudeHooks(dry); err != nil {
+			t.Fatalf("dry=%v: %v", dry, err)
+		}
 	}
 	if target, err := os.Readlink(path); err != nil || target != missing {
 		t.Fatalf("the dangling link was replaced: %q err=%v", target, err)

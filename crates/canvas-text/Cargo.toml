@@ -18,6 +18,12 @@ tracing.workspace = true
 # pre-laid-out rows to Op::Code; labels, cells and atlas rasterization stay shared.
 code-core.workspace = true
 theme.workspace = true
+# The bundled-font path (`bundled`): shaping, outlines and rasterizing in Rust, from font bytes
+# the caller hands in.
+harfrust.workspace = true
+skrifa.workspace = true
+zeno.workspace = true
+unicode-linebreak.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2-core-text.workspace = true

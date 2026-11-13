@@ -13,6 +13,7 @@
 //! multisampled pass ([`PATH_SAMPLES`], memoryless on Apple GPUs) resolved into the target;
 //! every other frame stays single-sampled.
 
+mod blur;
 pub mod frame;
 pub mod retained;
 mod tess;
@@ -21,6 +22,7 @@ pub use retained::{ChunkId, RetainedStats};
 
 pub use frame::{Batch, Frame, Pipeline, Viewport};
 
+use canvas_draw::layers::LayerFrame;
 use canvas_draw::{Camera, DisplayList, Follow};
 use canvas_text::{MAX_ALPHA_PAGES, MAX_COLOR_PAGES, PAGE_SIZE, PageKind, TextSystem};
 use frame::{CellInstance, GlyphInstance, PathVertex, RectInstance};
@@ -118,6 +120,15 @@ pub struct TargetStats {
     pub uploads: u64,
     /// Render passes encoded (an upload, or a redraw of the retained frame).
     pub encodes: u64,
+    /// Glass layers re-blurred by the last [`Gpu::render_layers`] frame (one Kawase chain
+    /// each): at most its `blur_cap`, and 0 for a still frame.
+    pub blur_passes: u32,
+    /// Wallpaper blurs the last layer frame did: one per glass sigma when the wallpaper's
+    /// `rev` moved or the target was resized, else 0. They are outside the cap.
+    pub wallpaper_blurs: u32,
+    /// Per-layer blurs held after the last layer frame, at quarter resolution: one per glass
+    /// layer over another layer, freed when its id leaves the frame.
+    pub cached_blurs: u32,
 }
 
 /// CPU wall time of the most recent submission, excluding offscreen fences.
@@ -160,6 +171,9 @@ pub struct Target {
     uploaded: bool,
     stats: TargetStats,
     profile: CpuFrameProfile,
+    /// The layer frames' scene, blur chain and caches: created by the first
+    /// [`Gpu::render_layers`], so a target that never draws glass never pays for it.
+    glass: Option<Box<blur::Glass>>,
 }
 
 impl Target {
@@ -242,6 +256,8 @@ pub struct Gpu {
     single: Pipelines,
     /// Built on the first frame with paths: a host that never draws one never pays for it.
     multisampled: OnceLock<Pipelines>,
+    /// Built on the first layer frame: a host that never draws glass never pays for it.
+    glass: OnceLock<blur::GlassPipelines>,
     globals_layout: wgpu::BindGroupLayout,
     atlas_layout: wgpu::BindGroupLayout,
     atlas_bind: wgpu::BindGroup,
@@ -362,6 +378,15 @@ fn pipelines(
 
 fn px(points: f64, scale: f64) -> u32 {
     (points * scale).round().max(1.0) as u32
+}
+
+/// The overlap of two `[x, y, w, h]` pixel rects (zero-sized when they do not meet).
+fn intersect_px(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    let x = a[0].max(b[0]);
+    let y = a[1].max(b[1]);
+    let mx = (a[0] + a[2]).min(b[0] + b[2]);
+    let my = (a[1] + a[3]).min(b[1] + b[3]);
+    [x, y, mx.saturating_sub(x), my.saturating_sub(y)]
 }
 
 impl Gpu {
@@ -507,6 +532,7 @@ impl Gpu {
             queue,
             single,
             multisampled: OnceLock::new(),
+            glass: OnceLock::new(),
             globals_layout,
             atlas_layout,
             atlas_bind,
@@ -647,6 +673,7 @@ impl Gpu {
             uploaded: false,
             stats: TargetStats::default(),
             profile: CpuFrameProfile::default(),
+            glass: None,
         }
     }
 
@@ -874,15 +901,9 @@ impl Gpu {
         }
     }
 
-    fn encode_lists<'a>(
-        &self,
-        target: &mut Target,
-        frames: impl Iterator<Item = (&'a Frame, &'a Buffers)> + Clone,
-        clear: [f64; 4],
-        view: &wgpu::TextureView,
-        scene: Option<&retained::Scene>,
-    ) {
-        let started = Instant::now();
+    /// Write each camera layer's uniforms that changed: the viewport, the clock (held at 0 when
+    /// `still`) and the camera along the axes it follows; `used` skips the layers no batch reads.
+    fn write_cameras(&self, target: &mut Target, used: Option<[bool; 4]>, still: bool) {
         let vp = target.viewport;
         let (w, h, t, s) = (
             vp.width_px as f32,
@@ -890,7 +911,6 @@ impl Gpu {
             target.time(),
             vp.scale,
         );
-        let used = scene.map(|s| s.follows());
         for (i, f) in [Follow::NONE, Follow::X, Follow::Y, Follow::BOTH]
             .into_iter()
             .enumerate()
@@ -899,11 +919,7 @@ impl Gpu {
             let data = [
                 w,
                 h,
-                if scene.is_some_and(|s| !s.animated()) {
-                    0.0
-                } else {
-                    t
-                },
+                if still { 0.0 } else { t },
                 0.0,
                 c.scale.x,
                 c.scale.y,
@@ -916,6 +932,91 @@ impl Gpu {
                 target.camera_data[i] = Some(data);
             }
         }
+    }
+
+    /// Draw `frame`'s batches (its instances already in `buffers`) into `pass`, each under its
+    /// own scissor narrowed to `clip` (`[x, y, w, h]` in pixels) when one is given.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_batches(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipes: &Pipelines,
+        cameras: &[Globals; 4],
+        frame: &Frame,
+        buffers: &Buffers,
+        vp: Viewport,
+        clip: Option<[u32; 4]>,
+    ) {
+        pass.set_bind_group(1, &self.atlas_bind, &[]);
+        let mut bound: Option<Follow> = None;
+        let mut scissor: Option<[u32; 4]> = None;
+        let mut pipeline: Option<Pipeline> = None;
+        for batch in &frame.batches {
+            let mut s = batch.scissor.unwrap_or([0, 0, vp.width_px, vp.height_px]);
+            if let Some(c) = clip {
+                s = intersect_px(s, c);
+            }
+            let [x, y, w, h] = s;
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let buffer = match batch.pipeline {
+                Pipeline::Rect => &buffers.rects,
+                Pipeline::Glyph => &buffers.glyphs,
+                Pipeline::Cell => &buffers.cells,
+                Pipeline::Path => &buffers.path_vertices,
+            };
+            let Some(buffer) = buffer else { continue };
+            if bound != Some(batch.follow) {
+                pass.set_bind_group(0, &cameras[batch.follow.index()].bind, &[]);
+                bound = Some(batch.follow);
+            }
+            // Only what changed between batches is set again: a timeline alternates a few
+            // pipelines under one scissor thousands of times.
+            if scissor != Some([x, y, w, h]) {
+                pass.set_scissor_rect(x, y, w, h);
+                scissor = Some([x, y, w, h]);
+            }
+            if pipeline != Some(batch.pipeline) {
+                match batch.pipeline {
+                    Pipeline::Rect => pass.set_pipeline(&pipes.rect),
+                    Pipeline::Glyph => pass.set_pipeline(&pipes.glyph),
+                    Pipeline::Cell => pass.set_pipeline(&pipes.cell),
+                    Pipeline::Path => {
+                        let (Some(path), Some(indices)) = (&pipes.path, &buffers.path_indices)
+                        else {
+                            continue;
+                        };
+                        pass.set_pipeline(path);
+                        pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    }
+                }
+                pass.set_vertex_buffer(0, buffer.buffer.slice(..));
+                pipeline = Some(batch.pipeline);
+            }
+            if batch.pipeline == Pipeline::Path {
+                pass.draw_indexed(batch.instances.clone(), 0, 0..1);
+            } else {
+                pass.draw(0..4, batch.instances.clone());
+            }
+        }
+    }
+
+    fn encode_lists<'a>(
+        &self,
+        target: &mut Target,
+        frames: impl Iterator<Item = (&'a Frame, &'a Buffers)> + Clone,
+        clear: [f64; 4],
+        view: &wgpu::TextureView,
+        scene: Option<&retained::Scene>,
+    ) {
+        let started = Instant::now();
+        let vp = target.viewport;
+        self.write_cameras(
+            target,
+            scene.map(|s| s.follows()),
+            scene.is_some_and(|s| !s.animated()),
+        );
         target.profile.uniforms_ms = started.elapsed().as_secs_f64() * 1000.0;
         let commands = Instant::now();
         let multisampled = scene.map_or_else(
@@ -984,61 +1085,8 @@ impl Gpu {
                     start = end;
                 }
             } else {
-                pass.set_bind_group(1, &self.atlas_bind, &[]);
-                let mut bound: Option<Follow> = None;
-                let mut scissor: Option<[u32; 4]> = None;
                 for (frame, buffers) in frames {
-                    let mut pipeline: Option<Pipeline> = None;
-                    for batch in &frame.batches {
-                        let [x, y, w, h] =
-                            batch.scissor.unwrap_or([0, 0, vp.width_px, vp.height_px]);
-                        if w == 0 || h == 0 {
-                            continue;
-                        }
-                        let buffer = match batch.pipeline {
-                            Pipeline::Rect => &buffers.rects,
-                            Pipeline::Glyph => &buffers.glyphs,
-                            Pipeline::Cell => &buffers.cells,
-                            Pipeline::Path => &buffers.path_vertices,
-                        };
-                        let Some(buffer) = buffer else { continue };
-                        if bound != Some(batch.follow) {
-                            pass.set_bind_group(0, &target.cameras[batch.follow.index()].bind, &[]);
-                            bound = Some(batch.follow);
-                        }
-                        // Only what changed between batches is set again: a timeline alternates a few
-                        // pipelines under one scissor thousands of times.
-                        if scissor != Some([x, y, w, h]) {
-                            pass.set_scissor_rect(x, y, w, h);
-                            scissor = Some([x, y, w, h]);
-                        }
-                        if pipeline != Some(batch.pipeline) {
-                            match batch.pipeline {
-                                Pipeline::Rect => pass.set_pipeline(&pipes.rect),
-                                Pipeline::Glyph => pass.set_pipeline(&pipes.glyph),
-                                Pipeline::Cell => pass.set_pipeline(&pipes.cell),
-                                Pipeline::Path => {
-                                    let (Some(path), Some(indices)) =
-                                        (&pipes.path, &buffers.path_indices)
-                                    else {
-                                        continue;
-                                    };
-                                    pass.set_pipeline(path);
-                                    pass.set_index_buffer(
-                                        indices.buffer.slice(..),
-                                        wgpu::IndexFormat::Uint32,
-                                    );
-                                }
-                            }
-                            pass.set_vertex_buffer(0, buffer.buffer.slice(..));
-                            pipeline = Some(batch.pipeline);
-                        }
-                        if batch.pipeline == Pipeline::Path {
-                            pass.draw_indexed(batch.instances.clone(), 0, 0..1);
-                        } else {
-                            pass.draw(0..4, batch.instances.clone());
-                        }
-                    }
+                    self.draw_batches(&mut pass, pipes, &target.cameras, frame, buffers, vp, None);
                 }
             }
         }
@@ -1113,6 +1161,37 @@ impl Gpu {
         target.frame = frame;
         target.uploaded = true;
         self.present(target)
+    }
+
+    /// Draw a frame of glass layers to a surface target and present it: the wallpaper, then
+    /// each layer back to front (its `under` unclipped, its slab, its `content` clipped to the
+    /// slab), with the blurs cached and capped as [`LayerFrame::blur_cap`] says. The blur
+    /// counts land in [`TargetStats`]. [`redraw`](Self::redraw) does not repeat a layer frame:
+    /// render it again, which costs no blur while nothing moved.
+    pub fn render_layers(
+        &self,
+        target: &mut Target,
+        frame: &LayerFrame,
+        text: &mut TextSystem,
+    ) -> Result<FrameOutcome, GpuError> {
+        if target.surface.is_none() {
+            return Err(GpuError::Surface("target has no surface".into()));
+        }
+        self.prepare_layers(target, frame, text);
+        let acquired = Instant::now();
+        let texture = self.acquire(target)?;
+        target.profile.acquire_ms = acquired.elapsed().as_secs_f64() * 1000.0;
+        let Some(texture) = texture else {
+            return Ok(FrameOutcome::Skipped);
+        };
+        let view = texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.encode_layers(target, frame, &view)?;
+        let presented = Instant::now();
+        self.queue.present(texture);
+        target.profile.present_ms = presented.elapsed().as_secs_f64() * 1000.0;
+        Ok(FrameOutcome::Presented)
     }
 
     /// Where the target's camera layers draw from the next encode on.
@@ -1202,6 +1281,18 @@ impl Gpu {
         self.encode(target, &frame, &off.view);
         target.frame = frame;
         target.uploaded = true;
+        self.wait()
+    }
+
+    /// Draw a frame of glass layers into `off`, as [`render_layers`](Self::render_layers) does.
+    pub fn render_layers_offscreen(
+        &self,
+        off: &mut Offscreen,
+        frame: &LayerFrame,
+        text: &mut TextSystem,
+    ) -> Result<(), GpuError> {
+        self.prepare_layers(&mut off.target, frame, text);
+        self.encode_layers(&mut off.target, frame, &off.view)?;
         self.wait()
     }
 

@@ -10,6 +10,7 @@
 //! zoom moves them on the GPU without a new list.
 
 pub mod cells;
+pub mod layers;
 pub mod path;
 
 use cells::CellFrame;

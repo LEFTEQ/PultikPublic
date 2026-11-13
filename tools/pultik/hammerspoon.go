@@ -13,7 +13,7 @@ package main
 // Modules always ship beside init.lua: init.lua dofile()s its resolved
 // sibling, so a target directory with only one file is a broken install.
 
-//go:generate cp ../../hammerspoon/init.lua ../../hammerspoon/organize.lua ../../hammerspoon/cmux.lua installassets/hammerspoon/
+//go:generate cp ../../hammerspoon/init.lua ../../hammerspoon/organize.lua ../../hammerspoon/cmux.lua ../../hammerspoon/keyboard_watch.lua installassets/hammerspoon/
 
 import (
 	"errors"
@@ -24,7 +24,14 @@ import (
 	"strings"
 )
 
-var hammerspoonFiles = []string{"init.lua", "organize.lua", "cmux.lua"}
+var hammerspoonFiles = []string{"init.lua", "organize.lua", "cmux.lua", "keyboard_watch.lua"}
+
+// hammerspoonMarkers are the modules every pultik package version has shipped
+// (init.lua and organize.lua since 2026-09-01; cmux.lua and keyboard_watch.lua
+// came later). Ownership is decided on them, never on the full list above, so
+// a link into a checkout of an earlier version stays pultik's and a reinstall
+// upgrades it instead of keeping it as somebody else's config.
+var hammerspoonMarkers = []string{"init.lua", "organize.lua"}
 
 func hammerspoonLinkPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -88,7 +95,10 @@ func hammerspoonRepoDir() string {
 			target = filepath.Join(filepath.Dir(linkPath), target)
 		}
 		dir := filepath.Dir(target)
-		if dir != managed && isPultikCheckoutDir(dir) {
+		// Only a checkout holding every module keeps the link. An earlier
+		// version's checkout is still pultik's, so the reinstall upgrades
+		// it to the embedded copies rather than keeping the old package.
+		if dir != managed && isCheckout(dir) && isPultikCheckoutDir(dir) {
 			return dir
 		}
 	}
@@ -160,11 +170,11 @@ func isPultikHammerspoonTarget(target string) bool {
 	return filepath.Base(dir) == "hammerspoon" && strings.EqualFold(filepath.Base(filepath.Dir(dir)), "pultik")
 }
 
-// isPultikCheckoutDir is a checkout's hammerspoon package: the three modules
-// with tools/pultik beside the directory, so a dotfiles folder that copied
-// the modules is not taken for a checkout.
+// isPultikCheckoutDir is a checkout's hammerspoon package, of any version:
+// the marker modules with tools/pultik beside the directory, so a dotfiles
+// folder that copied the modules is not taken for a checkout.
 func isPultikCheckoutDir(dir string) bool {
-	for _, name := range hammerspoonFiles {
+	for _, name := range hammerspoonMarkers {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			return false
 		}

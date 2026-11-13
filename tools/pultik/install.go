@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -27,12 +26,17 @@ var installAssets embed.FS
 // the `.pultik-managed` marker, never by name alone.
 var legacySkillNames = []string{"todo", "todo-list", "todo-done", "todo-milestone", "remind"}
 
+const maxAppDownload = 1 << 30
+
+// The tags of the SessionStart hooks earlier installs wrote. vitrinka's own
+// SessionStart hook (`vitrinka hook-context start`, from the kit plugin and
+// `vitrinka setup`) prints the todo and schedule cues itself, so pultik writes
+// no hook any more; it only retires these, or every session gets the todo
+// cue twice.
 const (
-	maxAppDownload = 1 << 30
-	todoHookTag    = "vitrinka:todo-session-context"
-	timeHookTag    = "vitrinka:schedule-session-context"
-	// The pre-2026-09 tags. Matched on retirement so one `pultik install`
-	// migrates a machine; never written again.
+	todoHookTag = "vitrinka:todo-session-context"
+	timeHookTag = "vitrinka:schedule-session-context"
+	// The pre-2026-09 tags.
 	legacyTodoHookTag = "pultik:todo-session-context"
 	legacyTimeHookTag = "pultik:schedule-session-context"
 )
@@ -49,17 +53,6 @@ type installOptions struct {
 	// or any run given --profile. profileName is that flag's value.
 	profile     bool
 	profileName string
-}
-
-type commandHook struct {
-	Type    string  `json:"type"`
-	Command string  `json:"command"`
-	Timeout float64 `json:"timeout,omitempty"`
-}
-
-type hookGroup struct {
-	Matcher string        `json:"matcher,omitempty"`
-	Hooks   []commandHook `json:"hooks"`
 }
 
 func installCmd(args []string) error {
@@ -235,16 +228,20 @@ FLAGS
                       install and --app-only need one only on a Mac with no
                       settings.json yet (a terminal asks, any other run fails)
   --no-app            skip the released macOS app
-  --no-hooks          skip Claude SessionStart hooks
+  --no-hooks          skip retiring the SessionStart hooks older installs wrote
   --no-hammerspoon    skip the ~/.hammerspoon/init.lua symlink
   --hammerspoon-force replace a ~/.hammerspoon/init.lua pultik did not install
                       (the old one is kept as init.lua.pultik-backup, or a
                       timestamped name when that backup exists); combines with
                       a full install or --hammerspoon-only
-  --dry-run           print every step's plan (hook lines included), write nothing
+  --dry-run           print every step's plan (the hooks it would retire
+                      included), write nothing
 
-The hooks step edits only hooks.SessionStart in settings.json: the rest of the
-file keeps its bytes, a file that already holds the hooks is left untouched,
+The hooks step writes no hook: it removes the "vitrinka hook-context
+todo|schedule" SessionStart hooks (and the pultik ones before them) that older
+installs added to Claude's settings.json, since vitrinka's own SessionStart
+hook prints the todo and reminder cues. It edits only hooks.SessionStart, the
+rest of the file keeps its bytes, a file without those hooks is left untouched,
 and a backup never replaces an older one. The profile step edits only
 "profile" in Pultik's settings.json (~/Library/Application Support/Pultik;
 custom also adds every profile key it lacks, each at the custom profile's own
@@ -254,9 +251,8 @@ Without --hammerspoon-force, the
 Hammerspoon step keeps a hand-written ~/.hammerspoon/init.lua (or a link to
 another config) and says so.
 
-The SessionStart hooks run "vitrinka hook-context todo|schedule" — the todo
-and reminder skills (/todo, /todo-list, /todo-done, /todo-milestone, /remind)
-ship through vitrinka's kit plugin, and the skills step only retires the copies
+The todo and reminder skills (/todo, /todo-list, /todo-done, /todo-milestone,
+/remind) ship through vitrinka's kit plugin, and the skills step only retires the copies
 an older pultik wrote into ~/.claude/skills. It never installs credentials, the
 privileged fan helper, or login-at-launch.
 `)
@@ -389,107 +385,65 @@ func retireLegacySkills(dryRun bool) error {
 	return nil
 }
 
-// vitrinkaBinary resolves the vitrinka CLI the SessionStart hooks will run,
-// the way the app resolves its own helpers: the shim `vitrinka install`
-// writes first, then PATH, then the usual manual-build locations. Nothing here
-// is a personal path. When nothing resolves the bare name is written — the
-// hook line is fail-open (`|| true`), so a missing binary costs nothing but
-// the context it would have printed.
-func vitrinkaBinary() (path string, found bool) {
-	home, _ := os.UserHomeDir()
-	candidates := []string{filepath.Join(home, ".local", "bin", "vitrinka")}
-	if onPath, err := exec.LookPath("vitrinka"); err == nil {
-		candidates = append(candidates, onPath)
-	}
-	candidates = append(candidates,
-		filepath.Join(home, ".bun", "bin", "vitrinka"),
-		"/opt/homebrew/bin/vitrinka",
-		"/usr/local/bin/vitrinka",
-	)
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate, true
-		}
-	}
-	return "vitrinka", false
-}
-
+// installClaudeHooks retires the SessionStart hooks older installs wrote into
+// Claude's settings.json (isPultikHook): vitrinka's own SessionStart hook
+// prints the todo and schedule cues, so ours only doubled them. A file holding
+// none of them, a missing file and a dangling link are left as they are.
 func installClaudeHooks(dryRun bool) error {
 	dir, err := claudeConfigDir()
 	if err != nil {
 		return err
 	}
-	if !dryRun {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
 	path := filepath.Join(dir, "settings.json")
 	// A settings.json symlinked from a dotfiles checkout stays a symlink: the
-	// edit lands in the file it points to, never on top of the link. A link
-	// whose target is missing is refused: writing would replace the link.
+	// edit lands in the file it points to, never on top of the link.
 	file := path
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			target, _ := os.Readlink(path)
-			if dryRun {
-				fmt.Fprintf(uiOut, "%s! %s links to %s, which does not exist; the install would stop here%s\n", yellow, path, target, reset)
-				return nil
-			}
-			return fmt.Errorf("%s links to %s, which does not exist: create that file or remove the link, then rerun", path, target)
+			fmt.Fprintf(uiOut, "%s! %s links to %s, which does not exist; no SessionStart hook to retire there%s\n", yellow, path, target, reset)
+			return nil
 		}
 		file = resolved
 	}
 	raw, err := os.ReadFile(file)
-	exists := err == nil
-	mode := fs.FileMode(0o600)
-	if info, statErr := os.Stat(file); statErr == nil {
-		mode = info.Mode().Perm()
-	}
 	if os.IsNotExist(err) {
-		raw = []byte("{}\n")
+		ok("no Claude settings.json at %s, so no SessionStart hook to retire", path)
+		return nil
 	} else if err != nil {
 		return err
 	}
-	binary, found := vitrinkaBinary()
-	if !found {
-		fmt.Fprintf(uiOut, "%s! vitrinka CLI not found — writing the bare name; install it (bun add -g @vitrinka/cli) and rerun%s\n", yellow, reset)
-	}
-	merged, err := mergeClaudeSettings(raw, binary)
+	edited, err := retireClaudeHooks(raw)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	current := exists && bytes.Equal(merged, raw)
+	retired := pultikHookCommands(raw)
+	if len(retired) == 0 {
+		ok("no pultik SessionStart hooks in %s (vitrinka's own hook prints the todo and reminder cues)", path)
+		return nil
+	}
 	if dryRun {
-		if current {
-			step("SessionStart hooks already current; would leave " + path + " untouched")
-			return nil
-		}
-		for _, command := range pultikHookCommands(raw) {
+		for _, command := range retired {
 			step("would remove SessionStart hook: " + command)
 		}
-		step("would write SessionStart hook: " + hookCommand(binary, "todo"))
-		step("would write SessionStart hook: " + hookCommand(binary, "schedule"))
 		return nil
 	}
-	if current {
-		ok("Claude SessionStart hooks already current in %s", path)
-		return nil
+	mode := fs.FileMode(0o600)
+	if info, err := os.Stat(file); err == nil {
+		mode = info.Mode().Perm()
 	}
-	if exists {
-		backup, err := placeBackup(path, func(candidate string) error {
-			return copyFileExclusive(file, candidate, 0o600)
-		})
-		if err != nil {
-			return fmt.Errorf("back up %s: %w", path, err)
-		}
-		step("backed up " + path + " → " + backup)
+	backup, err := placeBackup(path, func(candidate string) error {
+		return copyFileExclusive(file, candidate, 0o600)
+	})
+	if err != nil {
+		return fmt.Errorf("back up %s: %w", path, err)
 	}
-	if err := writeFileAtomic(file, merged, mode); err != nil {
+	step("backed up " + path + " → " + backup)
+	if err := writeFileAtomic(file, edited, mode); err != nil {
 		return err
 	}
-	ok("merged Claude SessionStart hooks into %s", path)
+	ok("removed %d retired SessionStart hook(s) from %s; vitrinka's own hook prints the todo and reminder cues", len(retired), path)
 	return nil
 }
 
@@ -541,18 +495,14 @@ func copyFileExclusive(source, destination string, mode fs.FileMode) error {
 	return output.Close()
 }
 
-// mergeClaudeSettings retires every generation of pultik's SessionStart hooks
-// and appends the current pair. Only hooks.SessionStart changes; the rest of
-// the file keeps its bytes (settings_edit.go), and a file that already holds
-// exactly our hooks comes back unchanged.
-func mergeClaudeSettings(raw []byte, binary string) ([]byte, error) {
+// retireClaudeHooks is settings.json without every generation of pultik's
+// SessionStart hooks; only hooks.SessionStart changes (settings_edit.go), and a
+// file holding none comes back unchanged.
+func retireClaudeHooks(raw []byte) ([]byte, error) {
 	if err := checkSettingsShape(raw); err != nil {
 		return nil, err
 	}
-	return editSessionStart(raw, []hookGroup{
-		{Hooks: []commandHook{{Type: "command", Command: hookCommand(binary, "todo"), Timeout: 15}}},
-		{Hooks: []commandHook{{Type: "command", Command: hookCommand(binary, "schedule"), Timeout: 15}}},
-	})
+	return withoutPultikSessionStartHooks(raw), nil
 }
 
 // legacyHookArgs are the pre-tag hooks' exact argument strings.
@@ -599,7 +549,7 @@ func isPultikHook(hook any) bool {
 }
 
 // pultikHookCommands lists the SessionStart hook commands in raw settings
-// that a merge would retire — the dry run's "before" half.
+// that the hooks step retires: its dry run and its no-op check.
 func pultikHookCommands(raw []byte) []string {
 	var settings struct {
 		Hooks struct {
@@ -621,17 +571,6 @@ func pultikHookCommands(raw []byte) []string {
 		}
 	}
 	return out
-}
-
-// hookCommand is the exact line written into settings.json: the vitrinka CLI
-// prints the SessionStart context itself, fail-open so a signed-out or
-// off-mesh machine starts its session in silence rather than with an error.
-func hookCommand(binary, kind string) string {
-	tag := todoHookTag
-	if kind == "schedule" {
-		tag = timeHookTag
-	}
-	return shellQuote(binary) + " hook-context " + kind + " 2>/dev/null || true; # " + tag
 }
 
 func installReleasedApp() error {

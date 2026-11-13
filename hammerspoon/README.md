@@ -20,6 +20,14 @@ in Pultík's `settings.json`; a built-in default ships in `organize.lua`.
 Debug helpers: `hs -c 'Organize.status()'` (what the registry knows),
 `hs -c 'Organize.layouts()'`, `hs -c 'Organize.run("default")'`.
 
+`keyboard_watch.lua` is a read-only input-source watcher: when the selected
+keyboard source leaves Czech it shows an alert and a notification (at most one
+per 10 s) and appends every change, with the frontmost app, its bundle ID, the
+Secure Input state and the enabled sources, to
+`~/Library/Logs/pultik-keyboard-watch.log`. It never selects a source, stays
+idle on a Mac with no Czech layout enabled, and `hs -c 'KeyboardWatch.stop()'`
+silences it until the next reload.
+
 ## What the keys do
 
 Everything is driven from Hammerspoon. The grid follows the **active display**, so

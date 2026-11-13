@@ -16,10 +16,14 @@
 //!   rows.
 //! - [`sprite`]: our own box-drawing, block and powerline glyphs, rasterized at the exact
 //!   cell size into the same atlas.
+//! - [`bundled`] (native targets): text in font files the caller hands in, shaped and
+//!   rasterized the same on every platform; [`TextSystem::set_bundled`] sets UI text in them.
 //!
 //! Sizes are in points; the renderer multiplies by the backing scale.
 
 pub mod atlas;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod bundled;
 mod code;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_view;
@@ -204,6 +208,9 @@ pub struct TextSystem {
     raster_generation: u64,
     /// Images handed over by [`TextSystem::set_image`], by id.
     images: HashMap<u64, Arc<RasterGlyph>>,
+    /// The bundled faces UI text is set in instead of the platform's ([`TextSystem::set_bundled`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    bundled: Option<bundled::Bundled>,
 }
 
 impl Default for TextSystem {
@@ -226,7 +233,24 @@ impl TextSystem {
             raster_sizes: Vec::new(),
             raster_generation: 0,
             images: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            bundled: None,
         }
+    }
+
+    /// Shape and rasterize UI and monospaced text ([`TextSystem::shape`], [`TextSystem::metrics`],
+    /// so `Op::Text`) in `faces` instead of the platform's fonts; `None` returns to the platform.
+    /// Terminal and code rows keep the platform's terminal font. Cached shapes and the atlas are
+    /// dropped: a bundled glyph key names another file once the faces change.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_bundled(
+        &mut self,
+        faces: Option<bundled::TextFaces>,
+    ) -> Result<(), bundled::BundledError> {
+        self.bundled = faces.map(bundled::Bundled::new).transpose()?;
+        self.shapes.clear();
+        self.atlas.clear();
+        Ok(())
     }
 
     /// Use `family` (`None` = the system monospaced font, SF Mono) at `size` points (zoom 1)
@@ -364,6 +388,10 @@ impl TextSystem {
     }
 
     pub fn metrics(&mut self, spec: FontSpec) -> Metrics {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(bundled) = &mut self.bundled {
+            return bundled.metrics(spec);
+        }
         self.platform.metrics(spec)
     }
 
@@ -376,12 +404,28 @@ impl TextSystem {
         if self.shapes.values().map(HashMap::len).sum::<usize>() >= SHAPE_CACHE_MAX {
             self.shapes.clear();
         }
-        let shaped = Arc::new(self.platform.shape(text, spec));
+        let shaped = Arc::new(self.shape_line(text, spec));
         self.shapes
             .entry(font)
             .or_default()
             .insert(text.to_owned(), shaped.clone());
         shaped
+    }
+
+    fn shape_line(&mut self, text: &str, spec: FontSpec) -> ShapedLine {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(bundled) = &self.bundled {
+            return bundled.shape(text, spec);
+        }
+        self.platform.shape(text, spec)
+    }
+
+    fn rasterize(&mut self, key: &GlyphKey) -> RasterGlyph {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(raster) = self.bundled.as_mut().and_then(|b| b.rasterize(key)) {
+            return raster;
+        }
+        self.platform.rasterize(key)
     }
 
     /// `text` shaped to fit `max_width`, cut at a char boundary and ended with an ellipsis
@@ -432,7 +476,7 @@ impl TextSystem {
             return hit;
         }
         let raster = match &key {
-            AtlasKey::Glyph(g) => self.platform.rasterize(g),
+            AtlasKey::Glyph(g) => self.rasterize(g),
             AtlasKey::Sprite(s) => sprite::rasterize(*s).unwrap_or_else(RasterGlyph::empty),
             AtlasKey::Image(id) => match self.images.get(id) {
                 Some(image) => RasterGlyph::clone(image),
