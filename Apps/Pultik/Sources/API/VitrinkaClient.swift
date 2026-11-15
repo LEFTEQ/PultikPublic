@@ -412,6 +412,10 @@ actor VitrinkaClient {
 
     private var knownWorkspaces: [VitrinkaWorkspace] = []
     private var workspaceDiscoveryAt: Date?
+    /// The me doors' validators and bodies (vt-9725): a 304 answers from here.
+    private var validators = VitrinkaValidatorCache()
+    /// Compact `/me/work` until a workspace's server proves it cannot.
+    private var workReads = VitrinkaWorkReadMode()
 
     /// A token can see more workspaces than the rail can show, and each one
     /// costs round-trips: poll a bounded head of them, four at a time — the
@@ -511,17 +515,31 @@ actor VitrinkaClient {
         }
         var snapshot = VitrinkaWorkspaceSnapshot(workspace: scope, tray: tray)
         var failure: ProbeFailure?
-        async let workRead = get("/api/v1/me/work", token: token, workspace: scope.slug)
+        let workPath = workReads.path(for: scope.slug)
+        async let workRead = get(workPath, token: token, workspace: scope.slug)
         async let ripeRead = get("/api/v1/me/ripe", token: token, workspace: scope.slug)
 
-        switch await workRead {
-        case .failed(let why): snapshot.workUnavailable = true; failure = why
-        case .value(let data):
-            do { snapshot.work = try JSONDecoder().decode(VitrinkaMyWork.self, from: data) }
-            catch {
-                NSLog("pultik: cannot decode daily work for %@: %@", scope.slug, error.localizedDescription)
-                snapshot.workUnavailable = true
+        var work = await workRead
+        var readThrough = workPath
+        while true {
+            switch work {
+            case .failed(let why): snapshot.workUnavailable = true; failure = why
+            case .value(let data):
+                switch workReads.decode(data, readThrough: readThrough, workspace: scope.slug) {
+                case .work(let decoded): snapshot.work = decoded
+                case .fullRead:
+                    // A server without project/url on compact rows: read
+                    // this workspace in full from now on, starting now.
+                    NSLog("pultik: compact daily work unreadable for %@; reading it in full", scope.slug)
+                    readThrough = VitrinkaWorkReadMode.fullPath
+                    work = await get(readThrough, token: token, workspace: scope.slug)
+                    continue
+                case .unreadable(let error):
+                    NSLog("pultik: cannot decode daily work for %@: %@", scope.slug, error.localizedDescription)
+                    snapshot.workUnavailable = true
+                }
             }
+            break
         }
         struct Ripe: Decodable {
             struct Entry: Decodable { let task: VitrinkaWorkTask }
@@ -542,22 +560,62 @@ actor VitrinkaClient {
         return (snapshot, failure)
     }
 
+    /// One read. The me doors revalidate (`VitrinkaValidatorCache`): the
+    /// remembered ETag goes out as If-None-Match and a 304 answers the
+    /// remembered body, so an unchanged workspace costs no body and no decode
+    /// on the server. A 304 is never a failure.
     private func get(_ path: String, token: String, workspace scope: String? = nil) async -> ProbeResult<Data> {
+        let scoped = scope ?? workspace
+        guard let key = VitrinkaValidatorCache.key(path: path, workspace: scoped) else {
+            switch await send(path, token: token, workspace: scoped, ifNoneMatch: nil) {
+            case .failed(let failure): return .failed(failure)
+            case .value(let answer):
+                guard (200..<300).contains(answer.status) else {
+                    return .failed(.classify(HTTPStatusError(status: answer.status)))
+                }
+                return .value(answer.body)
+            }
+        }
+        // Captured before the await: another actor turn may rebind or evict.
+        let identity = cacheIdentity()
+        validators.bind(identity: identity)
+        var sent = validators.entry(for: key)
+        for _ in 0..<2 {
+            switch await send(path, token: token, workspace: scoped, ifNoneMatch: sent?.etag) {
+            case .failed(let failure): return .failed(failure)
+            case .value(let answer):
+                switch validators.resolve(key: key, sent: sent, identity: identity,
+                                          status: answer.status, etag: answer.etag, body: answer.body) {
+                case .body(let body): return .value(body)
+                case .status(let status): return .failed(.classify(HTTPStatusError(status: status)))
+                case .refetch: sent = nil
+                }
+            }
+        }
+        // A 304 twice to a request that sent no validator: a broken server.
+        return .failed(.unreachable("HTTP 304 without a validator for \(path)"))
+    }
+
+    private struct Answer: Sendable {
+        let status: Int
+        let etag: String?
+        let body: Data
+    }
+
+    private func send(_ path: String, token: String, workspace: String?, ifNoneMatch: String?) async -> ProbeResult<Answer> {
         guard let url = URL(string: path, relativeTo: base) else {
             return .failed(.rejected("bad path \(path)"))
         }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        if let workspace = scope ?? workspace { request.setValue(workspace, forHTTPHeaderField: "X-Vitrinka-Workspace") }
+        if let workspace { request.setValue(workspace, forHTTPHeaderField: "X-Vitrinka-Workspace") }
+        if let ifNoneMatch { request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match") }
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .failed(.unreachable("no response"))
             }
-            guard (200..<300).contains(http.statusCode) else {
-                return .failed(.classify(HTTPStatusError(status: http.statusCode)))
-            }
-            return .value(data)
+            return .value(Answer(status: http.statusCode, etag: http.value(forHTTPHeaderField: "ETag"), body: data))
         } catch {
             return .failed(.classify(error))
         }

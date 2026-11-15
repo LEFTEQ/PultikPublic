@@ -37,6 +37,37 @@ pub enum EventResult {
     Scheduled = 5,
 }
 
+impl EventKind {
+    /// The kind Semafor's wire word names (`reconcile`, `backup`, …); `None` for another.
+    pub fn from_word(w: &str) -> Option<EventKind> {
+        Some(match w {
+            "reconcile" => EventKind::Reconcile,
+            "gateway" => EventKind::Gateway,
+            "eve" => EventKind::Eve,
+            "backup" => EventKind::Backup,
+            "restore" => EventKind::Restore,
+            "cleanup" => EventKind::Cleanup,
+            "cert" => EventKind::Cert,
+            _ => return None,
+        })
+    }
+}
+
+impl EventResult {
+    /// The result Semafor's wire word names (`ok`, `fail`, …); `None` for another.
+    pub fn from_word(w: &str) -> Option<EventResult> {
+        Some(match w {
+            "ok" => EventResult::Ok,
+            "fail" => EventResult::Fail,
+            "rollback" => EventResult::Rollback,
+            "live" => EventResult::Live,
+            "missed" => EventResult::Missed,
+            "scheduled" => EventResult::Scheduled,
+            _ => return None,
+        })
+    }
+}
+
 /// An estate row of a box's lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {

@@ -50,7 +50,7 @@ final class QuerySnapshotCodableTests: XCTestCase {
             EveAlert(id: 3, ts: at, flow: "exampleapp_prod", category: "incidents", severity: .critical, title: "API down", body: "5xx spike"),
             EveAlert(id: 4, ts: at, flow: "monitor", category: "priority", severity: nil, title: "Disk", body: ""),
         ]
-        XCTAssertEqual(try roundTrip(sessions).map(\.prKey), ["example/exampleapp#641", "example/exampleapp#642"])
+        XCTAssertEqual(try roundTrip(sessions).map(\.prKey), ["example-org/exampleapp#641", "example-org/exampleapp#642"])
         XCTAssertEqual(try roundTrip(alerts).map(\.severity), [.critical, nil])
         let approval = EveApproval(rootID: "r1", title: "Review ExampleApp#641", flow: "pr_review", repo: "example-org/ExampleApp",
                                    prNumber: 641, parked: [.init(id: "c1", title: "open PR", tool: "open_pr",
