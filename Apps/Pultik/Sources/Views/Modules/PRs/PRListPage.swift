@@ -59,7 +59,11 @@ struct PRListPage: View {
         let entries = entries
         let _ = PROpenProbe.pass("prList")
         SelectionScrollView(selection: selectedID) {
-            VStack(alignment: .leading, spacing: 2) {
+            // Lazy: ↵ narrows the list, and a full stack laid every row out
+            // again at the new width, not only the ones on screen. Rows are
+            // keyed by the id the selection scrolls to, so an off-screen one
+            // is still found.
+            LazyVStack(alignment: .leading, spacing: 2) {
                 // Silent while the archive has (or is fetching) something to
                 // say — "no match" above a list of matches would be a lie.
                 if entries.isEmpty, !(searching && (store.isSearching || !store.searchMatches.isEmpty)) {
@@ -228,7 +232,7 @@ struct PRRepoSection: View {
             .padding(.horizontal, 8)
             .padding(.top, 7)
             .padding(.bottom, 2)
-        ForEach(group.entries) { entry in
+        ForEach(group.entries, id: \.objectID) { entry in
             InboxPRRow(entry: entry, selected: selectedID == "pr:\(entry.id)")
                 .opacity(ResolvedStore.shared.isResolved("pr:\(entry.id)") ? 0.35 : 1)
                 .id("pr:\(entry.id)")

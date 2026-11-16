@@ -236,6 +236,10 @@ final class StatusStore {
             info.id
         }
 
+        /// The row's object id (`pr:<id>`): the PR list keys its lazy rows by
+        /// it, so scrolling to the selection finds a row not yet built.
+        var objectID: String { "pr:\(info.id)" }
+
         /// "example-org/ExampleApp" → "ExampleApp"
         var repoName: String {
             repoSlug.split(separator: "/").last.map(String.init) ?? repoSlug
