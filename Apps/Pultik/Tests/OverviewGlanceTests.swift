@@ -2,92 +2,6 @@ import XCTest
 @testable import Pultik
 
 final class OverviewGlanceTests: XCTestCase {
-    private struct Row: Equatable {
-        let title: String
-        let reason: String
-    }
-
-    private let gib = DevboxGlance.gib
-
-    func testVitrinkaCountsAndTopRowsRankAttention() {
-        let today = [
-            Row(title: "a", reason: "in progress"),
-            Row(title: "b", reason: "due now"),
-            Row(title: "c", reason: "overdue"),
-            Row(title: "d", reason: "needs you"),
-            Row(title: "e", reason: "due now"),
-            Row(title: "f", reason: "mentioned"),
-        ]
-        let glance = VitrinkaGlance(today: today, reason: \.reason, liveQuestions: [3, 0, 2], elsewhere: [])
-
-        XCTAssertEqual([glance.needsYou, glance.overdue, glance.dueNow, glance.inProgress], [1, 1, 2, 1])
-        XCTAssertEqual(glance.openQuestions, 5)
-        XCTAssertEqual(glance.top.map(\.title), ["d", "c", "b"])
-    }
-
-    func testVitrinkaElsewhereCountsOnlyOtherWorkspacesAttention() {
-        let selected = [Row(title: "mine", reason: "needs you")]
-        let others = [
-            [Row(title: "x", reason: "overdue"), Row(title: "y", reason: "assigned to you")],
-            [Row(title: "z", reason: "due now")],
-        ]
-        let glance = VitrinkaGlance(today: selected, reason: \.reason, liveQuestions: [], elsewhere: others)
-        XCTAssertEqual(glance.elsewhere, 2)
-
-        let quiet = VitrinkaGlance(today: selected, reason: \.reason, liveQuestions: [],
-                                   elsewhere: [[Row(title: "m", reason: "mentioned")]])
-        XCTAssertNil(quiet.elsewhere)
-    }
-
-    func testDevboxHeadroomStaleAndHeld() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let day: TimeInterval = 86_400
-        let glance = DevboxGlance(
-            summary: summary(total: 64, available: 22, floor: 8),
-            workspaces: [
-                workspace("light", state: "running", memory: 1 * gib),
-                workspace("heavy", state: "running", memory: 5 * gib, hold: true),
-                workspace("old", state: "parked", parkedAt: now.addingTimeInterval(-8 * day)),
-                workspace("edge", state: "parked", parkedAt: now.addingTimeInterval(-7 * day)),
-                workspace("unknown", state: "parked", parkedAt: nil, hold: true),
-                // Held and old: gc --retire-stale never clears it, so not stale.
-                workspace("pinned", state: "parked", parkedAt: now.addingTimeInterval(-30 * day), hold: true),
-            ],
-            now: now
-        )
-
-        XCTAssertEqual(glance.headroomBytes, 14 * gib)
-        XCTAssertEqual(glance.memoryUsedBytes, 42 * gib)
-        XCTAssertEqual(glance.running.map(\.name), ["heavy", "light"])
-        XCTAssertEqual(glance.parked, 4)
-        XCTAssertEqual(glance.stale, 1)
-        XCTAssertEqual(glance.held, 3)
-    }
-
-    func testDevboxAlertsFireOnlyPastEachThreshold() {
-        let atThreshold = DevboxGlance(
-            summary: summary(pressure: 5, cpus: 8, load1: 8, swapUsedGB: 0.5, ports: (80, 100)),
-            workspaces: []
-        )
-        XCTAssertEqual(atThreshold.alerts, [])
-
-        let past = DevboxGlance(
-            summary: summary(pressure: 5.1, cpus: 8, load1: 8.8, swapUsedGB: 0.75, ports: (81, 100)),
-            workspaces: []
-        )
-        XCTAssertEqual(past.alerts, [
-            .pressure(percent: 5.1), .swap(bytes: 0.75 * gib), .load(perCore: 1.1), .slots(used: 81, total: 100),
-        ])
-        // Swap is a gauge on the widget; the banner leaves it out.
-        XCTAssertEqual(past.bannerAlerts, [
-            .pressure(percent: 5.1), .load(perCore: 1.1), .slots(used: 81, total: 100),
-        ])
-
-        let noCores = DevboxGlance(summary: summary(cpus: 0, load1: 40), workspaces: [])
-        XCTAssertNil(noCores.loadPerCore)
-        XCTAssertEqual(noCores.alerts, [])
-    }
-
     func testCIMatchesLanesAndFooterTotals() {
         let job = CIJob(org: "example-org", repo: "ExampleApp", lane: "exampleapp-ci", workflow: "ci",
                         jobName: "test", runURL: nil, since: nil)
@@ -242,31 +156,6 @@ final class OverviewGlanceTests: XCTestCase {
     }
 
     // MARK: - Fixtures
-
-    private func summary(
-        total: Double = 64, available: Double = 32, floor: Int = 8, pressure: Double = 0,
-        cpus: Int = 16, load1: Double = 1, swapUsedGB: Double = 0, ports: (Int, Int)? = nil
-    ) -> DevboxOverviewSummary {
-        DevboxOverviewSummary(
-            identitySlots: 0, targetHot: 0, hotCeiling: 0, claimed: 0, running: 0,
-            identities: ports.map { DevboxOverviewIdentities(saved: 10, runtimeLeases: 3,
-                                                             portsUsed: $0.0, portCapacity: $0.1) },
-            parked: 0, floorGB: floor, pressureSome: pressure, pressureFull: 0,
-            cpus: cpus, load1: load1, memoryTotalBytes: total * gib,
-            memoryAvailableBytes: available * gib,
-            swapTotalBytes: 4 * gib, swapFreeBytes: (4 - swapUsedGB) * gib
-        )
-    }
-
-    private func workspace(
-        _ name: String, state: String, memory: Double = 0, parkedAt: Date? = nil, hold: Bool = false
-    ) -> DevboxWorkspace {
-        DevboxWorkspace(
-            name: name, project: nil, branch: nil, portBase: nil, created: nil, apps: [],
-            stats: [], memoryBytes: memory, cpuPercent: 0, declaredSources: [],
-            state: state, hold: hold, parkedAt: parkedAt
-        )
-    }
 
     /// A run's host Semafor (2026-10-14): from its JIT runners, the longest
     /// lane winning; else the one host serving the repo; never a guess when

@@ -2,6 +2,10 @@
 //! as many as its busiest moment in the rendered window, and the zoom sets how thick a track
 //! is (slivers far out, bars tall enough for a label close in). Tracks change only with the
 //! rendered window or the zoom level, never per frame.
+//!
+//! A lens says how ([`Tracking`]): CI's thickness follows the zoom; a plan's lanes keep one pitch
+//! at every zoom, and there a point holds the room its shape and its text take, so two chips
+//! never share a track where they would overlap.
 
 use crate::geometry::level_scale;
 use crate::layout::ROW_PITCH;
@@ -19,6 +23,46 @@ const FAR_MIN: f64 = 360.0;
 const NEAR_MIN: f64 = 30.0;
 /// A tracked row's padding above its first and below its last track.
 pub const TRACK_PAD: f32 = 2.0;
+
+/// How a lens's rows open into tracks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tracking {
+    /// Rows never open.
+    Off,
+    /// CI: slivers far out, bars tall enough for a label close in; a point takes no room past
+    /// its instant.
+    Zoomed,
+    /// The same pitch and bar thickness at every zoom (base points); a point takes its shape's
+    /// and its text's room.
+    Fixed { pitch: f32, bar: f32 },
+}
+
+impl Tracking {
+    pub fn on(self) -> bool {
+        self != Tracking::Off
+    }
+
+    /// One track's pitch and its bar's greatest thickness at a level, base points.
+    pub fn metrics(self, level: i32) -> (f32, f32) {
+        match self {
+            Tracking::Fixed { pitch, bar } => (pitch, bar),
+            _ => track_metrics(level),
+        }
+    }
+
+    /// A tracked row's height for `n` tracks at a level, base points: never under a plain row's.
+    pub fn row_height(self, n: usize, level: i32) -> f32 {
+        ROW_PITCH.max(n as f32 * self.metrics(level).0 + 2.0 * TRACK_PAD)
+    }
+
+    /// Within a tracked row of `n` tracks and `h` base points: each track's pitch and its bar's
+    /// thickness.
+    pub fn geometry(self, n: usize, h: f32, level: i32) -> (f32, f32) {
+        let (pitch, bar) = self.metrics(level);
+        let p = (h - 2.0 * TRACK_PAD) / n.max(1) as f32;
+        (p, bar.min(p - (pitch * 0.15).max(1.0)).max(1.5))
+    }
+}
 
 /// How far in the zoom is between far (0) and near (1), log-linear in minutes per 1000 points.
 pub fn closeness(level: i32) -> f32 {
@@ -38,15 +82,13 @@ pub fn track_metrics(level: i32) -> (f32, f32) {
 
 /// A tracked row's height for `n` tracks at a level, base points: never under a plain row's.
 pub fn tracked_row_height(n: usize, level: i32) -> f32 {
-    ROW_PITCH.max(n as f32 * track_metrics(level).0 + 2.0 * TRACK_PAD)
+    Tracking::Zoomed.row_height(n, level)
 }
 
 /// Within a tracked row of `n` tracks and `h` base points: each track's pitch and its bar's
 /// thickness. The gap between neighbours grows with the pitch.
 pub fn track_geometry(n: usize, h: f32, level: i32) -> (f32, f32) {
-    let (pitch, bar) = track_metrics(level);
-    let p = (h - 2.0 * TRACK_PAD) / n.max(1) as f32;
-    (p, bar.min(p - (pitch * 0.15).max(1.0)).max(1.5))
+    Tracking::Zoomed.geometry(n, h, level)
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -61,6 +103,18 @@ pub struct Tracks {
 /// takes the lowest track free by its start, so a row needs exactly as many tracks as its
 /// most marks at once.
 pub fn assign(marks: &[Mark], from: Ms, to: Ms, now: Ms) -> Tracks {
+    assign_with(marks, from, to, now, |_| (0.0, 0.0))
+}
+
+/// [`assign`] with each mark holding `room(i)` = (before its start, after its end) too, ms: the
+/// room its shape and text take at the level's scale.
+pub fn assign_with(
+    marks: &[Mark],
+    from: Ms,
+    to: Ms,
+    now: Ms,
+    room: impl Fn(usize) -> (Ms, Ms),
+) -> Tracks {
     let mut by_row: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
     for (i, m) in marks.iter().enumerate() {
         let end = m.end.unwrap_or(now);
@@ -71,10 +125,11 @@ pub fn assign(marks: &[Mark], from: Ms, to: Ms, now: Ms) -> Tracks {
     }
     let mut out = Tracks::default();
     for (row, mut list) in by_row {
-        list.sort_by(|&a, &b| marks[a].start.total_cmp(&marks[b].start));
+        let start = |i: usize| marks[i].start - room(i).0;
+        list.sort_by(|&a, &b| start(a).total_cmp(&start(b)));
         let mut free: Vec<Ms> = Vec::new();
         for i in list {
-            let s = marks[i].start;
+            let s = start(i);
             let t = match free.iter().position(|&until| until <= s) {
                 Some(t) => t,
                 None => {
@@ -82,7 +137,7 @@ pub fn assign(marks: &[Mark], from: Ms, to: Ms, now: Ms) -> Tracks {
                     free.len() - 1
                 }
             };
-            free[t] = marks[i].end.unwrap_or(f64::INFINITY);
+            free[t] = marks[i].end.map_or(f64::INFINITY, |e| e + room(i).1);
             out.of.insert(i, t);
         }
         out.rows.insert(row, free.len());

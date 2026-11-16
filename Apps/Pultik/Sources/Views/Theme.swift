@@ -27,9 +27,9 @@ enum Theme {
     static let warn = Color(hex: 0xF5B83D)
     static let danger = Color(hex: 0xFF6369)
     static let idle = ink3
-    /// Eve and agent identity: glyphs and the eve chip only.
+    /// Purple: GitHub's merged and completed states and GFM's important
+    /// alert only (eve's identity colour until eve left the panel, 2026-11-16).
     static let eve = Color(hex: 0xBF5AF2)
-    static let eveSoft = eve.opacity(0.12)
     // Charts
     static let data = Color(hex: 0xD6C7B6)
     static let dataMuted = Color(hex: 0x6B625B)
@@ -285,12 +285,10 @@ struct RailBadge: Identifiable {
 }
 
 /// THE row of the rails (2026-09-14; the left column it began in retired
-/// with WP8): one grammar for a task, a
-/// listener, a board and a devbox workspace, so the column reads as one list
-/// rather than three apps. Dot · title · trailing meta, an optional second
+/// with WP8): one grammar for an issue, an alert or a lane, so the column
+/// reads as one list. Dot · title · trailing meta, an optional second
 /// line in mono, badges at the edge; hover lifts the row onto the same slab
-/// every rail row in the panel uses. Devbox cards extend it with their
-/// disclosure and verbs but keep these metrics (`RailRowMetrics`).
+/// every rail row in the panel uses (`RailRowMetrics`).
 struct RailRow: View {
     enum Dot {
         case filled(Color)
@@ -380,8 +378,7 @@ struct RailRow: View {
     }
 }
 
-/// The numbers behind `RailRow`, shared with the devbox card so a workspace
-/// line and a board line sit on the same grid.
+/// The numbers behind `RailRow`, so every rail line sits on the same grid.
 enum RailRowMetrics {
     static let titleFont = Font.system(size: 11)
     /// SF Pro with tabular digits (D6): numbers still line up, words read
@@ -461,7 +458,7 @@ struct RailSection<Content: View>: View {
     var count: Int = 0
     var tone: Color = .secondary
     /// Rendered at the header's trailing edge, inside the tap target — the
-    /// devbox "as of" stamp is the case this exists for.
+    /// an "as of" stamp is the case this exists for.
     var accessory: AnyView?
     @ViewBuilder let content: () -> Content
 

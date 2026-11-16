@@ -14,7 +14,7 @@ struct MenuBarIconView: View {
     ///   - dark: the menu bar's own appearance — a coloured (non-template)
     ///     image resolves `.primary` at render time, not at display time.
     @MainActor
-    static func render(_ state: AggregateState, todoCount: Int = 0,
+    static func render(_ state: AggregateState,
                        alertCount: Int = 0, alertCritical: Bool = false, awake: Bool = false,
                        prodDots: [ProdGlance.Dot] = [], pulseOn: Bool = true, dark: Bool = false) -> NSImage {
         let symbol: String
@@ -53,19 +53,7 @@ struct MenuBarIconView: View {
                 }
                 .padding(.leading, 2)
             }
-            // Open todos ride along as a second glyph+count; the state colors
-            // above stay reserved for CI, so the badge is always monochrome.
-            if todoCount > 0 {
-                Image(systemName: "checklist")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(state == .allClear ? color : .primary)
-                    .padding(.leading, 2)
-                Text("\(todoCount)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(state == .allClear ? color : .primary)
-            }
-            // Unread eve alerts: a bell alongside the todos, monochrome like
-            // them — except an unread CRITICAL, which is allowed to borrow red.
+            // Unseen firing criticals: a bell, monochrome like the CI count — except a CRITICAL, which is allowed to borrow red.
             if alertCount > 0 {
                 Image(systemName: alertCritical ? "bell.badge.fill" : "bell")
                     .font(.system(size: 11, weight: .medium))

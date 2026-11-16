@@ -21,6 +21,7 @@ struct FileTreeView: View {
                 TextField("Filter files", text: $filter)
                     .textFieldStyle(.plain)
                     .font(Theme.Typo.meta)
+                    .stagedField()
                 if !filter.isEmpty {
                     Button { filter = "" } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 10)).foregroundStyle(Theme.ink3)

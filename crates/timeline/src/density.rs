@@ -422,16 +422,9 @@ pub fn nearest_outcome(marks: &[Mark], t: Ms, tol: Ms, now: Ms, reach: Ms) -> Op
     best
 }
 
-/// "every 5 min" for a period.
+/// "every 5 min" for a period, in English ([`crate::time::Words::every`] in the host's words).
 pub fn every_label(period: Ms) -> String {
-    let s = period / 1000.0;
-    if s < 60.0 {
-        format!("every {} s", s.round())
-    } else if s < 3600.0 {
-        format!("every {} min", (s / 60.0).round())
-    } else {
-        format!("every {:.1} h", s / 3600.0)
-    }
+    crate::time::Words::english().every(period)
 }
 
 /// False when even the 15 min limit keeps a cluster's members in one cell.

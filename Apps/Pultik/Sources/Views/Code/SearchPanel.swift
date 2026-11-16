@@ -47,6 +47,7 @@ struct CodeSearchPane: View {
                 Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(Theme.ink3)
                 TextField("Search the code", text: $query)
                     .textFieldStyle(.plain).font(Theme.Typo.meta).focused($focused)
+                    .stagedField()
                 toggle("Aa", on: $options.caseSensitive, help: "Match case")
                 toggle("ab", on: $options.wholeWord, help: "Whole word")
                 toggle(".*", on: $options.regex, help: "Regular expression")

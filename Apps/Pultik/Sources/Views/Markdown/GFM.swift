@@ -7,7 +7,7 @@ import Markdown
 /// (`#123`, `@user`, SHAs) linked through the host's `AutolinkResolver`.
 /// No web view and no host HTML. Raw HTML beyond `<details>`, `<img>`,
 /// `<br>` and comments keeps its text and drops its tags.
-indirect enum GFMBlock: Equatable {
+indirect enum GFMBlock: Equatable, Sendable {
     case heading(Int, AttributedString)
     case paragraph(AttributedString)
     case quote([GFMBlock])
@@ -20,14 +20,14 @@ indirect enum GFMBlock: Equatable {
     case rule
 }
 
-struct GFMItem: Equatable {
+struct GFMItem: Equatable, Sendable {
     /// A task list item's box; nil for a plain item.
     var checked: Bool?
     var blocks: [GFMBlock]
 }
 
-struct GFMTable: Equatable {
-    enum Alignment: Equatable { case leading, center, trailing }
+struct GFMTable: Equatable, Sendable {
+    enum Alignment: Equatable, Sendable { case leading, center, trailing }
 
     var alignments: [Alignment]
     var header: [AttributedString]
@@ -35,7 +35,7 @@ struct GFMTable: Equatable {
 }
 
 /// GitHub's alert quotes: `> [!NOTE]` and its four siblings.
-enum GFMAlert: String, CaseIterable, Equatable {
+enum GFMAlert: String, CaseIterable, Equatable, Sendable {
     case note, tip, important, warning, caution
 }
 

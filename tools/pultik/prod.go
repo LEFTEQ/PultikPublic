@@ -508,20 +508,19 @@ const (
 // ignored. TestTopLevelKindsMatchPreferencesSwift holds it to the Swift.
 var topLevelKinds = map[string]jsonKind{
 	"pinnedRepos": kindStringArray, "loginItemConfiguredFor": kindString, "sentryToken": kindString,
-	"eveToken": kindString, "sentryProjects": kindStringArray, "hotkey": kindString,
+	"sentryProjects": kindStringArray, "hotkey": kindString,
 	"hiddenSections": kindStringArray, "servers": kindArray, "services": kindArray, "projects": kindArray,
 	"hlidacURL": kindString, "repoOrder": kindStringArray, "visibleAlertLanes": kindStringArray,
 	"notifyFiring": kindBool, "homeStyle": kindString, "activeFanCurve": kindString, "fanCurves": kindObject,
 	"fanCurveSmoothing": kindNumber, "expiryWatch": kindArray, "focusHoldsNotifications": kindBool,
-	"vaultPath": kindString, "todoProject": kindString, "codeEditor": kindString, "collapsedRails": kindStringArray,
-	"leftRailTab": kindString, "leftRailSplit": kindNumber, "vitrinkaWorkspace": kindString,
+	"vaultPath": kindString, "codeEditor": kindString, "collapsedRails": kindStringArray,
+	"leftRailTab": kindString, "leftRailSplit": kindNumber,
 	"workspaces": kindObject, "displayPresets": kindArray, "externalBrightnessOffset": kindInteger,
 	"dimBrightness": kindNumber, "neverSleep": kindBool, "codeUnwrapped": kindBool, "codeSplit": kindBool,
 	"codeTheme": kindString, "modules": kindArray, "homeAfterMinutes": kindInteger,
 	// Profiles (docs/specs/2026-10-23-pultik-profiles-decisions.md).
 	"profile": kindString, "loginItemOnFirstRun": kindBool, "prometheusURL": kindString, "lokiURL": kindString,
-	"eveURL": kindString, "sentryURL": kindString, "shelfURL": kindString, "devboxIdentityFile": kindString,
-	"devboxExecutable": kindString, "devboxFallbackBoxes": kindArray, "toolkitPath": kindString,
+	"sentryURL": kindString, "shelfURL": kindString, "toolkitPath": kindString,
 }
 
 func checkTopLevelKinds(top map[string]json.RawMessage) error {

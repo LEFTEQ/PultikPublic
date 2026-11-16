@@ -114,6 +114,7 @@ final class ModuleRouter {
         pendingToken = ""
         selection = id ?? remembered[target]
         detailOpen = openDetail && selection != nil
+        if detailOpen, let selection, Self.isPR(selection) { PROpenProbe.begin(selection) }
         entered = false
         canvasEntered = false
         tab = nil
@@ -142,9 +143,15 @@ final class ModuleRouter {
         clearMarks()
     }
 
+    /// An object id the PR open bench times: an inbox row or an archived PR.
+    private static func isPR(_ id: String) -> Bool {
+        id.hasPrefix("pr:") || id.hasPrefix("archive:")
+    }
+
     /// Moves the highlight; nil hands ↵ back to the field and closes the detail.
     /// A plain move ends a ⇧ extension: the next one starts from here.
     func select(_ id: String?) {
+        if let id, id != selection, detailOpen, Self.isPR(id) { PROpenProbe.begin(id) }
         if id != selection { dropStack() }
         selection = id
         if id == nil { detailOpen = false }
@@ -156,6 +163,7 @@ final class ModuleRouter {
     /// opens entered (PR workbench D5). A click opens it without entering.
     /// A detail opened from closed starts on its first tab.
     func openDetail(_ id: String, entering: Bool = false) {
+        if (id != selection || !detailOpen), Self.isPR(id) { PROpenProbe.begin(id) }
         if id != selection { dropStack() }
         if !detailOpen { tab = nil }
         selection = id

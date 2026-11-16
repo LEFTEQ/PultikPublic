@@ -27,6 +27,9 @@ protocol CodeHost: Sendable {
     /// The timeline, merge options, metadata and verb handles beside the
     /// conversation (PR workbench D4, D8), read in the foreground.
     func activity(_ ref: ChangeRequestRef, identity: String) async throws -> ChangeRequestActivity
+    /// Several at once, in the background (the warm set), on
+    /// `changeRequests`' terms: one the host could not read is absent.
+    func activities(_ refs: [ChangeRequestRef], identity: String) async throws -> [ChangeRequestRef: ChangeRequestActivity]
     /// The repository's labels, open milestones, assignable people and teams.
     func choices(repo: String, identity: String) async throws -> MetadataChoices
     /// Performs one verb against the activity the operator saw; throws

@@ -21,21 +21,9 @@ private extension View {
 }
 
 extension StatusPanelView {
-    /// Todos worth interrupting for — overdue, inside their lead window, or
-    /// milestone-ripe per the server (decision D4=B). A reminder that is not
-    /// yet due is not yet information; a backend we cannot reach yields none,
-    /// so the rail folds instead of alerting.
-    var reminders: [TodoItem] {
-        RemindersRail.attentionWorthy(todoStore.reminderCandidates)
-    }
-
-    var showAlerts: Bool {
-        store.isSectionVisible("alerts") && !store.visibleAlerts.isEmpty
-    }
-
     /// The right rail is the prod board (decision D2 C, 2026-10-03): one card
-    /// per deployment over Hlídač, then reminders, estate firing and eve
-    /// alerts (the left column is retired, WP8), with links and notes as one
+    /// per deployment over Hlídač, then estate firing (the
+    /// left column is retired, WP8), with links and notes as one
     /// reference line at its foot.
     var showServiceRail: Bool {
         showProdBoard
@@ -54,11 +42,18 @@ extension StatusPanelView {
 
     /// Home (panel Home D2, 2026-10-07) owns the right region while the
     /// search is global, nothing is typed and nothing else is open; any
-    /// query, mode, page or Eve reply swaps it back to results beside the
+    /// query, mode or page swaps it back to results beside the
     /// prod rail, and an entered module takes the whole body.
     var showsHome: Bool {
-        router.module == nil && query.isEmpty && activeMode == nil && !showTodos && activeProject == nil
-            && eveAskedPrompt == nil
+        homeAtRest || (router.module == nil && query.isEmpty && activeMode == nil && activeProject == nil)
+    }
+
+    /// While a module covers it, the warm global body is Home at rest: no
+    /// query, no selection, no results list. It reads nothing of the router
+    /// then, so a key in a module (every ↑/↓ through PRs) never re-draws the
+    /// hidden results list of every inbox PR beside the prod rail.
+    var homeAtRest: Bool {
+        warmth.displayed != .home
     }
 
     /// The global search's body: the centre (Home, results or a palette
@@ -106,9 +101,6 @@ extension StatusPanelView {
         max(160, columnBudget - centreChrome)
     }
 
-    /// The original 680px panel — palette, prod strip, inbox (or a project
-    /// page), CI footer — with the eve reply floating over the scroll area.
-
     /// The right rail's stacked sections — extracted so the scroller can be
     /// measured (RightRailsHeightKey) without burying the GeometryReader
     /// eight indentation levels deep in the body.
@@ -151,21 +143,10 @@ extension StatusPanelView {
         .padding(TileMetrics.gap)
     }
 
-    /// Reminders, estate firing and eve alerts — what needs you that is not a
-    /// deployment, under the prod board. Reminders stay here until Work
-    /// absorbs `TodoStore`'s candidates; firing is Estate's, eve alerts
-    /// Sessions'.
+    /// Estate firing — what needs you that is not a deployment, under the
+    /// prod board; firing is Estate's.
     @ViewBuilder
     var attentionRails: some View {
-        if !reminders.isEmpty {
-            RailSection(key: "reminders", title: "Reminders",
-                        count: reminders.count,
-                        tone: reminders.contains(where: { $0.isOverdue() })
-                            ? .red : .orange)
-            {
-                RemindersRail(todos: reminders)
-            }
-        }
         let firing = firingGlance
         if !firing.rows.isEmpty {
             RailSection(key: "firing", title: prodBoardClaims ? "Firing · estate" : "Firing",
@@ -173,15 +154,6 @@ extension StatusPanelView {
                         tone: firing.critical > 0 ? .red : .orange)
             {
                 FiringAlertsRail(glance: firing)
-            }
-        }
-        if showAlerts {
-            let unread = unreadAlertsSnapshot.union(store.unreadAlertIds)
-            RailSection(key: "alerts", title: "eve alerts",
-                        count: unread.count,
-                        tone: unread.isEmpty ? .secondary : .orange)
-            {
-                AlertsRail(alerts: store.visibleAlerts, unread: unread)
             }
         }
     }
@@ -255,7 +227,7 @@ extension StatusPanelView {
     /// Anything in the rail that asks for attention, as opposed to the
     /// reference line at its foot.
     var needsYou: Bool {
-        !reminders.isEmpty || (!prodSentryLive && !railProdIssues.isEmpty) || showAlerts
+        (!prodSentryLive && !railProdIssues.isEmpty)
             || !firingGlance.rows.isEmpty || prodNeedsYou
     }
 
@@ -267,21 +239,15 @@ extension StatusPanelView {
 
     var centerColumn: some View {
         VStack(spacing: 0) {
-            // The search lives in the top bar (D11's decided chrome); asking
-            // eve keeps it there and the reply floats over this column.
-            if eveAskedPrompt == nil {
-                commandResults.measuringCentreChrome()
-            }
+            // The search lives in the top bar (D11's decided chrome).
+            if !homeAtRest { commandResults.measuringCentreChrome() }
 
-            if let (mode, filter) = activeMode {
+            // At rest the first two never apply, so Home stays the one tree
+            // it is when shown: coming back to it is a flip, not a rebuild.
+            if !homeAtRest, let (mode, filter) = activeMode {
                 modePage(mode, filter: filter)
                     .frame(height: centreCap)
-            } else if showTodos {
-                TodosPageView(todoStore: todoStore, todos: filteredTodos,
-                              isSelected: { isSelected($0) },
-                              selectedID: selectedID) { showTodos = false }
-                    .frame(height: centreCap)
-            } else if let project = activeProject {
+            } else if !homeAtRest, let project = activeProject {
                 ProjectPageView(project: project, store: store) { activeProject = nil }
                     .frame(height: centreCap)
             } else {
@@ -319,35 +285,30 @@ extension StatusPanelView {
             // Saved links anchor the BOTTOM of the center column only while
             // searching — they are search results there; at rest they sit at
             // the right rail's foot. Prod issues moved to the rail (2026-09-27).
-            if activeMode == nil, !showTodos, activeProject == nil, eveAskedPrompt == nil, searchActive {
+            if !homeAtRest, activeMode == nil, activeProject == nil, searchActive {
                 linksStrip.measuringCentreChrome()
             }
+        }
+        // The chrome's height is observed here, where it is measured: at the
+        // root, the panel reduced this preference over its whole tree on
+        // every update (the hottest app frame while stepping through PRs).
+        .onPreferenceChange(CentreChromeKey.self) { value in
+            let rounded = value.rounded()
+            if abs(rounded - centreChrome) >= 1 { centreChrome = rounded }
         }
         .overlay(alignment: .top) {
             // Slash verbs and palette modes float OVER the list on glass —
             // they are transient completions, not content.
-            if eveAskedPrompt == nil, !slashMatches.isEmpty || !modePickerMatches.isEmpty {
+            if homeAtRest {
+                EmptyView()
+            } else if !slashMatches.isEmpty || !modePickerMatches.isEmpty {
                 floatingResults
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
-            } else if eveAskedPrompt == nil, let target = pathTarget {
+            } else if let target = pathTarget {
                 PathCard(target: target, highlighted: pathVerbIndex) { runPathVerb($0) }
                     .padding(.horizontal, 14)
                     .padding(.top, 8)
-            }
-        }
-        .overlay(alignment: .top) {
-            // Eve replies float OVER the dashboard instead of squeezing it.
-            if eveAskedPrompt != nil {
-                EveOverlay(
-                    prompt: eveAskedPrompt ?? "",
-                    reply: eveReply,
-                    done: eveDone,
-                    error: eveError,
-                    expanded: $eveExpanded,
-                    onDismiss: { dismissEve() }
-                )
-                .padding(.top, 8)
             }
         }
     }
@@ -369,7 +330,8 @@ extension StatusPanelView {
 
     var nowHomeModel: NowHomeModel {
         let now = NowStore.shared
-        return NowHomeModel(queue: now.queue, rows: homeNowRows, handled: now.handled, selectedID: selectedID,
+        return NowHomeModel(queue: now.queue, rows: homeNowRows, handled: now.handled,
+                            selectedID: homeAtRest ? nil : selectedID,
                             expanded: nowExpanded, asOf: now.restoredAsOf, awaiting: now.awaitingFirstRead)
     }
 
@@ -382,7 +344,6 @@ extension StatusPanelView {
             case .prod: showProdBoard || !store.prodConfigIssues.isEmpty || (!prodSentryLive && !railProdIssues.isEmpty)
             case .prs: true
             case .ci: CITile.isShown(store: store)
-            case .devbox: DevboxTile.isShown(store: store)
             case .estate: EstateTile.isShown(store: store)
             case .mac: MacTile.isShown(store: store)
             }
@@ -407,8 +368,6 @@ extension StatusPanelView {
             }
         case .ci:
             CITile(store: store, onOpen: { enterMode(.ci, filter: $0) })
-        case .devbox:
-            DevboxTile(store: store, onOpen: { enterMode(.devbox, filter: $0) })
         case .estate:
             EstateTile(store: store, firing: estateFiring) { openObject(.estate, $0) }
         case .mac:

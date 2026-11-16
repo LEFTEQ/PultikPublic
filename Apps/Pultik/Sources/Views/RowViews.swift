@@ -23,21 +23,6 @@ extension EnvironmentValues {
         set { self[BodyShownEnvironmentKey.self] = newValue }
     }
 
-    /// Whether an indefinite effect (a pulse, a spinner) may run here: the
-    /// panel up and the body displayed (vt-7781 AC 8: a hidden body's pulse
-    /// re-rendered the panel every frame).
-    var animates: Bool {
-        #if DEBUG
-        if Self.debugStill { return false }
-        #endif
-        return panelIsPresented && bodyShown
-    }
-
-    #if DEBUG
-    /// `PULTIK_DEBUG_STILL=1`: no indefinite effect anywhere, to measure what the visible ones cost.
-    static let debugStill = ProcessInfo.processInfo.environment["PULTIK_DEBUG_STILL"] != nil
-    #endif
-
     /// A row's click (stay in Pultík S1): the panel opens the object's detail
     /// (or the row's own ↵ in the global results). Nil outside the panel.
     var openRow: ((String) -> Void)? {
@@ -81,7 +66,7 @@ private struct RowChrome: ViewModifier {
     }
 }
 
-/// Small mono state chip — the inbox row's vocabulary for checks/review/eve.
+/// Small mono state chip — the inbox row's vocabulary for checks/review.
 struct StateChip: View {
     let label: String
     let tone: Color
@@ -106,7 +91,6 @@ struct InboxPRRow: View {
     /// Off inside a repo-grouped list (Home's PR tile), where the group
     /// heading already names the repo.
     var showsRepo = true
-    @Environment(\.animates) private var animates
     /// Shows the mark's check in a list with bulk verbs (bulk D1).
     @State private var hovering = false
 
@@ -138,9 +122,6 @@ struct InboxPRRow: View {
             Spacer(minLength: 8)
 
             statusChip
-            if let session = entry.eveSession {
-                EveSessionChip(session: session)
-            }
         }
         .opacity(info.isDraft ? 0.55 : 1)
         .modifier(RowChrome(id: "pr:\(entry.id)", url: info.pr.htmlUrl, selected: selected))
@@ -157,7 +138,6 @@ struct InboxPRRow: View {
         case (.running, _):
             Image(systemName: "circle.dotted.circle").foregroundStyle(Theme.ok)
                 .font(.system(size: 11))
-                .symbolEffect(.pulse, isActive: animates)
         case (.success, .approved):
             Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.ok).font(.system(size: 11))
         default:
@@ -179,38 +159,6 @@ struct InboxPRRow: View {
         } else if !info.isDraft {
             StateChip(label: "review awaited", tone: .secondary, filled: false)
         }
-    }
-}
-
-/// ✦ purple chip linking a PR to its eve PR-subagent run session.
-struct EveSessionChip: View {
-    let session: EveSession
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 3) {
-            Text("✦")
-                .font(.system(size: 9))
-            Text(label)
-                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-        }
-        .foregroundStyle(Theme.eve)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 1.5)
-        .background(Theme.eveSoft.opacity(hovering ? 1.6 : 1), in: RoundedRectangle(cornerRadius: 4))
-        .onHover { hovering = $0 }
-        .onTapGesture {
-            if let url = URL(string: session.consoleUrl) {
-                NSWorkspace.shared.open(url)
-            }
-        }
-        .help("Open eve session")
-    }
-
-    private var label: String {
-        if session.isRunning { return "eve · running" }
-        if let age = session.updatedAt?.shortAge { return "eve · \(age)" }
-        return "eve"
     }
 }
 

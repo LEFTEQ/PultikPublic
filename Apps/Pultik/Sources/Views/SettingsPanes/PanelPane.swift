@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// What the HUD shows: when a summon returns Home, section visibility,
-/// firing-alert notifications and the eve alert lanes.
+/// and firing-alert notifications.
 struct PanelPane: View {
     let store: StatusStore
 
@@ -9,7 +9,7 @@ struct PanelPane: View {
         ("prod", "Prod issues (right rail)"), ("firing", "Firing alerts · Prometheus + Loki"),
         ("servers", "Estate widget · servers"),
         ("services", "Estate widget · services"), ("ci", "CI · GitHub runs"),
-        ("alerts", "Eve alerts"), ("fans", "This Mac widget"),
+        ("fans", "This Mac widget"),
     ]
 
     var body: some View {
@@ -39,7 +39,7 @@ struct PanelPane: View {
             } header: {
                 Text("Sections")
             } footer: {
-                Text("Hidden sections stop rendering. Eve alerts and firing alerts — and runners and devbox, hidden with /hide — also stop polling and fill again on the next refresh; the rest keep polling, so switching one back on shows current data straight away.")
+                Text("Hidden sections stop rendering. Firing alerts and runners, hidden with /hide, also stop polling and fill again on the next refresh; the rest keep polling, so switching one back on shows current data straight away.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -53,21 +53,6 @@ struct PanelPane: View {
                 Text("Firing alerts")
             } footer: {
                 Text("Warnings stay in the rail. Muted, criticals still badge the menu-bar icon until the panel shows them.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section {
-                ForEach(Preferences.knownAlertLanes, id: \.self) { lane in
-                    Toggle(lane, isOn: Binding(
-                        get: { store.isAlertLaneVisible(lane) },
-                        set: { store.setAlertLane(lane, visible: $0) }
-                    ))
-                }
-            } header: {
-                Text("Eve alert lanes")
-            } footer: {
-                Text("Which lanes reach the panel. The feed stores every lane regardless — this filters the view, not the data.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

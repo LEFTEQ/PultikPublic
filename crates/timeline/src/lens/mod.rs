@@ -2,13 +2,16 @@
 //! event, a backup), how it becomes a [`Mark`] and how its timeline zooms, folds and pages. A new
 //! timeline is a new lens, never a new engine.
 
+pub mod agents;
 pub mod ci;
+pub mod data;
 pub mod estate;
 
 use crate::density::FoldRules;
 use crate::geometry::ZoomPolicy;
 use crate::mark::Mark;
 use crate::time::Ms;
+use crate::tracks::Tracking;
 use canvas_draw::Rgba;
 
 /// The colours a timeline draws in, handed over by the host (Pultík's Theme status tokens): colour
@@ -56,8 +59,8 @@ pub struct LensSpec {
     pub key: &'static str,
     pub zoom: ZoomPolicy,
     pub fold: FoldRules,
-    /// Rows open into one track per item running at once.
-    pub tracks: bool,
+    /// How rows open into one track per item running at once.
+    pub tracks: Tracking,
     /// How far right of now the scheduled future reaches.
     pub future: Ms,
 }

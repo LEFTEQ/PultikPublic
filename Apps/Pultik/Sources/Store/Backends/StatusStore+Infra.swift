@@ -4,16 +4,16 @@ extension StatusStore {
     // MARK: - Firing alerts (Prometheus + Loki rules, WG mesh)
 
     /// Firing criticals the panel has not shown yet — the icon's bell counts
-    /// them with the unread eve alerts. Warnings never badge.
+    /// them. Warnings never badge.
     var unseenFiringCount: Int {
         FiringWatch.criticals(firingAlerts)
             .filter { !FiringSeenStore.shared.isSeen(FiringWatch.episodeKey($0)) }.count
     }
 
-    /// The icon's one alert indicator: unread eve alerts plus unseen firing
-    /// criticals, red whenever either carries a critical.
-    var badgeAlertCount: Int { unreadAlertCount + unseenFiringCount }
-    var badgeAlertCritical: Bool { unreadCriticalAlert || unseenFiringCount > 0 }
+    /// The icon's one alert indicator: unseen firing criticals, so red
+    /// whenever it counts any.
+    var badgeAlertCount: Int { unseenFiringCount }
+    var badgeAlertCritical: Bool { unseenFiringCount > 0 }
 
     /// Panel opened with the Firing section visible: every critical it
     /// shows counts as seen and leaves the badge.

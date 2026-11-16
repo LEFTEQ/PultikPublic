@@ -190,6 +190,40 @@ final class GitHubPRDetailTests: XCTestCase {
         }
     }
 
+    /// Instant PR open: the warm set's batched activity read asks for every
+    /// ref in one query and answers by ref, exactly what the single read
+    /// decodes; one GitHub could not read is absent, never an empty activity.
+    func testABatchedActivityAnswersByRefAndLeavesAnUnreadableOneOut() throws {
+        let refs = [ChangeRequestRef(repo: "o/eve", number: 7), ChangeRequestRef(repo: "o/gone", number: 9)]
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: GitHubPRDetail.activityBatchBody(refs)) as? [String: Any])
+        let query = try XCTUnwrap(body["query"] as? String)
+        XCTAssertTrue(query.contains("r0: repository(owner: $o0, name: $n0)"))
+        XCTAssertTrue(query.contains("r1: repository(owner: $o1, name: $n1)"))
+        XCTAssertEqual(query.components(separatedBy: "\nviewer { login }\n").count, 2, "the viewer once")
+        let variables = try XCTUnwrap(body["variables"] as? [String: Any])
+        XCTAssertEqual(variables["o1"] as? String, "o")
+        XCTAssertEqual(variables["n1"] as? String, "gone")
+        XCTAssertEqual(variables["p1"] as? Int, 9)
+
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appending(path: "Fixtures/github-pr-activity.json")
+        let single = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let data = try XCTUnwrap(single["data"] as? [String: Any])
+        let batch: [String: Any] = [
+            "data": ["viewer": try XCTUnwrap(data["viewer"]), "r0": try XCTUnwrap(data["repository"]), "r1": NSNull()],
+            "errors": [["type": "NOT_FOUND", "message": "Could not resolve to a Repository with the name 'o/gone'."]],
+        ]
+        let answer = try GitHubPRDetail.decodeActivityBatch(JSONSerialization.data(withJSONObject: batch), refs: refs,
+                                                            decoder: decoder)
+        XCTAssertEqual(Set(answer.keys), [refs[0]])
+        XCTAssertEqual(answer[refs[0]], try GitHubPRDetail.decodeActivity(Data(contentsOf: url), decoder: decoder))
+
+        let limited = #"{"data": null, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}"#
+        XCTAssertThrowsError(try GitHubPRDetail.decodeActivityBatch(Data(limited.utf8), refs: refs, decoder: decoder)) { error in
+            guard case GitHubPRDetail.Failure.rateLimited = error else { return XCTFail("\(error)") }
+        }
+    }
+
     func testChoicesReadNoTeamsFromAUserOwnerAndAMissingScopeAskForTheReadWithout() throws {
         let org = """
             {"data": {"repository": {

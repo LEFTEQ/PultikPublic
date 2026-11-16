@@ -27,7 +27,7 @@ struct IntegrationsPane: View {
                     }
                 }
             } footer: {
-                Text("Sentry and iCloud secrets live in the login keychain; the eve token is still in settings.json (Onyx keeps the human copies either way). Statuses are passive — the Test buttons are the only thing here that touches the network.")
+                Text("Sentry and iCloud secrets live in the login keychain (Onyx keeps the human copies). Statuses are passive — the Test buttons are the only thing here that touches the network.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

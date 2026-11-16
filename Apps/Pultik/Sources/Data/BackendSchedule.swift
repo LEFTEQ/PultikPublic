@@ -3,8 +3,8 @@ import Observation
 
 /// One independent refresh lane per backend (copilot shell D8), replacing the
 /// sequential GitHub → eve → infra → vitrinka → devbox → Sentry pass: a slow
-/// GitHub fan-out never holds back vitrinka, and a dead devbox never delays
-/// prod. Each lane has exactly one run in flight — a kick while it runs
+/// GitHub fan-out never holds back another lane, and a dead host never
+/// delays prod. Each lane has exactly one run in flight — a kick while it runs
 /// joins that run — and its own interval, measured from its last attempt,
 /// so an explicit refresh pushes the next poll back instead of doubling it.
 /// Breakers stay where they are: a lane's work still goes through `gated`.

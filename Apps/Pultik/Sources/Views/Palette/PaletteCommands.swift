@@ -1,14 +1,7 @@
 import SwiftUI
 
 extension StatusPanelView {
-    /// Open todos narrowed by the palette — one query, every surface.
-    var filteredTodos: [TodoItem] {
-        todoStore.openTodos.filter {
-            $0.matches(query) && !hiddenResolved.contains("todo:\($0.id)")
-        }
-    }
-
-    /// Notes matching the typed query. Unlike todos and listeners, notes have
+    /// Notes matching the typed query. Notes have
     /// NO resting section: the rail is their glance, so they only enter the
     /// center column when you actually search for one.
     var filteredNotes: [SavedNote] {
@@ -59,7 +52,7 @@ extension StatusPanelView {
                     store.searchIssues(issueFilter ?? "")
                 }
             if selectedID != nil {
-                // ↵ belongs to the highlighted row now, not to eve — say so.
+                // ↵ belongs to the highlighted row now — say so.
                 // In a module, and on a PR anywhere, it opens the detail.
                 let opensDetail = router.module != nil || selectedID?.hasPrefix("pr:") == true
                     || selectedID?.hasPrefix("archive:") == true
@@ -67,34 +60,16 @@ extension StatusPanelView {
                     .font(Theme.Typo.meta)
                     .foregroundStyle(Theme.ink3)
                     .fixedSize()
-            } else if query.isEmpty, eveOnline == true {
-                HStack(spacing: 4) {
-                    StatusDot(tone: Theme.ok, size: 6)
-                    Text("eve")
-                }
-                .font(Theme.Typo.meta)
-                .foregroundStyle(Theme.ink3)
-                .fixedSize()
             }
         }
     }
 
-    /// Typing "todo…" surfaces the todos tab. Prefix-only on purpose: a PR
-    /// titled "fix todo list" must not hijack the search results.
-    var todosMatch: Bool {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return false }
-        return "todos".hasPrefix(q) || q == "td"
-    }
-
     var paletteHint: String {
-        if eveAskedPrompt != nil { return "Ask eve again…" }
         if let module = router.module {
             return PaletteMode.alias(of: module)?.fieldHint ?? "Filter PRs — title, repo, #number, branch…"
         }
         if let (mode, _) = activeMode { return mode.fieldHint }
-        if showTodos { return "Search todos…" }
-        return "Search PRs, repos…  (/ask for eve · \".\" for modes)"
+        return "Search PRs, repos…  (\".\" for modes)"
     }
 
     func submitPalette() {
@@ -106,24 +81,9 @@ extension StatusPanelView {
         // Slash commands are explicit verbs — they run before any fuzzy match
         // gets a chance to reinterpret them.
         if let (command, argument) = SlashCommands.parse(prompt) {
-            switch command.action {
-            case .askEve:
-                let evePrompt = argument.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !evePrompt.isEmpty else {
-                    commandNotice = .failed("usage: \(command.usage)")
-                    return
-                }
-                guard eveOnline == true else {
-                    commandNotice = .failed("eve is offline")
-                    return
-                }
-                askEve(evePrompt)
-                query = ""
-            case .local:
-                let result = command.run(argument)
-                commandNotice = result
-                if !result.isFailure { query = "" }
-            }
+            let result = command.run(argument)
+            commandNotice = result
+            if !result.isFailure { query = "" }
             return
         }
         // A path card: the key router normally takes ↵ first, but a submit
@@ -132,33 +92,18 @@ extension StatusPanelView {
             runPathVerb(target.verbs[min(pathVerbIndex, target.verbs.count - 1)])
             return
         }
-        // Once `/ask` deliberately opened the conversation, this field is a
-        // composer rather than a search box. Follow-ups stay conversational;
-        // dismissing the overlay returns to the search-only contract.
-        if eveAskedPrompt != nil {
-            guard eveOnline == true else {
-                commandNotice = .failed("eve is offline")
-                return
-            }
-            askEve(prompt)
-            query = ""
-            return
-        }
         // A mode's field is a filter — ↵ opens the top match; a partial mode
         // token completes.
         if let (mode, filter) = activeMode {
             switch mode {
-            case .todos: modeTodos(filter).first?.open()
-            case .schedule: modeSchedule(filter).first?.open()
             case .prod:
                 if let issue = modeProd(filter).first { Self.open(issue.issue.permalink) }
-            case .boards: modeBoards(filter).first?.open()
             case .issues:
                 if let issue = modeIssues(filter).first { Self.open(issue.url) }
             case .notes:
                 // Text that finds no note is a note to write, not a failed search.
                 if let note = modeNotes(filter).first { toggleNote(note) } else { createNote(filter) }
-            case .work, .devbox, .ci, .estate, .health, .mac, .fans, .vit, .home, .prs, .kit:
+            case .ci, .estate, .health, .mac, .fans, .home, .prs:
                 break // a module's alias never stays global (`ModuleRouter.route`)
             case .organize:
                 // Bare ↵ runs "default" (names() sorts it first); unmatched
@@ -172,18 +117,8 @@ extension StatusPanelView {
             enterMode(mode)
             return
         }
-        // Inside the todos tab the field is a filter — ↵ opens the top match.
-        if showTodos {
-            filteredTodos.first?.open()
-            return
-        }
-        // Todos, then projects ("fix ↵" opens the ExampleApp on-call page), then
-        // commands ("v ↵" opens vitrinka). Unmatched text remains a search.
-        if todosMatch {
-            query = ""
-            showTodos = true
-            return
-        }
+        // Projects ("fix ↵" opens the ExampleApp on-call page), then commands
+        // ("v ↵" opens vitrinka). Unmatched text remains a search.
         if let project = store.matchProject(prompt) {
             query = ""
             activeProject = project
@@ -268,21 +203,10 @@ extension StatusPanelView {
     @ViewBuilder
     func modePage(_ mode: PaletteMode, filter: String) -> some View {
         switch mode {
-        case .todos:
-            TodosPageView(todoStore: todoStore, todos: modeTodos(filter),
-                          isSelected: { isSelected($0) },
-                          selectedID: selectedID) { query = "" }
-        case .schedule:
-            SchedulePageView(todos: modeSchedule(filter),
-                             isSelected: { isSelected($0) },
-                             selectedID: selectedID) { query = "" }
         case .prod:
             ProdArchiveView(archive: prodArchive, issues: modeProd(filter),
                             selectedID: selectedID,
                             isSelected: { isSelected($0) }) { query = "" }
-        case .boards:
-            BoardsAllView(boards: modeBoards(filter),
-                          isSelected: { isSelected($0) }) { query = "" }
         case .issues:
             IssueSearchView(store: store, issues: modeIssues(filter),
                             selectedID: selectedID,
@@ -302,7 +226,7 @@ extension StatusPanelView {
                              isSelected: { isSelected($0) },
                              onRun: { runOrganize($0) }) { query = "" }
         // A module's alias never stays global: the module draws its page.
-        case .work, .devbox, .ci, .estate, .health, .mac, .fans, .vit, .home, .prs, .kit:
+        case .ci, .estate, .health, .mac, .fans, .home, .prs:
             EmptyView()
         }
     }
@@ -352,19 +276,6 @@ extension StatusPanelView {
         }
     }
 
-    /// The agenda, narrowed by the palette. Unlike `modeTodos` this keeps
-    /// resolved-hiding out of it — a scheduled item is dismissed by doing it,
-    /// not by triaging it away.
-    func modeSchedule(_ filter: String) -> [TodoItem] {
-        todoStore.scheduledTodos.filter { $0.matches(filter) }
-    }
-
-    func modeTodos(_ filter: String) -> [TodoItem] {
-        todoStore.openTodos.filter {
-            $0.matches(filter) && !hiddenResolved.contains("todo:\($0.id)")
-        }
-    }
-
     func modeProd(_ filter: String) -> [ProdIssue] {
         let visible = prodArchive.issues.filter { !hiddenResolved.contains("prod:\($0.id)") }
         let q = filter.lowercased()
@@ -392,16 +303,6 @@ extension StatusPanelView {
         }
     }
 
-    func modeVit(_ filter: String) -> [VitrinkaListening] {
-        store.vitrinkaListening.filter {
-            $0.matches(filter) && !hiddenResolved.contains("vit:\($0.id)")
-        }
-    }
-
-    func modeBoards(_ filter: String) -> [VitrinkaBoard] {
-        store.vitrinkaBoards.filter { $0.matches(filter) }
-    }
-
     /// Opening a URL activates the browser, which resigns the panel's key
     /// status — it closes itself, exactly as a mouse click does today.
     static func open(_ url: String) {
@@ -419,47 +320,6 @@ extension StatusPanelView {
     func moveCaretToEnd() {
         guard let editor = NSApp.keyWindow?.fieldEditor(false, for: nil) as? NSTextView else { return }
         editor.selectedRange = NSRange(location: (editor.string as NSString).length, length: 0)
-    }
-
-    // MARK: - Eve
-
-    func askEve(_ prompt: String) {
-        askTask?.cancel()
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.85)) {
-            eveAskedPrompt = prompt
-        }
-        // The field is rebuilt in its new home, which drops first-responder —
-        // hand focus back so the conversation can continue by typing.
-        DispatchQueue.main.async { paletteFocused = true }
-        eveReply = ""
-        eveDone = false
-        eveError = nil
-        eveExpanded = false
-        askTask = Task {
-            do {
-                for try await event in await EveClient.shared.ask(prompt, settingsToken: store.eveToken) {
-                    if Task.isCancelled { return }
-                    eveReply = event.text
-                    if event.done { eveDone = true }
-                }
-                eveDone = true
-            } catch {
-                if !Task.isCancelled {
-                    eveError = error.localizedDescription
-                    eveDone = true
-                }
-            }
-        }
-    }
-
-    func dismissEve() {
-        askTask?.cancel()
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.85)) {
-            eveAskedPrompt = nil
-        }
-        eveReply = ""
-        eveError = nil
-        DispatchQueue.main.async { paletteFocused = true }
     }
 
     // MARK: - Palette rows (what ↓ ↑ walk while the search is global)
@@ -490,31 +350,13 @@ extension StatusPanelView {
     }
 
     var paletteItems: [PaletteItem] {
-        // The project page and the eve overlay replace the result list; the
-        // todos page keeps the keyboard — its rows ARE the result list there.
-        guard activeProject == nil, eveAskedPrompt == nil else { return [] }
-        if showTodos {
-            return filteredTodos.map { todo in
-                PaletteItem(id: "todo:\(todo.id)", url: todo.url.absoluteString) { todo.open() }
-            }
-        }
+        // The project page replaces the result list.
+        guard activeProject == nil else { return [] }
         if let (mode, filter) = activeMode {
             switch mode {
-            case .todos:
-                return modeTodos(filter).map { todo in
-                    PaletteItem(id: "todo:\(todo.id)", url: todo.url.absoluteString) { todo.open() }
-                }
-            case .schedule:
-                return modeSchedule(filter).map { todo in
-                    PaletteItem(id: "todo:\(todo.id)", url: todo.url.absoluteString) { todo.open() }
-                }
             case .prod:
                 return modeProd(filter).map { issue in
                     PaletteItem(id: "prod:\(issue.id)", url: issue.issue.permalink) { Self.open(issue.issue.permalink) }
-                }
-            case .boards:
-                return modeBoards(filter).map { board in
-                    PaletteItem(id: "board:\(board.slug)", url: board.url) { board.open() }
                 }
             case .issues:
                 return modeIssues(filter).map { issue in
@@ -528,7 +370,7 @@ extension StatusPanelView {
                     }
                 }
             // The deck is controls; a module's alias never stays global.
-            case .fans, .work, .devbox, .ci, .estate, .health, .mac, .vit, .home, .prs, .kit:
+            case .fans, .ci, .estate, .health, .mac, .home, .prs:
                 return []
             case .organize:
                 return modeOrganize(filter).map { name in
@@ -544,12 +386,6 @@ extension StatusPanelView {
             items.append(PaletteItem(id: "mode:\(mode.rawValue)") { enterMode(mode) })
         }
         if !items.isEmpty { return items } // a completion card owns the keyboard
-        if todosMatch {
-            items.append(PaletteItem(id: "todos") {
-                query = ""
-                showTodos = true
-            })
-        }
         if let project = store.matchProject(query) {
             items.append(PaletteItem(id: "project:\(project.id)") {
                 query = ""
@@ -574,15 +410,12 @@ extension StatusPanelView {
             }
         }
         guard !(store.pinned.isEmpty && query.isEmpty) else { return items }
-        // Matching the visual order exactly: PRs in fixed repo order, todos,
+        // Matching the visual order exactly: PRs in fixed repo order,
         // archive, then the pinned strips at the foot — prod, links.
         for entry in filteredInbox {
             items.append(PaletteItem(id: "pr:\(entry.id)", keepsSelection: true, url: entry.info.pr.htmlUrl) {
                 openPRDetail("pr:\(entry.id)")
             })
-        }
-        for todo in filteredTodos {
-            items.append(PaletteItem(id: "todo:\(todo.id)", url: todo.url.absoluteString) { todo.open() })
         }
         if searchActive {
             for pr in store.searchMatches {

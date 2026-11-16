@@ -24,39 +24,6 @@ enum ModuleSignals {
 
         signals[.prod] = prodSignal(store.prodGlance, dots: store.prodDots)
 
-        // Every box's stale rows — the table's, which the trash reaps — not
-        // only the strip's box.
-        if store.devboxSummary != nil {
-            let stale = DevboxGlance.staleCount(store.devboxWorkspaces)
-            if stale > 0 {
-                signals[.devbox] = ModuleSignal(kind: .text("\(stale) stale", symbol: nil), tone: Theme.warn)
-            }
-        }
-
-        if let selected = store.selectedVitrinkaWorkspace {
-            let glance = VitrinkaGlance(today: selected.today, reason: \.reason, liveQuestions: [], elsewhere: [])
-            let needs = glance.needsYou + glance.overdue + glance.dueNow
-            if needs > 0 {
-                signals[.work] = ModuleSignal(kind: .pill("\(needs)"), tone: glance.overdue > 0 ? Theme.danger : Theme.warn)
-            }
-        }
-
-        // Sessions: a live fleet session or an eve workflow blocked on you. A
-        // busy session, a stale or restored snapshot, or an eve PR session
-        // "waiting" on CI or review stays quiet.
-        let fleet = FleetStore.shared
-        let sessionsWaiting = fleet.isStale() ? 0
-            : (fleet.snapshot?.sessions ?? []).filter { $0.state == .waiting && ($0.liveness == .alive || $0.liveness == .unknown) }.count
-        let now = Date()
-        let approvals = store.eveLastKnownAt == nil ? store.eveApprovals.filter { !$0.drifts(now: now) }.count : 0
-        let waiting = sessionsWaiting + approvals
-        if waiting > 0 {
-            signals[.sessions] = ModuleSignal(kind: .text("\(waiting) waiting", symbol: "hand.raised.fill"),
-                                              tone: Theme.warn,
-                                              help: "\(sessionsWaiting) session\(sessionsWaiting == 1 ? "" : "s") and "
-                                                  + "\(approvals) eve approval\(approvals == 1 ? "" : "s") waiting on you")
-        }
-
         let firing = AlertGlance(store.firingAlerts).rows
         if !firing.isEmpty {
             signals[.estate] = ModuleSignal(kind: .text("\(firing.count) firing", symbol: "bell.fill"),

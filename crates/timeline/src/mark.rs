@@ -37,6 +37,27 @@ pub struct Span {
     /// Labels shortest first: the longest that fits is written inside the bar.
     pub text: Vec<Arc<str>>,
     pub ink: Rgba,
+    /// The bar as consecutive coloured stretches (empty: one bar in the paint's fill). In time
+    /// order, never overlapping; a gap between two is a thin line in `lead`, and while the span
+    /// runs (`end` is `None`) the last stretch reaches now whatever its `to`.
+    pub stretches: Vec<Stretch>,
+    /// A solid cap ending at its instant (done).
+    pub cap: Option<Cap>,
+}
+
+/// One stretch of a bar: a state it was in from `from` to `to`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stretch {
+    pub from: Ms,
+    pub to: Ms,
+    pub color: Rgba,
+}
+
+/// A bar's end cap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cap {
+    pub at: Ms,
+    pub color: Rgba,
 }
 
 /// How one mark is drawn. Lengths are base points (times the size's `k`).
@@ -57,6 +78,8 @@ pub struct Paint {
     pub glyph: Option<(Arc<str>, Rgba)>,
     /// Text over the mark once the zoom has room (a large backup's size).
     pub above: Option<Arc<str>>,
+    /// Text beside the mark, on its right (a chip's name): it holds its room in a track.
+    pub beside: Option<Arc<str>>,
     /// Running: its head breathes in this colour.
     pub live: Option<Rgba>,
     pub span: Option<Span>,
@@ -76,6 +99,7 @@ impl Paint {
             ring: None,
             glyph: None,
             above: None,
+            beside: None,
             live: None,
             span: None,
         }
@@ -123,16 +147,28 @@ pub struct Bin {
     pub grow: f32,
 }
 
-/// A band across a whole group over a time range (a rollback pin).
+/// A band over a time range across a whole group (a rollback pin), or across every group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Band {
     pub key: Arc<str>,
-    pub group: Arc<str>,
+    /// `None`: across every group.
+    pub group: Option<Arc<str>>,
     pub from: Ms,
     /// `None`: still in force, it reaches now.
     pub to: Option<Ms>,
     pub label: Arc<str>,
     pub color: Rgba,
+}
+
+/// A vertical line across every group at an instant (a release, a sprint's end). Now is the
+/// engine's own line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    pub key: Arc<str>,
+    pub at: Ms,
+    pub color: Rgba,
+    /// Written beside its top (empty: none).
+    pub label: Arc<str>,
 }
 
 /// A timer whose repeats the engine computes instead of loading.

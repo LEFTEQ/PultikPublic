@@ -10,7 +10,9 @@ final class StatusStore {
     var onChange: (() -> Void)?
     var onRefreshComplete: (() -> Void)?
 
-    var repos: [RepoStatus] = []
+    var repos: [RepoStatus] = [] {
+        didSet { inboxCache = nil }
+    }
     var pinned: [String] {
         didSet {
             mutate { $0.pinnedRepos = pinned }
@@ -21,9 +23,12 @@ final class StatusStore {
     /// Read cache for the ~30 settings this store surfaces. It is a snapshot
     /// taken at launch, so it must never be written back wholesale — see
     /// `mutate`. Every change republishes what the clients read: the
-    /// profile's hosts, the devbox key, toolkit (`RuntimeConfig`).
+    /// profile's hosts and Stop…'s toolkit (`RuntimeConfig`).
     var preferences: Preferences {
-        didSet { RuntimeConfig.current = preferences.runtimeConfig }
+        didSet {
+            RuntimeConfig.current = preferences.runtimeConfig
+            if preferences.repoOrder != oldValue.repoOrder { inboxCache = nil }
+        }
     }
 
     /// The only way this store changes a setting: apply the change to the
@@ -40,9 +45,6 @@ final class StatusStore {
     }
     var suggestions: [String] = []
     var prodIssues: [ProdIssue] = []
-    var eveSessions: [EveSession] = []
-    /// eve workflows parked on an operator approval (Sessions, Now).
-    var eveApprovals: [EveApproval] = []
     /// The apps shelf's latest releases (Prod's Releases section), read on
     /// entering Prod — never polled. When they were fetched: a snapshot or a
     /// failed revalidation leaves them "as of".
@@ -122,32 +124,6 @@ final class StatusStore {
     /// A machine's per-core load and 24 h CPU, read when its detail opens
     /// (vt-7727 D9), by `ServerMetrics.id`.
     var machineHistory: [String: MachineHistory] = [:]
-    var vitrinkaListening: [VitrinkaListening] { selectedVitrinkaWorkspace?.tray.listeners ?? [] }
-    var vitrinkaBoards: [VitrinkaBoard] { selectedVitrinkaWorkspace?.tray.boards ?? [] }
-    var vitrinkaWorkspaces: [VitrinkaWorkspaceSnapshot] = []
-    var selectedVitrinkaWorkspace: VitrinkaWorkspaceSnapshot? {
-        VitrinkaWorkspaceSnapshot.selected(in: vitrinkaWorkspaces, preferring: vitrinkaWorkspace,
-                                           defaultWorkspace: VitrinkaClient.shared.workspace)
-    }
-    var eveAlerts: [EveAlert] = []
-    /// ws-v2 workspaces are the Devbox surface — the widget's chips and pile,
-    /// the `.devbox` page's table.
-    var devboxWorkspaces: [DevboxWorkspace] = []
-    var devboxSummary: DevboxOverviewSummary?
-    /// When the hub payload was generated ON THE BOX — the rail's "as of"
-    /// stamp. The user asked for real status; real status carries its age.
-    var devboxFetchedAt: Date?
-    /// Every devbox guest to poll (spec 2026-09-25) — the profile's
-    /// fallback boxes (example: box c) until `devbox boxes --json` first answers.
-    var devboxBoxes: [DevboxEndpoint] = [.fallback]
-    /// Each box's last answer; a box that fails drops out, one on hold
-    /// keeps what it had — the one-box rules, per box.
-    var devboxSnapshots: [String: DevboxSnapshot] = [:]
-    var devboxDiscoveredAt: Date?
-    /// The Toolkit module's dashboard and how it is held (`StatusStore+Toolkit.swift`).
-    var toolkit = ToolkitHeld()
-    /// The window the Toolkit module draws.
-    var toolkitPeriod: ToolkitDashboard.Period = .week
     var lastRefresh: Date?
     var lastSentryRefresh: Date?
     var githubPollCursor = 0
@@ -174,6 +150,13 @@ final class StatusStore {
     /// Where `#123`, `@user` and SHAs in a description open (D8): Pultík's own
     /// detail for a change request its indexes hold, else the host's page.
     var autolinks: any AutolinkResolver { GitHubAutolinks { [weak self] in self?.indexedUpdatedAt($0) != nil } }
+    /// The same answers over a copy of what the indexes hold now: the one
+    /// the render cache parses with off the main thread (instant PR open).
+    var autolinksSnapshot: any AutolinkResolver {
+        var known = Set(prIndex.records.keys)
+        for entry in inbox { known.insert("\(entry.repoSlug)#\(entry.info.pr.number)".lowercased()) }
+        return GitHubAutolinks { known.contains("\($0.repo)#\($0.number)".lowercased()) }
+    }
     var prIndex = GitHubPRIndex()
     let prIndexDisk = GitHubPRIndexDisk()
     var prIndexIdentity: String?
@@ -183,6 +166,10 @@ final class StatusStore {
     /// was synced at, the diffs on disk, and the one mirror pass in flight.
     @ObservationIgnored var warmUpdatedAt: [ChangeRequestRef: Date] = [:]
     @ObservationIgnored var warmFiles: Set<String> = []
+    /// The activity's own ledger (instant PR open), and the one pass that
+    /// pulls the warm set's snapshots into memory.
+    @ObservationIgnored var warmActivityAt: [ChangeRequestRef: Date] = [:]
+    @ObservationIgnored var warmMemoryTask: Task<Void, Never>?
     @ObservationIgnored var warmMirrorTask: Task<Void, Never>?
     @ObservationIgnored var warmMirrorQueue: [ChangeRequest] = []
     var warmSyncedAt: Date?
@@ -206,18 +193,9 @@ final class StatusStore {
     // runId → was-running, used to notify only on observed transitions
     var previousRunning: [Int: Bool] = [:]
     var previousDeployRunning: [Int: Bool] = [:]
-    /// Each box's last parked count, for the pressure-park notification.
-    /// Absent until that box's first snapshot so a launch never announces
-    /// history. Per box: a silent box answering again rejoins the merged
-    /// total, which must never read as a park.
-    var previousDevboxParked: [String: Int] = [:]
     /// Sentry issue ids already seen — notify only on genuinely new issues,
     /// and never on the first load after launch.
     var seenSentryIssues: Set<String>?
-    // Eve alert ids already fetched this app run — same idiom: notify only on
-    // genuinely new visible-lane alerts, first load silent. Read-state proper
-    // (the unread badge) is AlertSeenStore, which persists.
-    var notifiedAlertIds: Set<Int>?
     /// Critical firing-alert transitions — this app run only, first answer
     /// silent; the badge's seen-state is FiringSeenStore, which persists.
     var firingWatch = FiringWatch()
@@ -228,7 +206,6 @@ final class StatusStore {
         preferences = prefs
         // Before any lane can run: a client reads its host from this.
         RuntimeConfig.current = prefs.runtimeConfig
-        devboxBoxes = prefs.resolvedDevboxFallbackBoxes
         pinned = prefs.pinnedRepos
         configIssues = snapshot.issues
         settingsWritable = snapshot.writable
@@ -251,11 +228,10 @@ final class StatusStore {
         repos.contains { $0.runningCount > 0 }
     }
 
-    /// One PR of the cross-repo inbox, carrying its repo and its eve session.
+    /// One PR of the cross-repo inbox, carrying its repo.
     struct InboxPR: Identifiable {
         let repoSlug: String
         let info: PRInfo
-        let eveSession: EveSession?
         var id: Int {
             info.id
         }
@@ -266,18 +242,28 @@ final class StatusStore {
         }
     }
 
-    /// The PR-first inbox: every open PR across pinned repos, eve-session
-    /// attached, in FIXED repo order — `preferences.repoOrder` first, exactly
+    /// The PR-first inbox: every open PR across pinned repos, in FIXED repo
+    /// order — `preferences.repoOrder` first, exactly
     /// as written; unlisted repos follow by recency (newest open PR); PRs
     /// within a repo newest-first. A repo's PRs are always in the same place,
     /// so the eye can go straight to them.
+    ///
+    /// Built once per change of its inputs, not per read: one key press read
+    /// it about eight times, and the sort with its per-compare string matching
+    /// was the panel's hottest code while switching modules or PRs (2026-11-16
+    /// profile). Reading the inputs keeps observers subscribed to them.
     var inbox: [InboxPR] {
-        let sessionsByPR = Dictionary(
-            eveSessions.compactMap { session in session.prKey.map { ($0, session) } },
-            uniquingKeysWith: { a, b in
-                (a.updatedAt ?? .distantPast) > (b.updatedAt ?? .distantPast) ? a : b
-            }
-        )
+        _ = repos
+        _ = preferences.repoOrder
+        if let inboxCache { return inboxCache }
+        let built = buildInbox()
+        inboxCache = built
+        return built
+    }
+
+    @ObservationIgnored private var inboxCache: [InboxPR]?
+
+    private func buildInbox() -> [InboxPR] {
         // Recency proxy for unlisted repos: the highest open-PR number —
         // GitHub has no cross-repo clock in this payload, but "which repo
         // opened work most recently" is stable and close enough.
@@ -292,11 +278,7 @@ final class StatusStore {
         return repos
             .flatMap { repo in
                 repo.prs.map { info in
-                    InboxPR(
-                        repoSlug: repo.slug,
-                        info: info,
-                        eveSession: sessionsByPR["\(repo.slug)#\(info.pr.number)".lowercased()]
-                    )
+                    InboxPR(repoSlug: repo.slug, info: info)
                 }
             }
             .sorted { a, b in
@@ -357,7 +339,7 @@ final class StatusStore {
 
     /// One lane per backend (`BackendSchedule`, copilot shell D8), each on its
     /// own clock behind its own breaker: a slow GitHub fan-out never holds
-    /// back vitrinka or devbox, and prod keeps its 15 s fast lane (decision
+    /// back the others, and prod keeps its 15 s fast lane (decision
     /// log: one request, every 15 s). A cold start first restores every
     /// backend's last snapshot, so the panel is never blank.
     func startPolling() {
@@ -377,17 +359,10 @@ final class StatusStore {
             self?.settingsDirectoryChanged()
         }
         schedule.add("github", every: lane("github")) { [weak self] in await self?.refreshGitHubLane() }
-        schedule.add("eve", every: lane("eve")) { [weak self] in await self?.refreshEve() }
         schedule.add("infra", every: lane("infra")) { [weak self] in await self?.refreshInfraMetrics() }
-        schedule.add("vitrinka", every: lane("vitrinka")) { [weak self] in await self?.refreshVitrinka() }
-        schedule.add("devbox", every: lane("devbox")) { [weak self] in await self?.refreshDevbox() }
         // Only while a view draws it: nothing reads Semafor while hidden (D10).
         schedule.add("semafor", every: { [weak self] in self?.semaforInterval(cadence: cadence()) ?? 3600 }) { [weak self] in
             await self?.refreshSemafor()
-        }
-        // Only while the Toolkit module is on screen: a local CLI read, never a poller of its own.
-        schedule.add("toolkit", every: { [weak self] in self?.toolkitInterval() ?? 3600 }) { [weak self] in
-            await self?.refreshToolkit()
         }
         // Both keep their own five-minute floors inside.
         schedule.add("sentry", every: cadence) { [weak self] in await self?.refreshSentryIfStale() }
@@ -410,15 +385,13 @@ final class StatusStore {
         visibleSince = Date()
         if Self.lanes.map(visibleCadence) != before { schedule.nudge() }
         if module != nil { kickSemafor() }
-        if module == .toolkit { kickToolkit() }
     }
 
-    static let lanes = ["prod", "github", "eve", "infra", "vitrinka", "devbox"]
+    static let lanes = ["prod", "github", "infra"]
     /// The lanes a module draws from.
     static let moduleLanes: [PanelModule: Set<String>] = [
-        .home: ["prod", "github", "eve", "infra", "vitrinka", "devbox", "semafor"],
-        .prs: ["github"], .ci: ["github", "infra", "semafor"], .prod: ["prod"], .devbox: ["devbox"],
-        .work: ["vitrinka"], .sessions: ["eve", "vitrinka"], .estate: ["infra", "semafor"], .toolkit: ["toolkit"],
+        .home: ["prod", "github", "infra", "semafor"],
+        .prs: ["github"], .ci: ["github", "infra", "semafor"], .prod: ["prod"], .estate: ["infra", "semafor"],
     ]
     /// GitHub-backed modules never poll it faster than this: the hourly
     /// request budget is shared with every other GitHub read.

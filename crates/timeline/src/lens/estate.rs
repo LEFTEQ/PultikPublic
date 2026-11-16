@@ -11,6 +11,7 @@ use crate::geometry::ZoomPolicy;
 use crate::layout::{GroupSpec, RowSpec};
 use crate::mark::{Band, Inset, Mark, Paint, Schedule, Shape};
 use crate::time::{DAY_MS, HOUR_MS, Ms};
+use crate::tracks::Tracking;
 use canvas_draw::Rgba;
 use std::sync::Arc;
 
@@ -233,6 +234,7 @@ pub fn paint(e: &EstateEvent, p: &Palette) -> Paint {
         inset: None,
         ring: None,
         glyph: None,
+        beside: None,
         above: e
             .size_bytes
             .filter(|&s| e.kind == EventKind::Backup && s >= 5_000_000_000)
@@ -317,7 +319,7 @@ fn spec(key: &'static str) -> LensSpec {
             folds: true,
             reach: 3.0 * HOUR_MS,
         },
-        tracks: false,
+        tracks: Tracking::Off,
         future: 3.0 * DAY_MS,
     }
 }
@@ -355,7 +357,7 @@ pub fn timer_schedule(t: &EstateTimer, row: Arc<str>, p: &Palette) -> Schedule {
 pub fn pin_band(pin: &EstatePin, p: &Palette) -> Band {
     Band {
         key: format!("{}|{}", pin.box_name, pin.from).into(),
-        group: pin.box_name.clone(),
+        group: Some(pin.box_name.clone()),
         from: pin.from,
         to: pin.to,
         label: format!("↺ {}", pin.label).into(),

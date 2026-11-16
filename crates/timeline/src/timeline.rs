@@ -4,14 +4,16 @@
 //! move ([`Timeline::camera`]) and builds nothing.
 
 use crate::density::{nearest_outcome, step_marks, step_outcomes};
-use crate::geometry::{AXIS_PT, MAX_SPAN_MS, Semantic, View, scale_limits};
+use crate::geometry::{Chrome, MAX_SPAN_MS, Semantic, View, scale_limits};
 use crate::layout::GroupSpec;
+use crate::lens::data::PlanError;
 use crate::lens::{LensSpec, Palette};
-use crate::mark::{Band, Bin, Mark, Schedule};
-use crate::scene::{Hit, Scene, SceneInput};
-use crate::time::{DAY_MS, Ms};
-use canvas_draw::{Camera, DisplayList};
+use crate::mark::{Band, Bin, Line, Mark, Schedule};
+use crate::scene::{Hit, ItemRef, Scene, SceneInput};
+use crate::time::{Clock, DAY_MS, Ms};
+use canvas_draw::{Camera, DisplayList, Rect};
 use canvas_text::TextSystem;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The label column's width, points.
@@ -39,6 +41,15 @@ pub struct Timeline {
     bands: Vec<Band>,
     schedules: Vec<Schedule>,
     groups: Vec<GroupSpec>,
+    lines: Vec<Line>,
+    /// Marks with no time yet, drawn parked just after now.
+    parked: Vec<Mark>,
+    /// Accessible names by mark id (the item feed's; a mark without one reads its own text).
+    names: HashMap<Arc<str>, Arc<str>>,
+    /// The time the view may show (`None`: the lens's own limits around now).
+    range: Option<(Ms, Ms)>,
+    chrome: Chrome,
+    clock: Clock,
     view: View,
     /// The lanes' vertical scroll, points.
     scroll: f32,
@@ -63,6 +74,12 @@ impl Timeline {
             bands: Vec::new(),
             schedules: Vec::new(),
             groups: Vec::new(),
+            lines: Vec::new(),
+            parked: Vec::new(),
+            names: HashMap::new(),
+            range: None,
+            chrome: Chrome::default(),
+            clock: Clock::default(),
             // The first view: the last and the next twelve hours.
             view: View {
                 t0: now - DAY_MS / 2.0,
@@ -106,14 +123,65 @@ impl Timeline {
         self.palette = palette;
         self.stale = true;
     }
+    /// Vertical lines across every group (a release, a sprint's end).
+    pub fn set_lines(&mut self, lines: Vec<Line>) {
+        self.lines = lines;
+        self.stale = true;
+    }
+    /// Marks with no time yet: each is drawn just after now, on its own track of its row.
+    pub fn set_parked(&mut self, parked: Vec<Mark>) {
+        self.parked = parked;
+        self.stale = true;
+    }
+    /// Accessible names by mark id, for the item feed ([`Timeline::feed`]).
+    pub fn set_names(&mut self, names: HashMap<Arc<str>, Arc<str>>) {
+        self.names = names;
+    }
+    /// The time the view may show: pan and zoom stay inside `[from, to]` (`None`: the lens's
+    /// limits around now). Refused unless both are finite and `from < to`.
+    pub fn set_range(&mut self, range: Option<(Ms, Ms)>) -> Result<(), PlanError> {
+        if let Some((from, to)) = range
+            && !(from.is_finite() && to.is_finite() && from < to)
+        {
+            return Err(PlanError::Range { from, to });
+        }
+        self.range = range;
+        self.clamp();
+        self.stale = true;
+        Ok(())
+    }
+    /// The label column's width, the axis strip and the future: the lanes keep the time at
+    /// their centre.
+    pub fn set_chrome(&mut self, chrome: Chrome) {
+        self.chrome = chrome;
+        let (w, h) = self.size;
+        self.resize(w, h);
+    }
+    /// The zone and the words the axis and the labels read.
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
+        self.stale = true;
+    }
+
+    pub fn chrome(&self) -> Chrome {
+        self.chrome
+    }
+
+    pub fn clock(&self) -> &Clock {
+        &self.clock
+    }
 
     pub fn marks(&self) -> &[Mark] {
         &self.marks
     }
 
+    pub fn parked(&self) -> &[Mark] {
+        &self.parked
+    }
+
     /// The surface is `w` × `h` points.
     pub fn resize(&mut self, w: f32, h: f32) {
-        let lanes = f64::from((w - LABEL_W).max(1.0));
+        let lanes = f64::from((w - self.chrome.label_w).max(1.0));
         // Keep the time at the lanes' centre where it was.
         let centre = self.view.t_of(self.view.width / 2.0);
         self.view.width = lanes;
@@ -152,14 +220,28 @@ impl Timeline {
     }
 
     fn content_height(&self) -> f32 {
-        self.scene.as_ref().map_or(AXIS_PT, |s| s.layout.height)
+        self.scene
+            .as_ref()
+            .map_or(self.chrome.axis_h(), |s| s.layout.height)
     }
 
     fn clamp(&mut self) {
-        let (lo, hi) = scale_limits(self.view.width);
+        let (mut lo, mut hi) = scale_limits(self.view.width);
+        if let Some((from, to)) = self.range {
+            // The whole range across the lanes is as far out as the view goes; a range shorter
+            // than the closest zoom is shown whole, never with time outside it.
+            let whole = self.view.width / (to - from);
+            hi = hi.max(whole);
+            lo = lo.max(whole);
+        }
         self.view.scale = self.view.scale.clamp(lo, hi);
-        let latest = self.now + self.spec.future.max(0.0) - self.view.span() * 0.5;
-        let earliest = self.now - MAX_SPAN_MS * 4.0;
+        let (earliest, latest) = match self.range {
+            Some((from, to)) => (from, to - self.view.span()),
+            None => (
+                self.now - MAX_SPAN_MS * 4.0,
+                self.now + self.spec.future.max(0.0) - self.view.span() * 0.5,
+            ),
+        };
         self.view.t0 = self.view.t0.clamp(earliest, latest.max(earliest));
         let max_scroll = (self.content_height() - self.size.1).max(0.0);
         self.scroll = self.scroll.clamp(0.0, max_scroll);
@@ -214,6 +296,19 @@ impl Timeline {
     fn selected_mark(&self) -> Option<&Mark> {
         let id = self.selected.as_deref()?;
         self.marks.iter().find(|m| &*m.id == id)
+    }
+
+    /// Show `[from, to]` across the lanes (within the range and the zoom limits).
+    pub fn show(&mut self, from: Ms, to: Ms) {
+        if !(from.is_finite() && to.is_finite() && to > from) {
+            return;
+        }
+        self.view.scale = self.view.width / (to - from);
+        self.clamp();
+        self.view.t0 = (from + to) / 2.0 - self.view.span() / 2.0;
+        self.clamp();
+        // A jump, not a gesture: build for where it lands.
+        self.stale = true;
     }
 
     /// Select a mark by id (`None` clears it); the view follows it into sight.
@@ -315,21 +410,34 @@ impl Timeline {
     /// it ([`Timeline::camera`]).
     pub fn build(&mut self, text: &mut TextSystem) -> DisplayList {
         let semantic = Semantic::of(&self.view, &self.spec.zoom);
-        let scene = Scene::build(SceneInput {
-            spec: self.spec,
-            marks: &self.marks,
-            bins: &self.bins,
-            bands: &self.bands,
-            schedules: &self.schedules,
-            groups: &self.groups,
-            k: self.k,
-            semantic,
-            now: self.now,
-            grid_origin: 0.0,
-            selected: self.selected.as_deref(),
-            playhead: self.playhead,
-        });
-        let dl = scene.emit(self.size, LABEL_W, &self.palette, text, &self.view);
+        let scene = Scene::build(
+            SceneInput {
+                spec: self.spec,
+                marks: &self.marks,
+                parked: &self.parked,
+                bins: &self.bins,
+                bands: &self.bands,
+                lines: &self.lines,
+                schedules: &self.schedules,
+                groups: &self.groups,
+                k: self.k,
+                top: self.chrome.axis_h(),
+                semantic,
+                now: self.now,
+                grid_origin: 0.0,
+                selected: self.selected.as_deref(),
+                playhead: self.playhead,
+            },
+            text,
+        );
+        let dl = scene.emit(
+            self.size,
+            &self.chrome,
+            &self.palette,
+            &self.clock,
+            text,
+            &self.view,
+        );
         self.scene = Some(scene);
         self.stale = false;
         self.clamp();
@@ -339,7 +447,7 @@ impl Timeline {
     /// Where the built scene's camera layers draw at the current view.
     pub fn camera(&self) -> Camera {
         self.scene.as_ref().map_or(Camera::IDENTITY, |s| {
-            s.camera(&self.view, LABEL_W, self.scroll)
+            s.camera(&self.view, self.chrome.label_w, self.scroll)
         })
     }
 
@@ -347,14 +455,126 @@ impl Timeline {
         self.scene.as_ref()
     }
 
+    /// Lanes point and content y of view point (`x`, `y`), when it is over the lanes.
+    fn lanes_point(&self, x: f32, y: f32) -> Option<(f64, f32)> {
+        let label_w = self.chrome.label_w;
+        (x >= label_w && y >= self.chrome.axis_h())
+            .then(|| (f64::from(x - label_w), y + self.scroll))
+    }
+
     /// What view point (`x`, `y`) is on.
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
         let s = self.scene.as_ref()?;
-        if x < LABEL_W || y < AXIS_PT {
-            return None;
-        }
-        s.hit(&self.view, f64::from(x - LABEL_W), y + self.scroll)
+        let (px, py) = self.lanes_point(x, y)?;
+        s.hit(&self.view, px, py)
     }
+
+    /// The mark under view point (`x`, `y`) and its box in view points: what a pointer resting
+    /// there hovers. A hit test (a binary search per row), no allocation.
+    pub fn hover(&self, x: f32, y: f32) -> Option<Hover> {
+        let s = self.scene.as_ref()?;
+        let (px, py) = self.lanes_point(x, y)?;
+        let ii = s.hit_item(&self.view, px, py)?;
+        let ItemRef::Mark(mi) = s.items[ii].what else {
+            return None;
+        };
+        Some(Hover {
+            id: s.marks[mi].id.clone(),
+            rect: self.view_rect(s, ii),
+        })
+    }
+
+    /// Item `ii`'s box in view points at the current view and scroll.
+    fn view_rect(&self, s: &Scene, ii: usize) -> Rect {
+        let r = s.rect_of(ii, &self.view);
+        Rect::new(r.x + self.chrome.label_w, r.y - self.scroll, r.w, r.h)
+    }
+
+    /// What an accessibility layer reads at the current view, into `out` (cleared first, its
+    /// capacity kept): every mark whose box shows in the lanes, in paint order, with its id,
+    /// its accessible name and its box in view points; and every group's top and height.
+    /// One pass over the built scene; nothing is allocated once `out` has grown.
+    pub fn feed(&self, out: &mut Feed) {
+        out.items.clear();
+        out.lanes.clear();
+        let Some(s) = &self.scene else {
+            return;
+        };
+        let (w, h) = self.size;
+        let lanes = Rect::new(
+            self.chrome.label_w,
+            self.chrome.axis_h(),
+            (w - self.chrome.label_w).max(0.0),
+            (h - self.chrome.axis_h()).max(0.0),
+        );
+        for &ii in &s.paint_order {
+            let ItemRef::Mark(mi) = s.items[ii].what else {
+                continue;
+            };
+            let rect = self.view_rect(s, ii);
+            if !rect.intersects(&lanes) {
+                continue;
+            }
+            let m = &s.marks[mi];
+            out.items.push(FeedItem {
+                id: m.id.clone(),
+                name: self.name_of(m),
+                rect,
+            });
+        }
+        for g in &s.layout.groups {
+            out.lanes.push(LaneBox {
+                key: g.key.clone(),
+                top: g.top - self.scroll,
+                height: g.h,
+            });
+        }
+    }
+
+    /// A mark's accessible name: the host's, else its longest label, its text beside it, its id.
+    fn name_of(&self, m: &Mark) -> Arc<str> {
+        if let Some(n) = self.names.get(&m.id) {
+            return n.clone();
+        }
+        m.paint
+            .span
+            .as_ref()
+            .and_then(|s| s.text.last())
+            .or(m.paint.beside.as_ref())
+            .unwrap_or(&m.id)
+            .clone()
+    }
+}
+
+/// The mark a pointer rests on and its box, view points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hover {
+    pub id: Arc<str>,
+    pub rect: Rect,
+}
+
+/// One visible mark as an accessibility layer reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeedItem {
+    pub id: Arc<str>,
+    pub name: Arc<str>,
+    /// Its box, view points.
+    pub rect: Rect,
+}
+
+/// Where a group (a plan's lane) sits, view points: its top after the scroll and its height.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaneBox {
+    pub key: Arc<str>,
+    pub top: f32,
+    pub height: f32,
+}
+
+/// The item feed ([`Timeline::feed`]): reuse one across frames.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Feed {
+    pub items: Vec<FeedItem>,
+    pub lanes: Vec<LaneBox>,
 }
 
 #[cfg(test)]

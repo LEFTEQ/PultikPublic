@@ -13,25 +13,25 @@ final class ModuleRouterTests: XCTestCase {
         KeyboardCoordinator.intent(for: KeyStroke(key: key, command: command), in: context)
     }
 
-    /// `.c failed` is CI scoped to `failed`; a palette page (`.t`) typed
+    /// `.c failed` is CI scoped to `failed`; a palette page (`.n`) typed
     /// inside a module drops the scope and stays global.
     func testDotAliasEntersModuleAndPalettePagesStayGlobal() {
         let router = ModuleRouter()
         router.type(".c failed")
         XCTAssertEqual(router.module, .ci)
         XCTAssertEqual(router.text, "failed")
-        router.type(".t groceries")
+        router.type(".n groceries")
         XCTAssertNil(router.module)
-        XCTAssertEqual(router.text, ".t groceries")
+        XCTAssertEqual(router.text, ".n groceries")
     }
 
-    /// `.d` enters Devbox at once; the rest of `devbox` and the space that
+    /// `.e` enters Estate at once; the rest of `estate` and the space that
     /// ends the token are swallowed, the next letter is filter text.
     func testTokenTailNeverBecomesTheFilter() {
         let router = ModuleRouter()
-        router.type(".d")
-        XCTAssertEqual(router.module, .devbox)
-        for key in ["e", "v", "b", "o", "x", " "] {
+        router.type(".e")
+        XCTAssertEqual(router.module, .estate)
+        for key in ["s", "t", "a", "t", "e", " "] {
             XCTAssertTrue(router.swallowTokenKey(key), key)
         }
         XCTAssertFalse(router.swallowTokenKey("p"))
@@ -72,38 +72,12 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertEqual(router.text, "")
     }
 
-    /// Toolkit is the ninth module (vt-8298 S1): ⌘9, `.kit` with its filter,
-    /// ⇥ through Overview · Workflows · Skills · Guards — while `.v` still
-    /// enters Sessions at once.
-    func testToolkitIsTheNinthModuleOnCommandNineAndKit() {
-        XCTAssertEqual(PanelModule.allCases.last, .toolkit)
-        XCTAssertEqual(intent(.character("9"), command: true, KeyContext()), .module(.toolkit))
-        XCTAssertEqual(PanelModule.toolkit.views, [.overview, .workflows, .skills, .guards])
-        XCTAssertEqual(PaletteMode.parse(".v")?.mode, .vit, "a second v… alias would make .v wait")
-        XCTAssertEqual(PaletteMode.parse(".k")?.mode, .kit)
-        XCTAssertEqual(PaletteMode.alias(of: .toolkit), .kit)
-        let router = ModuleRouter()
-        router.type(".kit stash")
-        XCTAssertEqual(router.module, .toolkit)
-        XCTAssertEqual(router.text, "stash")
-        XCTAssertEqual(router.view, .overview)
-        XCTAssertEqual(intent(.tab, KeyContext(module: .toolkit)), .view(1))
-        var walked: [ModuleView?] = []
-        for _ in 0 ..< 4 {
-            router.cycleView(1)
-            walked.append(router.view)
-        }
-        XCTAssertEqual(walked, [.workflows, .skills, .guards, .overview])
-        XCTAssertEqual(intent(.enter, KeyContext(module: .toolkit, items: ["skill:prm"], selection: "skill:prm")),
-                       .openDetail("skill:prm"), "↵ opens a detail and never runs anything")
-    }
-
     /// ←/→ on an empty field walk the strip, wrapping; with text they stay the caret's.
     func testArrowsOnAnEmptyFieldWalkTheStrip() {
         XCTAssertEqual(intent(.right, KeyContext()), .module(.prs))
-        XCTAssertEqual(intent(.left, KeyContext()), .module(.toolkit))
-        XCTAssertEqual(intent(.right, KeyContext(module: .estate)), .module(.toolkit))
-        XCTAssertEqual(intent(.right, KeyContext(module: .toolkit)), .module(.home))
+        XCTAssertEqual(intent(.left, KeyContext()), .module(.estate))
+        XCTAssertEqual(intent(.right, KeyContext(module: .prod)), .module(.estate))
+        XCTAssertEqual(intent(.right, KeyContext(module: .estate)), .module(.home))
         XCTAssertEqual(intent(.left, KeyContext(module: .ci, selection: "run:1", detailOpen: true)), .module(.prs))
         XCTAssertNil(intent(.right, KeyContext(module: .ci, text: "failed")))
         XCTAssertNil(intent(.left, KeyContext(completion: true)))
@@ -169,7 +143,7 @@ final class ModuleRouterTests: XCTestCase {
             }
         }
         XCTAssertEqual(peeled, [.clearText, .closeDetail, .clearSelection, .leaveModule, .close])
-        XCTAssertEqual(KeyboardCoordinator.escape(KeyContext(text: "x", eve: true, noteEditing: true)), .cancelNoteEdit)
+        XCTAssertEqual(KeyboardCoordinator.escape(KeyContext(text: "x", noteEditing: true)), .cancelNoteEdit)
     }
 
     // MARK: - Stay in Pultík (D2, D3, D11; AC 7)
@@ -266,7 +240,7 @@ final class ModuleRouterTests: XCTestCase {
                        .view(-1))
         XCTAssertEqual(intent(.tab, KeyContext(module: .ci, detailOpen: true, focusTargets: ["run:x"])), .focus(1))
         XCTAssertEqual(intent(.tab, KeyContext(module: .ci, card: "gh:o/r/run/9")), .cardColumn(1))
-        XCTAssertEqual(intent(.tab, KeyContext(module: .devbox, items: ["ws:a"], selection: "ws:a")), .ignore)
+        XCTAssertEqual(intent(.tab, KeyContext(module: .prod, items: ["deploy:a"], selection: "deploy:a")), .ignore)
 
         let router = ModuleRouter()
         router.enter(.ci)
@@ -276,7 +250,7 @@ final class ModuleRouterTests: XCTestCase {
         router.cycleView(-1)
         router.cycleView(-1)
         XCTAssertEqual(router.view, .fleet, "⇧⇥ wraps")
-        router.enter(.devbox)
+        router.enter(.prod)
         XCTAssertNil(router.view)
     }
 
@@ -486,13 +460,83 @@ final class ModuleRouterTests: XCTestCase {
         XCTAssertEqual(router.text, "n-=1")
     }
 
-    /// AC 13: Settings ▸ Modules' order is the strip's — ⌘1–9 and ←/→ follow it.
+    /// AC 13: Settings ▸ Modules' order is the strip's — the ⌘ digits and ←/→ follow it.
     func testTheModuleOrderDrivesCommandDigitsAndArrows() {
-        let order: [PanelModule] = [.home, .ci, .prs, .prod, .devbox, .work, .sessions, .estate]
+        let order: [PanelModule] = [.home, .ci, .prs, .prod, .estate]
         XCTAssertEqual(intent(.character("2"), command: true, KeyContext(order: order)), .module(.ci))
         XCTAssertEqual(intent(.right, KeyContext(order: order)), .module(.ci))
         XCTAssertEqual(intent(.right, KeyContext(module: .ci, order: order)), .module(.prs))
         XCTAssertEqual(PanelModule.prs.number(in: order), 3)
+    }
+
+    /// Focus D23: closed, only the selection's detail is staged; open, its
+    /// next and previous join it. The key's own frame mounts what is staged
+    /// plus the open selection, and the set follows one detail a turn.
+    func testStagedDetailsFollowTheSelectionADetailATurn() {
+        let ids = ["pr:1", "pr:2", "pr:3", "pr:4", "pr:5"]
+        XCTAssertEqual(DetailStaging.wanted(selection: "pr:3", open: false, in: ids), ["pr:3"])
+        XCTAssertEqual(DetailStaging.wanted(selection: "pr:3", open: true, in: ids), ["pr:3", "pr:4", "pr:2"])
+        XCTAssertEqual(DetailStaging.wanted(selection: "pr:1", open: true, in: ids), ["pr:1", "pr:2"])
+        XCTAssertEqual(DetailStaging.wanted(selection: "pr:5", open: true, in: ids), ["pr:5", "pr:4"])
+        XCTAssertEqual(DetailStaging.wanted(selection: "pr:9", open: true, in: ids), [])
+        XCTAssertEqual(DetailStaging.wanted(selection: nil, open: false, in: ids), [])
+
+        // ↵ on a row whose detail is parked: mounted already, then a neighbour a turn.
+        var staged = ["pr:3"]
+        var wanted = DetailStaging.wanted(selection: "pr:3", open: true, in: ids)
+        XCTAssertEqual(DetailStaging.mounted(staged: staged, selection: "pr:3", open: true, in: ids), ["pr:3"])
+        XCTAssertEqual(DetailStaging.delay(staged: staged, wanted: wanted, open: true), DetailStaging.turn)
+        staged = DetailStaging.step(from: staged, toward: wanted, open: true)
+        XCTAssertEqual(staged, ["pr:3", "pr:4"])
+        staged = DetailStaging.step(from: staged, toward: wanted, open: true)
+        XCTAssertEqual(Set(staged), Set(wanted))
+        XCTAssertEqual(DetailStaging.mounted(staged: staged, selection: "pr:3", open: true, in: ids), ["pr:2", "pr:3", "pr:4"])
+
+        // ↓ onto the staged neighbour: the same three views in the same order, then one swap.
+        wanted = DetailStaging.wanted(selection: "pr:4", open: true, in: ids)
+        XCTAssertEqual(DetailStaging.mounted(staged: staged, selection: "pr:4", open: true, in: ids), ["pr:2", "pr:3", "pr:4"])
+        XCTAssertEqual(DetailStaging.delay(staged: staged, wanted: wanted, open: true), DetailStaging.turn)
+        staged = DetailStaging.step(from: staged, toward: wanted, open: true)
+        XCTAssertEqual(Set(staged), ["pr:3", "pr:4", "pr:5"])
+        XCTAssertEqual(Set(staged), Set(wanted))
+
+        // A jump: the selection is mounted by its key, the farthest staged detail gives way,
+        // and the set waits for the cursor to rest before it builds around the new place.
+        wanted = DetailStaging.wanted(selection: "pr:1", open: true, in: ids)
+        XCTAssertEqual(DetailStaging.mounted(staged: staged, selection: "pr:1", open: true, in: ids), ["pr:1", "pr:3", "pr:4"])
+        XCTAssertEqual(DetailStaging.delay(staged: staged, wanted: wanted, open: true), DetailStaging.rest)
+        staged = DetailStaging.step(from: staged, toward: wanted, open: true)
+        XCTAssertEqual(staged, ["pr:1", "pr:2"])
+
+        // Closed: the neighbours go, the selection stays parked, and a row that
+        // left the list is no longer mounted. A closed selection is never forced in.
+        wanted = DetailStaging.wanted(selection: "pr:1", open: false, in: ids)
+        XCTAssertEqual(DetailStaging.delay(staged: staged, wanted: wanted, open: false), DetailStaging.rest)
+        XCTAssertEqual(DetailStaging.step(from: staged, toward: wanted, open: false), ["pr:1"])
+        XCTAssertEqual(DetailStaging.mounted(staged: ["pr:1", "pr:2"], selection: "pr:1", open: false, in: ["pr:1", "pr:3"]), ["pr:1"])
+        XCTAssertEqual(DetailStaging.mounted(staged: ["pr:1"], selection: "pr:3", open: false, in: ids), ["pr:1"])
+        XCTAssertEqual(DetailStaging.step(from: ["pr:1"], toward: ["pr:3"], open: false), ["pr:3"])
+        XCTAssertEqual(DetailStaging.step(from: ["pr:3"], toward: [], open: false), [])
+    }
+
+    /// Focus D23: a staged view does not read a key request at all (reading
+    /// it is what would re-run it on every key), and the request it finds
+    /// on coming on screen, made for another detail, is not taken.
+    func testAStagedViewHearsNoKeyRequest() {
+        var reads = 0
+        func latest() -> Int? {
+            reads += 1
+            return 7
+        }
+        let staged = Heard(false, latest())
+        XCTAssertEqual(reads, 0)
+        XCTAssertNil(staged.request)
+        let arrived = Heard(true, latest())
+        XCTAssertEqual(reads, 1)
+        XCTAssertNotEqual(arrived, staged)
+        XCTAssertNil(arrived.taken(after: staged))
+        XCTAssertEqual(Heard(true, 8).taken(after: arrived), 8)
+        XCTAssertNil(Heard(false, 8).taken(after: arrived))
     }
 
     /// Bulk D1: ⌘-click toggles, ⇧-click marks the range from the cursor,
@@ -532,7 +576,7 @@ final class ModuleRouterTests: XCTestCase {
         router.markAll(markable)
         XCTAssertFalse(router.detailOpen)
         XCTAssertTrue(router.stack.isEmpty)
-        router.enter(.devbox)
+        router.enter(.prod)
         XCTAssertTrue(router.marks.isEmpty)
     }
 

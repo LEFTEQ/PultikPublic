@@ -80,43 +80,31 @@ extension NowSeverity {
 }
 
 extension NowKind {
-    /// The kind column's micro tag: "alert", "session", "pr".
+    /// The kind column's micro tag: "alert", "ci", "pr".
     var tag: String {
         switch self {
         case .deployment: "prod"
         case .monitoringBlind: "blind"
         case .sentryIssue: "sentry"
         case .firingAlert: "alert"
-        case .eveNotification: "eve"
-        case .eveApproval: "approval"
-        case .sessionWaiting: "session"
         case .failedCheck: "ci"
         case .reviewRequested: "review"
         case .stalePR: "pr"
-        case .reminder: "reminder"
-        case .overdueTask: "todo"
-        case .staleWorkspace: "devbox"
         case .macFinding: "mac"
         case .expiry: "expiry"
         }
     }
 
-    /// A fold's noun: "+3 sessions waiting".
+    /// A fold's noun: "+3 stale PRs".
     var plural: String {
         switch self {
         case .deployment: "deployments"
         case .monitoringBlind: "blind sources"
         case .sentryIssue: "issues"
         case .firingAlert: "alerts firing"
-        case .eveNotification: "eve notifications"
-        case .eveApproval: "approvals"
-        case .sessionWaiting: "sessions waiting"
         case .failedCheck: "failed checks"
         case .reviewRequested: "reviews requested"
         case .stalePR: "stale PRs"
-        case .reminder: "reminders due"
-        case .overdueTask: "overdue tasks"
-        case .staleWorkspace: "stale workspaces"
         case .macFinding: "Mac findings"
         case .expiry: "expiries"
         }

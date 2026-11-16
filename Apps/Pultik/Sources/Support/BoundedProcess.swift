@@ -3,9 +3,9 @@ import Foundation
 
 /// Runs a configured child with bounded wall time, bounded retained output
 /// and concurrent stdout / stderr drains — the one runner for a local CLI
-/// whose answer the panel reads (`DevboxClient`, `ToolkitClient`). Never a
-/// shell: the caller sets `executableURL` and `arguments` itself. Blocking:
-/// call it off the main actor.
+/// whose answer the panel reads (no caller since the devbox lane retired,
+/// 2026-11-16). Never a shell: the caller sets `executableURL` and
+/// `arguments` itself. Blocking: call it off the main actor.
 ///
 /// The deadline covers the whole lifecycle, the drains included: a root that
 /// exits while a descendant still holds its stdout or stderr open never

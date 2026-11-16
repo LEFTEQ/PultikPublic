@@ -510,6 +510,7 @@ struct CodeCanvas: NSViewRepresentable {
         let view = CodeCanvasView(frame: .zero)
         context.coordinator.view = view
         context.coordinator.scrollSerial = scrollRequest?.serial
+        context.coordinator.shown = context.environment.bodyShown
         return view
     }
 
@@ -530,7 +531,8 @@ struct CodeCanvas: NSViewRepresentable {
         view.marks = marks
         view.anchor = anchor
         // A warm hidden body or a hidden panel holds no target on the device.
-        view.setDrawing(context.environment.panelIsPresented && context.environment.bodyShown)
+        let shown = context.environment.bodyShown
+        view.setDrawing(context.environment.panelIsPresented && shown)
         if let reveal, reveal.serial != coordinator.revealSerial {
             coordinator.revealSerial = reveal.serial
             // A line waits for the canvas's first size: the next turn has it.
@@ -538,9 +540,19 @@ struct CodeCanvas: NSViewRepresentable {
         }
         if active {
             CodeCanvasView.active = view
-            if let file = focusedFile, file != coordinator.focusedFile { view.scrollTo(file: file) }
-            if let scrollRequest, scrollRequest.serial != coordinator.scrollSerial { view.scroll(scrollRequest.amount) }
+            // A staged workbench hands its canvas no ring and no request
+            // while it is off screen (focus D23): what it finds on coming
+            // back was made for the canvas then on screen, and is not taken.
+            if coordinator.shown {
+                if let file = focusedFile, file != coordinator.focusedFile { view.scrollTo(file: file) }
+                if let scrollRequest, scrollRequest.serial != coordinator.scrollSerial { view.scroll(scrollRequest.amount) }
+            }
+        } else if CodeCanvasView.active === view {
+            // No longer the shown tab's canvas, and a staged workbench keeps
+            // it mounted: ⌘C and F12 must not reach a canvas nobody sees.
+            CodeCanvasView.active = nil
         }
+        coordinator.shown = shown
         coordinator.focusedFile = focusedFile
         // A request made while another tab was shown is never replayed here.
         coordinator.scrollSerial = scrollRequest?.serial
@@ -559,6 +571,8 @@ struct CodeCanvas: NSViewRepresentable {
         var scrollSerial: Int?
         var revealSerial: Int?
         var focusedFile: Int?
+        /// `\.bodyShown` at the last update: false while its workbench was staged off screen.
+        var shown = false
         var blob: @Sendable (String) async throws -> String = { _ in "" }
         private var tasks: [Task<Void, Never>] = []
 

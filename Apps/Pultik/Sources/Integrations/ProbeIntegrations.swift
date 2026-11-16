@@ -19,22 +19,18 @@ final class ProbeIntegration: Integration {
     /// nil = success; the failure otherwise. The closure does NOT report to
     /// the gate — `test()` owns that, so it happens exactly once.
     private let probe: @MainActor () async -> ProbeFailure?
-    /// A credential this service needs, editable in the row. nil for the
-    /// services whose reachability is all there is to configure.
-    private let token: TokenSlot?
 
     private var testVerdict: IntegrationStatus?
     private var isTesting = false
 
     init(id: String, title: String, symbol: String, blurb: String,
-         target: ProbeTarget, token: TokenSlot? = nil,
+         target: ProbeTarget,
          probe: @escaping @MainActor () async -> ProbeFailure?) {
         self.id = id
         self.title = title
         self.symbol = symbol
         self.blurb = blurb
         self.target = target
-        self.token = token
         self.probe = probe
     }
 
@@ -46,11 +42,6 @@ final class ProbeIntegration: Integration {
             return pause.rejected
                 ? .error("refused: \(pause.reason)")
                 : .attention("paused \(wait)m — \(pause.reason)")
-        }
-        // A blank token is said, never implied: the calls still go out
-        // mesh-only, and a refused one names the missing token (EveAuth).
-        if let token, token.read() == nil {
-            return .connected("no token — mesh-only calls; paste one below")
         }
         return .connected("no recent failures")
     }
@@ -78,65 +69,12 @@ final class ProbeIntegration: Integration {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if let token {
-                    TokenEditor(slot: token)
-                }
             }
         )
     }
 }
 
 extension ProbeIntegration {
-    static func eve(store: StatusStore) -> ProbeIntegration {
-        ProbeIntegration(
-            id: "eve", title: "eve", symbol: "sparkles",
-            blurb: "Alerts, PR sessions and /ask — assistant-service over the WireGuard mesh.",
-            target: .eve,
-            token: TokenSlot(
-                placeholder: "evk_ token",
-                footnote: "Stored in the login keychain (pultik-eve) — Onyx keeps the human copy. It is the only source, sent as a bearer on every eve call: blank means mesh-only calls, which an eve enforcing its RBAC gate refuses.",
-                read: { store.eveToken },
-                write: { store.setEveToken($0) }
-            )
-        ) {
-            // The client classifies for us — a 401 on the configured token is a
-            // refusal, not silence, and must re-arm the breaker as one.
-            await EveClient.shared.probeHealth(settingsToken: store.eveToken)
-        }
-    }
-
-    static func vitrinka() -> ProbeIntegration {
-        ProbeIntegration(
-            id: "vitrinka", title: "vitrinka", symbol: "dot.radiowaves.left.and.right",
-            blurb: "Annotation-board listeners and the todo engine (open todos, ripe reminders) — read with the CLI's sign-in.",
-            target: .vitrinka
-        ) {
-            if case .failed(let failure) = await VitrinkaClient.shared.tray() {
-                return failure
-            }
-            return nil
-        }
-    }
-
-    static func devbox() -> ProbeIntegration {
-        // The profile's first box (example: box c); none, and the test says so
-        // without any ssh.
-        let box = StatusStore.shared.preferences.resolvedDevboxFallbackBoxes.first
-        return ProbeIntegration(
-            id: "devbox", title: "devbox (ssh)", symbol: "terminal",
-            blurb: "Remote ws-v2 workspaces on the devbox, over ssh. Failures here back off hard — sshd sits behind fail2ban.",
-            // The primary box's breaker (box c); other boxes back off on
-            // their own breakers and show in the footer's pause list.
-            target: .devbox(box: box?.name ?? DevboxEndpoint.fallback.name)
-        ) {
-            guard let box else { return .unreachable("no devbox box in settings.json (devboxFallbackBoxes)") }
-            if case .failed(let failure) = await DevboxClient.shared.status(box) {
-                return failure
-            }
-            return nil
-        }
-    }
-
     static func metrics() -> ProbeIntegration {
         ProbeIntegration(
             id: "metrics", title: "Server metrics", symbol: "chart.xyaxis.line",

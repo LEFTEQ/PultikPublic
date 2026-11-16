@@ -97,3 +97,106 @@ final class ModuleWarmth {
         if recent.count > Self.recentLimit { recent.removeFirst(recent.count - Self.recentLimit) }
     }
 }
+
+/// Which details a page that stages them keeps built (focus D23): the
+/// selection's, so ↵ is a flip, and with the detail open its next and
+/// previous objects', so ↑/↓ is one too. The set follows the selection only
+/// after the frame that drew the key, one detail a turn: building a
+/// neighbour never sits in front of the flip it prepares. Object ids in the
+/// list's drawn order; Foundation-only.
+enum DetailStaging {
+    /// The selection and one neighbour each side: never more built at once.
+    static let limit = 3
+    /// One frame: how long after a step onto a built detail the set follows.
+    static let turn: Duration = .milliseconds(16)
+    /// How long the cursor rests before a detail is built for it cold: a row
+    /// of a closed list, a detail opened before it was built. A held key
+    /// repeats faster and builds nothing. A tapped walk is slower: it builds
+    /// the detail of each row it rests on this long, and a key that lands in
+    /// that build waits for it — what ↵ being a flip this soon costs.
+    static let rest: Duration = .milliseconds(100)
+
+    /// What to keep built for `selection`, in the order to build it: the
+    /// selection, then (open) the object after it and the one before.
+    /// Nothing for a selection the list does not hold.
+    static func wanted(selection: String?, open: Bool, in ids: [String]) -> [String] {
+        guard let selection, let index = ids.firstIndex(of: selection) else { return [] }
+        guard open else { return [selection] }
+        var wanted = [selection]
+        if index + 1 < ids.count { wanted.append(ids[index + 1]) }
+        if index > 0 { wanted.append(ids[index - 1]) }
+        return wanted
+    }
+
+    /// What is mounted now, in list order (a step never reorders the views):
+    /// `staged` as far as the list still holds it, and the open selection
+    /// whether staged or not — the key that opens it builds it. Past `limit`
+    /// the farthest from the selection goes first.
+    static func mounted(staged: [String], selection: String?, open: Bool, in ids: [String]) -> [String] {
+        var held: [(id: String, index: Int)] = []
+        for id in staged where !held.contains(where: { $0.id == id }) {
+            if let index = ids.firstIndex(of: id) { held.append((id, index)) }
+        }
+        let cursor = selection.flatMap { ids.firstIndex(of: $0) }
+        if open, let selection, let cursor, !held.contains(where: { $0.id == selection }) { held.append((selection, cursor)) }
+        if held.count > limit {
+            let centre = cursor ?? held[0].index
+            held.sort { (abs($0.index - centre), $0.index) < (abs($1.index - centre), $1.index) }
+            held.removeLast(held.count - limit)
+        }
+        return held.sorted { $0.index < $1.index }.map(\.id)
+    }
+
+    /// The next set on the way from `staged` to `wanted`: what is no longer
+    /// wanted goes, and one more detail is built. The open selection is
+    /// mounted already (`mounted`), so it joins without taking the turn.
+    static func step(from staged: [String], toward wanted: [String], open: Bool) -> [String] {
+        var next = staged.filter(wanted.contains)
+        if open, let selection = wanted.first, !next.contains(selection) { next.append(selection) }
+        if let add = wanted.first(where: { !next.contains($0) }) { next.append(add) }
+        return next
+    }
+
+    /// How long the set waits before it follows `wanted`: a frame when the
+    /// selection stepped onto a detail already built, the rest otherwise.
+    static func delay(staged: [String], wanted: [String], open: Bool) -> Duration {
+        open && wanted.first.map(staged.contains) == true ? turn : rest
+    }
+
+    /// Returns when the main run loop is next about to sleep: the key's
+    /// frame is committed and no event waits behind it. A detail is built
+    /// only from there, so the keys of a held ↓ are served before a
+    /// neighbour is built, and the Debug bench's idle point (`PROpenProbe`,
+    /// the same run-loop activity, registered first) comes before the build.
+    @MainActor
+    static func idle() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // One shot: the observer is invalidated once it has fired.
+            let observer = CFRunLoopObserverCreateWithHandler(
+                kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, false, CFIndex.max
+            ) { _, _ in continuation.resume() }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        }
+    }
+}
+
+/// One of the router's key requests (a scroll, a verb's letter, a composer's
+/// ⌘↵, F12, ↵ on a ringed target) as a view inside a staged detail hears it
+/// (focus D23): only on screen. Off screen the request is not read, so such
+/// a key re-runs the views on screen and none of the staged ones. The value
+/// of an `onChange`, which takes `taken(after:)`. Foundation-only.
+struct Heard<Request: Equatable>: Equatable {
+    let onScreen: Bool
+    let request: Request?
+
+    init(_ onScreen: Bool, _ request: @autoclosure () -> Request?) {
+        self.onScreen = onScreen
+        self.request = onScreen ? request() : nil
+    }
+
+    /// The request to act on. None for a view that just came on screen: the
+    /// one it finds then was made for another detail, or never taken.
+    func taken(after old: Self) -> Request? {
+        old.onScreen ? request : nil
+    }
+}

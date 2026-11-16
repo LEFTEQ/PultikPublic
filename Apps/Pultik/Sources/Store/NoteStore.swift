@@ -128,10 +128,10 @@ final class NoteStore {
 
     // MARK: - Watching
 
-    /// Dir-level watcher, like TodoStore's: `pultik note add` replaces
-    /// notes.json atomically (rename), which kills a file-level watch's inode
-    /// but always surfaces as a write on the containing directory. Settings
-    /// and links saves trigger harmless extra reloads.
+    /// Dir-level watcher: `pultik note add` replaces notes.json atomically
+    /// (rename), which kills a file-level watch's inode but always surfaces
+    /// as a write on the containing directory. Settings and links saves
+    /// trigger harmless extra reloads.
     private func startWatching() {
         guard watcher == nil else { return }
         let fd = Darwin.open(Preferences.directory.path, O_EVTONLY)

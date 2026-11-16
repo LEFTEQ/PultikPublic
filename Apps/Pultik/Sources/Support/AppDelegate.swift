@@ -19,7 +19,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Everything the status item's image is drawn from; a change re-renders.
     private struct IconState: Equatable {
         let aggregate: AggregateState
-        let todos: Int
         let alerts: Int
         let alertCritical: Bool
         let awake: Bool
@@ -67,12 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 malloc_zone_pressure_relief(nil, 0)
             }
         }
-        TodoStore.shared.onChange = { [weak self] in self?.updateIcon() }
         // Touching the singleton re-arms a persisted Never Sleep at launch.
         AwakeStore.shared.onChange = { [weak self] in self?.updateIcon() }
         #if DEBUG
-        // A capture launch primes Devbox first so the workspace rail is
-        // deterministic; normal Debug and every Release launch are unchanged.
+        // A capture launch starts polling once the panel is scheduled (below);
+        // normal Debug and every Release launch are unchanged.
         if debugPanelDelay == nil { store.startPolling() }
         #else
         store.startPolling()
@@ -119,15 +117,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // hotkey. Release builds remain summon-only; UI verification can run
         // the Debug binary with PULTIK_OPEN_PANEL=<delay-seconds> and inspect
         // the real panel after live integrations have had time to refresh.
-        // Arm the panel timer BEFORE the targeted Devbox refresh: an offline
-        // VM must not turn the documented capture hook into a no-op.
         if let delay = debugPanelDelay {
             Task { [weak self] in
                 guard let self else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + max(0.25, delay)) { [weak self] in
                     self?.debugShowPanel()
                 }
-                await self.store.debugRefreshDevbox()
                 self.store.startPolling()
             }
         }
@@ -150,20 +145,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dots = store.prodDigest == nil ? [] : store.prodDots
         syncPulse(dots)
         let iconState = IconState(
-            aggregate: store.aggregate, todos: TodoStore.shared.openTodos.count,
+            aggregate: store.aggregate,
             alerts: store.badgeAlertCount, alertCritical: store.badgeAlertCritical, awake: awake,
             prodDots: dots, pulseOn: pulseOn,
             dark: button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         if lastIconState.map({ $0 != iconState }) ?? true {
-            button.image = MenuBarIconView.render(iconState.aggregate, todoCount: iconState.todos,
+            button.image = MenuBarIconView.render(iconState.aggregate,
                                                   alertCount: iconState.alerts,
                                                   alertCritical: iconState.alertCritical,
                                                   awake: iconState.awake, prodDots: iconState.prodDots,
                                                   pulseOn: iconState.pulseOn, dark: iconState.dark)
             lastIconState = iconState
         }
-        // The icon draws the unread count and critical state — unread eve
-        // alerts plus unseen firing criticals, one bell; the tooltip and
+        // The icon draws the unread count and critical state — unseen
+        // firing criticals, one bell; the tooltip and
         // a11y label are the only places a VoiceOver user can reach them —
         // the prod dots too, spoken in the same order they are drawn.
         let unread = store.badgeAlertCount
@@ -232,9 +227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             TimelineStage.shared.release()
             // Return freed view allocations to macOS instead of retaining
             // tens of MiB of empty allocator pages until memory pressure.
-            // Highlight runs go with the code canvas that drew them.
+            // Highlight runs stay (instant PR open): a diff reopened after
+            // the release draws in colour at once, and the cache is bounded.
             Task {
-                await HighlightCache.shared.purge()
                 await SymbolIndex.shared.purge()
                 await MainActor.run { _ = malloc_zone_pressure_relief(nil, 0) }
             }
@@ -362,7 +357,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "summonMilliseconds": debugLastSummonMilliseconds,
             "semaforRequests": SemaforClient.requests.snapshot,
             "refreshing": store.isRefreshing,
-            "todoCount": TodoStore.shared.openTodos.count,
             "inboxCount": store.inbox.count,
             "badgeAlertCount": store.badgeAlertCount,
             "badgeAlertCritical": store.badgeAlertCritical,

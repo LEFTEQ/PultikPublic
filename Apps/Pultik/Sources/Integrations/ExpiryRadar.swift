@@ -2,8 +2,8 @@ import SwiftUI
 
 /// The expiry radar: watches things that die on a date — TLS certs (probed),
 /// tokens and renewals (typed) — and, once an expiry enters its lead window,
-/// books a scheduled todo through the vitrinka CLI. The reminder then rides the
-/// whole existing pipeline: vitrinka, session hook, panel.
+/// raises it in Now and lists it under Estate's renewals (it no longer books
+/// a vitrinka todo: the vitrinka integration retired 2026-11-16).
 ///
 /// Probing is a TLS handshake against port 443 — no credentials, no request
 /// body, once a day per host. Failures are recorded on the item and retried
@@ -20,13 +20,6 @@ final class ExpiryRadarStore {
         /// manual date. Owned by the tick's switch, cleared only by a pass
         /// that actually re-evaluated.
         var lastError: String?
-        /// What the last BOOKING said. Separate on purpose: one shared string
-        /// meant a successful booking could erase a fresh probe failure and
-        /// put a green dot over an unreachable host.
-        var bookError: String?
-        /// The todo name booked for this expiry — booking is idempotent per
-        /// expiry date, so a renewed cert (new date) books a fresh todo.
-        var bookedFor: Date?
     }
 
     private(set) var items: [Preferences.ExpiryWatchItem]
@@ -34,14 +27,6 @@ final class ExpiryRadarStore {
     private var timer: Timer?
 
     private static let stateURL = Preferences.directory.appending(path: "expiry-radar.json")
-    /// Local-offset RFC3339 — what `vitrinka me schedule add --at` parses directly.
-    static let rfc3339: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        f.timeZone = .current
-        return f
-    }()
-
     private static let dateOnly: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
@@ -151,7 +136,6 @@ final class ExpiryRadarStore {
             default:
                 continue
             }
-            state = await book(item, state)
             states[item.id] = state
         }
         saveStates()
@@ -173,63 +157,27 @@ final class ExpiryRadarStore {
         NowStore.shared.record(NowAdapters.expiries(watched, now: now), now: now)
     }
 
-    /// Books the todo once the expiry enters the lead window. The name carries
-    /// the expiry DATE, so re-ticks inside one window are no-ops while a
-    /// renewed cert (new date) is a new name and books the next round — the
-    /// idempotence decision #6 asks for. Without the date the second booking
-    /// would hit the CLI's "already exists" on last round's todo and be
-    /// recorded as a success that never happened.
-    private func book(_ item: Preferences.ExpiryWatchItem, _ state: ItemState) async -> ItemState {
-        var state = state
-        // An expiry in the PAST still books: a cert that already died is the
-        // loudest thing this radar can have to say, and skipping it was how
-        // the row stayed green over a dead certificate.
-        guard let expiry = state.expiry else { return state }
-        let lead = Self.seconds(item.lead) ?? Self.defaultLead
-        guard Date.now >= expiry.addingTimeInterval(-lead) else { return state }
-        if let booked = state.bookedFor, abs(booked.timeIntervalSince(expiry)) < 3600 { return state }
-        guard VitrinkaCLI.path != nil else {
-            // Returning silently here made the radar a permanent no-op behind
-            // a green dot: nothing books, nothing notifies, nothing says why.
-            state.bookError = VitrinkaCLI.installHint
-            return state
-        }
-        // A GUI app has no checkout for `vitrinka me schedule` to derive a
-        // project from; the radar files into the configured one.
-        guard let project = StatusStore.shared.todoProject else {
-            state.bookError = VitrinkaCLI.projectHint
-            return state
-        }
-
-        let day = Self.dateOnly.string(from: expiry)
-        let subject = item.kind == "tls" ? "tls \(item.host ?? "")" : "\(item.name ?? "")"
-        let title = "renew \(subject) \(day)"
-        let at = Self.rfc3339.string(from: expiry)
-        // Off the main actor: this shells out to the CLI, which talks to
-        // vitrinka over the mesh before it returns.
-        let output = await VitrinkaCLI.runAsync([
-            "me", "schedule", "add", title, "--at", at, "--lead", item.lead, "--priority", "high",
-            "--project", project, "--no-input",
-            "--body", "Booked by pultik's expiry radar (\(item.label)). Expires \(at).",
-        ])
-        if let output, output.status == 0 {
-            state.bookedFor = expiry
-            // Clears the BOOKING verdict only. It must never touch lastError:
-            // a probe that failed this pass leaves the PREVIOUS expiry in
-            // place (the do/catch only assigns on success), so we reach here
-            // with a stale date and would erase a live failure.
-            state.bookError = nil
-        } else {
-            state.bookError = output?.trimmedError ?? VitrinkaCLI.installHint
-        }
-        return state
-    }
-
     /// An item whose `lead` does not parse watches three weeks out.
     private static let defaultLead: TimeInterval = 21 * 86400
 
+    /// The lead grammar: digits then a unit, repeated (`21d`, `1w2d`, `90m`).
     private static func seconds(_ duration: String) -> TimeInterval? {
-        TodoDuration.parse(duration)
+        let units: [Character: TimeInterval] = [
+            "m": 60, "h": 3600, "d": 86400, "w": 604_800, "y": 31_536_000,
+        ]
+        var total: TimeInterval = 0
+        var digits = ""
+        for ch in duration {
+            if ch.isNumber {
+                digits.append(ch)
+            } else if let unit = units[ch], let n = Double(digits) {
+                total += n * unit
+                digits = ""
+            } else {
+                return nil
+            }
+        }
+        return digits.isEmpty && total > 0 ? total : nil
     }
 
     // MARK: - TLS probe
@@ -299,14 +247,8 @@ final class ExpiryRadarIntegration: Integration {
     var status: IntegrationStatus {
         if isTesting { return .testing }
         guard !radar.items.isEmpty else { return .notConfigured("nothing watched") }
-        // A probe verdict outranks a booking verdict: not knowing whether a
-        // cert is alive is worse news than knowing and failing to book.
         if let broken = radar.items.first(where: { radar.states[$0.id]?.lastError != nil }),
            let why = radar.states[broken.id]?.lastError {
-            return .attention("\(broken.label): \(why)")
-        }
-        if let broken = radar.items.first(where: { radar.states[$0.id]?.bookError != nil }),
-           let why = radar.states[broken.id]?.bookError {
             return .attention("\(broken.label): \(why)")
         }
         let dated = radar.items
@@ -349,15 +291,12 @@ final class ExpiryRadarIntegration: Integration {
                         Text(item.label)
                             .font(.caption)
                         Spacer()
-                        if let error = state?.lastError ?? state?.bookError {
+                        if let error = state?.lastError {
                             Text(error).font(.caption2).foregroundStyle(.red).lineLimit(1)
                         } else if let expiry = state?.expiry {
                             Text(expiry.formatted(date: .abbreviated, time: .omitted))
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(.secondary)
-                            if state?.bookedFor != nil {
-                                Text("✓ todo").font(.caption2).foregroundStyle(.green)
-                            }
                         } else {
                             Text("not probed yet").font(.caption2).foregroundStyle(.secondary)
                         }
@@ -389,16 +328,14 @@ final class ExpiryRadarIntegration: Integration {
                     Button("Watch") { integration.addManual() }
                         .disabled(integration.newName.isEmpty || integration.newDate.isEmpty)
                 }
-                Text("Certs are probed daily (one TLS handshake). When an expiry enters its lead window, a scheduled todo is booked via the CLI — it then ripens, notifies, and mirrors like any other.")
+                Text("Certs are probed daily (one TLS handshake). When an expiry enters its lead window it shows in Now and under Estate's renewals.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    /// Blank means "use the radar's default", not "use the CLI's": an empty
-    /// lead reaches `me schedule add` without a --lead and lands on its 2h fallback,
-    /// which for a certificate is two hours' notice instead of three weeks.
+    /// Blank means the radar's default, three weeks.
     private var leadOrDefault: String {
         let trimmed = newLead.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? "21d" : trimmed

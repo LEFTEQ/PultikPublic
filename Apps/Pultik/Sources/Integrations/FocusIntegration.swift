@@ -17,10 +17,9 @@ final class FocusGate {
     /// One held notification, in a form that survives a relaunch.
     ///
     /// The queue MUST be durable: callers stamp their own "already announced"
-    /// ledgers (TodoStore's notified.json) the moment they hand a
-    /// notification over, so a queue lost to a quit would leave a durable
-    /// record of a delivery that never happened — and Focus is most often on
-    /// exactly when a laptop reboots overnight.
+    /// ledgers the moment they hand a notification over, so a queue lost to
+    /// a quit would leave a durable record of a delivery that never happened
+    /// — and Focus is most often on exactly when a laptop reboots overnight.
     struct Held: Codable, Hashable {
         let title: String
         let body: String

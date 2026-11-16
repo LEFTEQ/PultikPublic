@@ -41,23 +41,6 @@ final class QuerySnapshotCodableTests: XCTestCase {
         XCTAssertEqual(decoded.last?.error, "HTTP 502")
     }
 
-    func testEveSessionsAndAlertsRoundTrip() throws {
-        let sessions = [
-            EveSession(id: "s1", status: "running", updatedAt: at, source: .init(repo: "example-org/ExampleApp", prNumber: 641), prompt: nil),
-            EveSession(id: "s2", status: nil, updatedAt: nil, source: nil, prompt: "Repo: example-org/ExampleApp\nNumber: 642"),
-        ]
-        let alerts = [
-            EveAlert(id: 3, ts: at, flow: "exampleapp_prod", category: "incidents", severity: .critical, title: "API down", body: "5xx spike"),
-            EveAlert(id: 4, ts: at, flow: "monitor", category: "priority", severity: nil, title: "Disk", body: ""),
-        ]
-        XCTAssertEqual(try roundTrip(sessions).map(\.prKey), ["example-org/exampleapp#641", "example-org/exampleapp#642"])
-        XCTAssertEqual(try roundTrip(alerts).map(\.severity), [.critical, nil])
-        let approval = EveApproval(rootID: "r1", title: "Review ExampleApp#641", flow: "pr_review", repo: "example-org/ExampleApp",
-                                   prNumber: 641, parked: [.init(id: "c1", title: "open PR", tool: "open_pr",
-                                                                 updatedAt: at, stalled: false)])
-        XCTAssertEqual(try roundTrip([approval]), [approval])
-    }
-
     func testReleaseLineAndShelfReleasesRoundTrip() throws {
         let deploy = GitHubRelease.Deploy(id: 2, sha: "bbb222", ref: "main", createdAt: at, state: "success",
                                           stateAt: at, creator: "ci", url: "https://exampleapp.app")
@@ -177,41 +160,6 @@ final class QuerySnapshotCodableTests: XCTestCase {
         XCTAssertEqual(try roundTrip(firing), firing)
     }
 
-    func testVitrinkaWorkspaceAndTodosRoundTrip() throws {
-        let task = VitrinkaWorkTask(id: 6556, project: "pultik", title: "Snapshot the queries", status: "in_progress",
-                                    url: URL(string: "https://boards.example.invalid/example/p/pultik?task=6556")!)
-        let board = VitrinkaBoard(slug: "pultik-qa", title: "Pultik QA", url: "https://boards.example.invalid/b/pultik-qa", project: "pultik")
-        let snapshot = VitrinkaWorkspaceSnapshot(
-            workspace: VitrinkaWorkspace(slug: "example", name: "example-org"),
-            tray: VitrinkaTray(listeners: [VitrinkaListening(id: 42, scope: "pultik-qa", scopeKind: "board", title: "Pultik QA",
-                                                             url: board.url, openCount: 3, questionCount: 1, lastSeen: at,
-                                                             session: "mac:4242", actor: "claude", activity: nil)],
-                               boards: [board]),
-            work: VitrinkaMyWork(assigned: [task], mentioned: [], gates: [.init(task: task, why: ["review"])]),
-            ripe: [task], workUnavailable: true
-        )
-        let decoded = try XCTUnwrap(try roundTrip([snapshot]).first)
-        XCTAssertEqual(decoded.today.map(\.reason), ["needs you"])
-        XCTAssertEqual(decoded.tray.boards, [board])
-        XCTAssertEqual(decoded.tray.listeners.map(\.lastSeen), [at])
-
-        // TodoItem's snapshot goes back through its wire decoder.
-        let due = Date(timeIntervalSince1970: 1_791_028_800.5)
-        let todo = TodoItem(id: 120, project: "example-studio", title: "fix the portal claim bug", status: "in_progress",
-                            dueAt: due, priority: "high", milestoneId: 7, createdAt: due, lead: 3600, every: "1w",
-                            trigger: "when the PR merges", hasContext: true)
-        let todos = try roundTrip([todo, TodoItem(id: 121, project: "p", title: "bare")])
-        XCTAssertEqual(todos[0].dueAt, due)
-        XCTAssertEqual(todos[0].createdAt, due)
-        XCTAssertEqual(todos[0].lead, 3600)
-        XCTAssertEqual([todos[0].status, todos[0].priority, todos[0].every, todos[0].trigger],
-                       ["in_progress", "high", "1w", "when the PR merges"])
-        XCTAssertEqual(todos[0].milestoneId, 7)
-        XCTAssertTrue(todos[0].hasContext)
-        XCTAssertNil(todos[1].lead)
-        XCTAssertFalse(todos[1].hasContext)
-    }
-
     /// vt-7781: a timeline's 24 h snapshot (raw marks and hourly bins) and a
     /// host's state with its topology survive the snapshot coder.
     func testTimelineSnapshotRoundTrips() throws {
@@ -251,39 +199,5 @@ final class QuerySnapshotCodableTests: XCTestCase {
                                                            to: "app:app-server/exampleapp-prod", kind: "deploy",
                                                            direction: "one-way", targets: ["exampleapp-prod"])])
         XCTAssertEqual(try roundTrip(SemaforHostState(topology: topology)).topology, topology)
-    }
-
-    func testDevboxSnapshotRoundTrips() throws {
-        let box = DevboxEndpoint(name: "a", sshAlias: "devops", host: "192.0.2.11", port: 2222, state: "drain", primary: false)
-        let summary = DevboxOverviewSummary(
-            identitySlots: 0, targetHot: 4, hotCeiling: 0, claimed: 3, running: 2,
-            identities: DevboxOverviewIdentities(saved: 5, runtimeLeases: 2, portsUsed: 40, portCapacity: 400),
-            parked: 1, floorGB: 6, pressureSome: 5.25, pressureFull: 0, cpus: 16, load1: 3.5, cpuUsagePercent: 22.5,
-            diskTotalBytes: 1e12, diskUsedBytes: 4e11, memoryTotalBytes: 64 * 1_073_741_824,
-            memoryAvailableBytes: 30 * 1_073_741_824, swapTotalBytes: 8e9, swapFreeBytes: 7e9,
-            box: "a",
-            boxes: [DevboxBoxShare(name: "a", headroomBytes: 24e9, pressure: .elevated, state: "drain"),
-                    DevboxBoxShare(name: "c", headroomBytes: nil, pressure: nil, state: "active", primary: true)]
-        )
-        let workspace = DevboxWorkspace(
-            name: "example-studio", project: "example-studio", branch: "main", portBase: 7100, portCount: 10, created: at,
-            apps: [DevboxWorkspaceApp(name: "portal", port: 7101, fqdn: "portal.example-studio.ws.example.invalid",
-                                      syncPath: "/Volumes/work/example-app", active: "active", hostUp: true,
-                                      remoteURL: "http://192.0.2.10:7101")],
-            stats: [DevboxContainerStat(name: "example-app-portal-1", cpuPercent: 12.5, memBytes: 512e6, status: "Up 3 hours (healthy)")],
-            memoryBytes: 2.7e9, cpuPercent: 12.5,
-            declaredSources: [DevboxWorkspaceSource(app: "portal", path: "/Volumes/work/example-app")],
-            state: "parked", hold: true, parkedAt: at, macPath: "/Volumes/work/example-app", declaredGB: 4, memPeakBytes: 5.5e9,
-            drift: "declared 4G, peak 5.5G", box: box
-        )
-        let decoded = try roundTrip(DevboxSnapshot(endpoint: box, generated: at, workspaces: [workspace], summary: summary))
-        XCTAssertEqual(decoded.endpoint, box)
-        XCTAssertEqual(decoded.summary.boxes, summary.boxes)
-        XCTAssertEqual(decoded.summary.box, "a")
-        XCTAssertEqual(decoded.summary.pressure, .elevated)
-        XCTAssertEqual(decoded.workspaces.map(\.id), ["a/example-studio"])
-        XCTAssertEqual(decoded.workspaces.first?.footprintHelp, workspace.footprintHelp)
-        _ = try roundTrip(DevboxHost(workspace: "example-studio", fqdn: "portal.example-studio.ws.example.invalid", port: 7101, up: true))
-        _ = try roundTrip(DevboxRepo(name: "example-app", branch: "main", dirty: 1, ahead: 2, behind: 0))
     }
 }

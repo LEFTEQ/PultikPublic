@@ -10,8 +10,7 @@ struct PanelShell<Field: View, Content: View, Footer: View>: View {
     let current: PanelModule?
     let scope: SearchScope?
     let signals: [PanelModule: ModuleSignal]
-    var chatting = false
-    var showsHints = true
+    var showsHints: () -> Bool = { true }
     let onSelectModule: (PanelModule) -> Void
     var order: [PanelModule] = PanelModule.allCases
     @Binding var topBarHeight: CGFloat
@@ -23,10 +22,7 @@ struct PanelShell<Field: View, Content: View, Footer: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             TopBar {
-                SearchField(scope: scope,
-                            leadingSymbol: chatting ? "sparkles" : "magnifyingglass",
-                            leadingTone: chatting ? Theme.eve : Theme.ink3,
-                            showsHints: showsHints) {
+                SearchField(scope: scope, showsHints: showsHints) {
                     field()
                 }
             } strip: {
@@ -37,6 +33,13 @@ struct PanelShell<Field: View, Content: View, Footer: View>: View {
                     Color.clear.preference(key: TopBarHeightKey.self, value: proxy.size.height)
                 }
             )
+            // Each height is observed on the view that measures it: observed
+            // on the stack around `content`, SwiftUI reduced it over the whole
+            // panel on every update (the hottest app frame opening a PR).
+            .onPreferenceChange(TopBarHeightKey.self) { value in
+                let rounded = value.rounded(.up)
+                if abs(rounded - topBarHeight) >= 1 { topBarHeight = rounded }
+            }
             content()
                 .frame(maxHeight: .infinity, alignment: .top)
                 // The content layer (D11): one opaque near-black sheet inset in
@@ -50,18 +53,14 @@ struct PanelShell<Field: View, Content: View, Footer: View>: View {
                         Color.clear.preference(key: FooterHeightKey.self, value: proxy.size.height)
                     }
                 )
+                .onPreferenceChange(FooterHeightKey.self) { value in
+                    let rounded = value.rounded()
+                    if abs(rounded - footerHeight) >= 1 { footerHeight = rounded }
+                }
         }
         // One fixed frame (D4): the window takes this size and content never
         // resizes it.
         .frame(width: PanelMetrics.shared.panelSize.width, height: PanelMetrics.shared.panelSize.height)
-        .onPreferenceChange(FooterHeightKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - footerHeight) >= 1 { footerHeight = rounded }
-        }
-        .onPreferenceChange(TopBarHeightKey.self) { value in
-            let rounded = value.rounded(.up)
-            if abs(rounded - topBarHeight) >= 1 { topBarHeight = rounded }
-        }
         .modifier(PanelChrome())
     }
 }

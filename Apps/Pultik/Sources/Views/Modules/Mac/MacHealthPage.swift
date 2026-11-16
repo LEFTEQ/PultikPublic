@@ -89,7 +89,7 @@ struct MacHealthPage: View {
         return parts.isEmpty ? "sensors · vitals" : parts.joined(separator: " · ")
     }
 
-    /// The Devbox page's metric strip, for this Mac.
+    /// The machine metric strip, for this Mac.
     private func machineStrip(_ machine: MacHealth.Machine) -> some View {
         let ramPercent = machine.memTotalGb > 0 ? machine.memUsedGb / machine.memTotalGb * 100 : nil
         let swapPercent = machine.swapTotalGb > 0 ? machine.swapUsedGb / machine.swapTotalGb * 100 : nil

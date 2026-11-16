@@ -54,8 +54,10 @@ struct SearchField<Field: View>: View {
     var leadingTone = Theme.ink3
     /// The trailing result count (`3 runs`).
     var count: String?
-    /// Trailing hints; nil hides them (while a row is selected, say).
-    var showsHints = true
+    /// Trailing hints; false hides them (while a row is selected, say).
+    /// Asked here, in this body: the panel root then never reads the
+    /// selection, so an arrow key re-runs this field, not the whole panel.
+    var showsHints: () -> Bool = { true }
     @ViewBuilder var field: () -> Field
 
     var body: some View {
@@ -85,11 +87,11 @@ struct SearchField<Field: View>: View {
             if let count {
                 Text(count).font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink3).fixedSize()
             }
-            if showsHints {
+            if showsHints() {
                 Rectangle().fill(Theme.hairlineStrong).frame(width: 1, height: 16)
                 HStack(spacing: 4) {
                     Text("modules").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
-                    KbdHint("⌘1–9")
+                    KbdHint("⌘1–\(PanelModule.allCases.count)")
                 }
                 .fixedSize()
                 KbdHint("esc")

@@ -15,37 +15,6 @@ extension StatusPanelView {
             .padding(.horizontal, 18)
             .padding(.bottom, 6)
         }
-        if todosMatch, !showTodos {
-            Button {
-                query = ""
-                showTodos = true
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "checklist")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 18)
-                    Text("Todos")
-                        .font(.system(size: 12.5, weight: .medium))
-                    Text("vitrinka — \(todoStore.openTodos.count) open")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    if selectedID == nil || isSelected("todos") { KeyChip("↵") }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(
-                selectedID == nil || isSelected("todos")
-                    ? Theme.accentSoft.opacity(0.6) : .clear,
-                in: RoundedRectangle(cornerRadius: 8)
-            )
-            .padding(.horizontal, 10)
-            .padding(.bottom, 4)
-        }
         if let project = store.matchProject(query), activeProject == nil {
             Button {
                 query = ""
@@ -184,7 +153,7 @@ extension StatusPanelView {
                 || !store.searchMatches.isEmpty || !store.sentryMatches.isEmpty)
             {
                 EmptyView()
-            } else if filteredTodos.isEmpty && filteredNotes.isEmpty {
+            } else if filteredNotes.isEmpty {
                 Text(query.isEmpty
                     ? "no open PRs"
                     : "no matches")
@@ -193,9 +162,6 @@ extension StatusPanelView {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 20)
             }
-            // No PRs doesn't mean nothing to show — todos keep their
-            // section. Live sessions are the Sessions module's.
-            todosSection
         } else {
             // Fixed order (2026-07-29): one section per repo, always in the
             // same sequence (preferences.repoOrder, rest by recency) — the
@@ -207,7 +173,6 @@ extension StatusPanelView {
                 ForEach(PRListPage.groups(entries), id: \.slug) { group in
                     PRRepoSection(group: group, selectedID: selectedID, capped: capped.contains(group.slug))
                 }
-                todosSection
             }
         }
     }
@@ -216,28 +181,6 @@ extension StatusPanelView {
     /// same rows (`PRListPage`).
     var filteredInbox: [StatusStore.InboxPR] {
         PRListPage.inbox(store.inbox, hidden: hiddenResolved, matching: query)
-    }
-
-    // MARK: - Todos (main list section)
-
-    /// Open todos in the main list, below the PR inbox — the tab is the full
-    /// view (with broken-file diagnostics); this is the glance.
-    @ViewBuilder
-    var todosSection: some View {
-        let todos = filteredTodos
-        if !todos.isEmpty {
-            Kicker(text: "Todos", count: todos.count,
-                   action: { enterMode(.todos) },
-                   actionHelp: "Open all todos")
-                .padding(.horizontal, 8)
-                .padding(.top, 7)
-                .padding(.bottom, 2)
-            ForEach(todos) { todo in
-                TodoRow(todo: todo, selected: isSelected("todo:\(todo.id)"))
-                    .opacity(resolvedStore.isResolved("todo:\(todo.id)") ? 0.35 : 1)
-                    .id("todo:\(todo.id)")
-            }
-        }
     }
 
     // MARK: - Search results (all PRs, incl. merged & closed)
@@ -324,7 +267,7 @@ extension StatusPanelView {
 }
 
 /// One sticky-strip link row: same dense idiom as the rail's rows, plus the
-/// keyboard-selection chrome the strip's siblings (prod, PRs, todos) carry.
+/// keyboard-selection chrome the strip's siblings (prod, PRs) carry.
 private struct LinkStripRow: View {
     let link: SavedLink
     var selected = false

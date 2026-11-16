@@ -15,6 +15,11 @@ struct QueryResource<Value: Codable & Sendable>: Sendable {
     /// first; nil = the repository's and the store's defaults. A detail
     /// resource keyed per object (a PR's files) sets its own.
     var keep: Int?
+    /// Its keys stay in memory up to `keep`, outside the repository's shared
+    /// limit, and a background `persist` lands there too: a resource the
+    /// first frame of a view draws from (a warm PR's detail), where a disk
+    /// read would be a blank frame.
+    var pinned = false
 }
 
 /// How current a resource's value is.
@@ -48,8 +53,10 @@ final class QueryRepository {
     @ObservationIgnored private let store: QuerySnapshotStore
     @ObservationIgnored private let memoryLimit: Int
     @ObservationIgnored private var memory: [QueryKey: (value: any Sendable, fetchedAt: Date)] = [:]
-    /// Least recently used first.
+    /// Least recently used first: the keys under the shared limit, and each
+    /// pinned resource's own.
     @ObservationIgnored private var recency: [QueryKey] = []
+    @ObservationIgnored private var pinnedRecency: [String: [QueryKey]] = [:]
     @ObservationIgnored private var flights: [QueryKey: Task<any Sendable, Error>] = [:]
 
     init(store: QuerySnapshotStore, memoryLimit: Int = 64) {
@@ -64,7 +71,7 @@ final class QueryRepository {
         // A live answer that landed while the disk read ran wins.
         guard freshness[resource.name] == nil else { return nil }
         freshness[resource.name] = QueryFreshness(fetchedAt: snapshot.fetchedAt, restored: true)
-        remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep)
+        remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep, pinned: resource.pinned)
         return snapshot
     }
 
@@ -72,7 +79,7 @@ final class QueryRepository {
     /// start's snapshot.
     func record<Value>(_ resource: QueryResource<Value>, key: QueryKey, value: Value, at date: Date = Date()) {
         freshness[resource.name] = QueryFreshness(fetchedAt: date, restored: false)
-        remember(key, value, at: date, keep: resource.keep)
+        remember(key, value, at: date, keep: resource.keep, pinned: resource.pinned)
         guard resource.persists else { return }
         let store = store
         Task.detached(priority: .utility) {
@@ -91,6 +98,7 @@ final class QueryRepository {
     func invalidate(resource: String) {
         for key in memory.keys where key.resource == resource { memory[key] = nil }
         recency.removeAll { $0.resource == resource }
+        pinnedRecency[resource] = nil
     }
 
     func cached<Value>(_: Value.Type, key: QueryKey) -> (value: Value, fetchedAt: Date)? {
@@ -117,7 +125,7 @@ final class QueryRepository {
         if resource.persists, cached(Value.self, key: key) == nil {
             if let snapshot = await store.load(Value.self, key: key, schema: resource.schema),
                cached(Value.self, key: key) == nil {
-                remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep)
+                remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep, pinned: resource.pinned)
             }
             // Memory is the truth after the await: a live answer or another
             // reader's fetch may have landed while the disk read ran.
@@ -146,25 +154,31 @@ final class QueryRepository {
     /// the caller judges currency itself (a change request against its
     /// index's `updatedAt`). A snapshot read lands in memory.
     /// `remember: false` peeks without pulling the snapshot into memory (a
-    /// background sync walking a hundred keys).
+    /// background sync walking a hundred keys) — unless the resource is
+    /// pinned: memory is where its keys belong.
     func held<Value>(_ resource: QueryResource<Value>, key: QueryKey,
                      remember keeps: Bool = true) async -> (value: Value, fetchedAt: Date)? {
         if let hit = cached(Value.self, key: key) { return hit }
         guard resource.persists,
               let snapshot = await store.load(Value.self, key: key, schema: resource.schema) else { return nil }
         if let hit = cached(Value.self, key: key) { return hit }
-        if keeps { remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep) }
+        if keeps || resource.pinned { remember(key, snapshot.value, at: snapshot.fetchedAt, keep: resource.keep, pinned: resource.pinned) }
         return (snapshot.value, snapshot.fetchedAt)
     }
 
     /// A background sync's answer (the warm set, D9): written to disk only,
     /// so syncing a hundred objects never pushes what is on screen out of
-    /// memory. A copy memory already holds is refreshed in place.
+    /// memory. A copy memory already holds is refreshed in place, and a
+    /// pinned resource's lands in memory: its keys push nothing else out.
     /// The returned write can be awaited (a sync that promises "on disk").
     @discardableResult
     func persist<Value>(_ resource: QueryResource<Value>, key: QueryKey, value: Value,
                         at date: Date = Date()) -> Task<Void, Never>? {
-        if memory[key] != nil { memory[key] = (value, date) }
+        if resource.pinned {
+            remember(key, value, at: date, keep: resource.keep, pinned: true)
+        } else if memory[key] != nil {
+            memory[key] = (value, date)
+        }
         guard resource.persists else { return nil }
         let store = store
         let schema = resource.schema
@@ -186,8 +200,17 @@ final class QueryRepository {
         Task { _ = try? await load(resource, key: key, maxAge: maxAge, fetch: fetch) }
     }
 
-    private func remember(_ key: QueryKey, _ value: any Sendable, at date: Date, keep: Int? = nil) {
+    private func remember(_ key: QueryKey, _ value: any Sendable, at date: Date, keep: Int? = nil,
+                          pinned: Bool = false) {
         memory[key] = (value, date)
+        if pinned {
+            var order = pinnedRecency[key.resource] ?? []
+            order.removeAll { $0 == key }
+            order.append(key)
+            for oldest in order.dropLast(max(1, keep ?? order.count)) { memory[oldest] = nil }
+            pinnedRecency[key.resource] = Array(order.suffix(max(1, keep ?? order.count)))
+            return
+        }
         touch(key)
         if let keep {
             let siblings = recency.filter { $0.resource == key.resource }
@@ -203,6 +226,11 @@ final class QueryRepository {
     }
 
     private func touch(_ key: QueryKey) {
+        if pinnedRecency[key.resource] != nil {
+            pinnedRecency[key.resource]?.removeAll { $0 == key }
+            pinnedRecency[key.resource]?.append(key)
+            return
+        }
         recency.removeAll { $0 == key }
         recency.append(key)
     }

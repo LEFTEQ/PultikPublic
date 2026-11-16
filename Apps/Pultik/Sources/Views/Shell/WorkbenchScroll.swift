@@ -12,6 +12,8 @@ extension View {
 private struct WorkbenchScroll: ViewModifier {
     let active: Bool
     @Environment(ModuleRouter.self) private var router
+    /// False while the workbench is staged off screen (focus D23).
+    @Environment(\.bodyShown) private var onScreen
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var position = ScrollPosition(edge: .top)
     /// Written on every scrolled frame, so it must not redraw the tab.
@@ -26,8 +28,9 @@ private struct WorkbenchScroll: ViewModifier {
             .onScrollGeometryChange(for: ScrollGeometry.self, of: { $0 }) { _, geometry in
                 tracker.geometry = geometry
             }
-            .onChange(of: router.scrollRequest) { _, request in
-                guard active, let request, let geometry = tracker.geometry else { return }
+            // Heard on screen only: ↑/↓ re-runs no scroller of a staged workbench.
+            .onChange(of: Heard(onScreen, router.scrollRequest)) { old, heard in
+                guard active, let request = heard.taken(after: old), let geometry = tracker.geometry else { return }
                 let y = Self.target(request.amount, geometry)
                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.14)) { position.scrollTo(y: y) }
             }

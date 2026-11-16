@@ -11,14 +11,18 @@
 //! ends, so a long job is found without scanning its row), keeping the nearest whose hit box
 //! holds the pointer. Hits follow paint order: the selected mark, then items (the top ones on
 //! a tie), then a rail's line, then a band.
+//!
+//! Hatching (the future, [`Future::Hatched`]) is diagonal strokes clipped to their region by
+//! arithmetic, one `Path` per build in the x camera: no display-list op beyond what the
+//! renderer already draws.
 
 use crate::density::{Cluster, Drawn, Folded, Rail, fold_window};
-use crate::geometry::{AXIS_PT, Semantic, View, level_scale};
+use crate::geometry::{Chrome, Future, Semantic, View, level_scale};
 use crate::layout::{GroupSpec, Layout};
 use crate::lens::{LensSpec, Palette};
-use crate::mark::{Band, Bin, Mark, Schedule, Shape};
-use crate::time::{Ms, span_label, ticks_between};
-use crate::tracks::{self, Tracks, track_geometry, tracked_row_height};
+use crate::mark::{Band, Bin, Line, Mark, Schedule, Shape, Span};
+use crate::time::{Clock, Ms, ticks_in};
+use crate::tracks::{self, Tracking, Tracks};
 use canvas_draw::{
     Align, Camera, Dash, DisplayList, Follow, Path, PathOp, Point, Rect, Rgba, RoundedRect, Stroke,
     TextRun, Weight,
@@ -32,6 +36,18 @@ const PILL_H: f32 = 13.0;
 const BAND_INSET: f32 = 4.0;
 /// A bar this thick (points) writes its label inside.
 const LABEL_MIN_H: f32 = 12.0;
+/// Text beside a mark: its gap from the shape and its size, base points.
+pub const BESIDE_GAP: f32 = 5.0;
+pub const BESIDE_SIZE: f32 = 11.0;
+/// A parked mark's left edge, points right of now.
+pub const PARK_PT: f32 = 8.0;
+/// A bar's end cap, base points wide.
+const CAP_W: f32 = 4.0;
+/// Hatch strokes: their spacing and width, points.
+const HATCH_GAP: f32 = 7.0;
+const HATCH_W: f32 = 1.0;
+/// Under fixed tracking, the least gap (points) two items on one track keep.
+const ROOM_PT: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemRef {
@@ -51,6 +67,8 @@ pub struct Item {
     pub y: f32,
     pub hw: f32,
     pub hh: f32,
+    /// Points past a point mark's centre its text beside it reaches (0: none).
+    pub tail: f32,
     /// Never folded (stands out, selected): drawn and hit on top.
     pub top: bool,
 }
@@ -68,11 +86,16 @@ pub struct SceneInput<'a> {
     pub spec: LensSpec,
     /// Sorted by start.
     pub marks: &'a [Mark],
+    /// Marks with no time yet, parked just after now (one track each in a tracked row).
+    pub parked: &'a [Mark],
     pub bins: &'a [Bin],
     pub bands: &'a [Band],
+    pub lines: &'a [Line],
     pub schedules: &'a [Schedule],
     pub groups: &'a [GroupSpec],
     pub k: f32,
+    /// Where the first group starts, content points (the axis strip's height).
+    pub top: f32,
     pub semantic: Semantic,
     pub now: Ms,
     /// The fold grid's anchor: fixed, so a pan never reshuffles clusters.
@@ -95,7 +118,10 @@ pub struct Scene {
     pub schedules: Vec<Schedule>,
     pub bins: Vec<Bin>,
     pub bands: Vec<Band>,
+    pub lines: Vec<Line>,
     pub items: Vec<Item>,
+    /// Item indices in the order they are painted (and so, reversed, hit).
+    pub paint_order: Vec<usize>,
     /// Per row, item indices sorted by start, and each list's running maximum end.
     rows: Vec<Vec<usize>>,
     ends: Vec<Vec<Ms>>,
@@ -104,6 +130,7 @@ pub struct Scene {
     pub selected: Option<usize>,
     pub playhead: Option<Ms>,
     pub tracks: Tracks,
+    pub tracking: Tracking,
     /// 0 marks only … 1 bins only, at the level's scale.
     pub aggregation: f32,
     pub until: Ms,
@@ -111,7 +138,8 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn build(i: SceneInput<'_>) -> Scene {
+    /// Build the scene; `text` measures what a mark writes beside it, so its room is known.
+    pub fn build(i: SceneInput<'_>, text: &mut TextSystem) -> Scene {
         let sem = i.semantic;
         let scale = level_scale(sem.level);
         let until = i.now + i.spec.future;
@@ -136,7 +164,7 @@ impl Scene {
         } else {
             Folded::default()
         };
-        let marks: Vec<Mark> = folded
+        let mut marks: Vec<Mark> = folded
             .marks
             .iter()
             .map(|d| match d {
@@ -144,16 +172,41 @@ impl Scene {
                 Drawn::Repeat(m) => (**m).clone(),
             })
             .collect();
-        let tracks = if i.spec.tracks {
-            tracks::assign(&marks, sem.from, sem.to, i.now)
-        } else {
-            Tracks::default()
+        // Parked marks stand just right of now, wherever now is: live, so the scene is built
+        // again once now has moved a point.
+        for m in i.parked {
+            let mut m = m.clone();
+            let t = i.now + f64::from(PARK_PT + m.paint.w * i.k / 2.0) / scale;
+            (m.start, m.outcome, m.end, m.live) = (t, t, Some(t), true);
+            marks.push(m);
+        }
+        let tails: Vec<f32> = marks
+            .iter()
+            .map(|m| match &m.paint.beside {
+                Some(s) if m.paint.span.is_none() => {
+                    BESIDE_GAP * i.k + text.shape(s, FontSpec::ui(BESIDE_SIZE * i.k)).width
+                }
+                _ => 0.0,
+            })
+            .collect();
+        let tracks = match i.spec.tracks {
+            Tracking::Off => Tracks::default(),
+            Tracking::Zoomed => tracks::assign(&marks, sem.from, sem.to, i.now),
+            Tracking::Fixed { .. } => tracks::assign_with(&marks, sem.from, sem.to, i.now, |mi| {
+                let m = &marks[mi];
+                let hw = m.paint.w * i.k / 2.0;
+                let (before, after) = match m.paint.span {
+                    Some(_) => (0.0, ROOM_PT),
+                    None => (hw, hw + tails[mi] + ROOM_PT),
+                };
+                (f64::from(before) / scale, f64::from(after) / scale)
+            }),
         };
-        let layout = Layout::of(i.groups, i.k, |row| {
+        let layout = Layout::of_at(i.groups, i.k, i.top, |row| {
             tracks
                 .rows
                 .get(row)
-                .map(|&n| tracked_row_height(n, sem.level))
+                .map(|&n| i.spec.tracks.row_height(n, sem.level))
         });
         let mut s = Scene {
             semantic: sem,
@@ -182,20 +235,28 @@ impl Scene {
                 .filter(|b| b.to.unwrap_or(i.now) > sem.from && b.from < sem.to)
                 .cloned()
                 .collect(),
+            lines: i
+                .lines
+                .iter()
+                .filter(|l| l.at >= sem.from && l.at < sem.to)
+                .cloned()
+                .collect(),
             items: Vec::new(),
+            paint_order: Vec::new(),
             reach: HIT_PT,
             selected: None,
             playhead: i.playhead,
             tracks,
+            tracking: i.spec.tracks,
             aggregation,
             until,
             live_in_window: false,
         };
-        s.index(i.selected);
+        s.index(i.selected, &tails);
         s
     }
 
-    fn index(&mut self, selected: Option<&str>) {
+    fn index(&mut self, selected: Option<&str>, tails: &[f32]) {
         let k = self.layout.k;
         for (mi, m) in self.marks.iter().enumerate() {
             let Some(&ri) = self.layout.by_key.get(&m.row) else {
@@ -205,10 +266,16 @@ impl Scene {
             let (y, hh) = match self.tracks.of.get(&mi) {
                 Some(&track) => {
                     let n = self.tracks.rows.get(&m.row).copied().unwrap_or(1);
-                    let (pitch, bar) = track_geometry(n, row.h / k, self.semantic.level);
+                    let (pitch, bar) = self.tracking.geometry(n, row.h / k, self.semantic.level);
+                    let fixed_point =
+                        matches!(self.tracking, Tracking::Fixed { .. }) && m.paint.span.is_none();
                     (
                         row.top + (tracks::TRACK_PAD + pitch * (track as f32 + 0.5)) * k,
-                        bar * k / 2.0,
+                        if fixed_point {
+                            m.paint.h * k / 2.0
+                        } else {
+                            bar * k / 2.0
+                        },
                     )
                 }
                 None => (row.y + m.paint.dy * k, m.paint.h * k / 2.0),
@@ -230,6 +297,7 @@ impl Scene {
                 y,
                 hw: m.paint.w * k / 2.0,
                 hh,
+                tail: tails.get(mi).copied().unwrap_or(0.0),
                 top,
             });
         }
@@ -246,12 +314,19 @@ impl Scene {
                 y: self.layout.rows[ri].y,
                 hw: w / 2.0,
                 hh: PILL_H * k / 2.0,
+                tail: 0.0,
                 top: false,
             });
         }
         for (ii, it) in self.items.iter().enumerate() {
             self.rows[it.row].push(ii);
-            self.reach = self.reach.max(it.hw + HIT_PT);
+            // A text beside a point reaches further as the camera stretches it (by < √2).
+            let stretched = if it.tail > 0.0 {
+                (it.hw + BESIDE_GAP * self.layout.k) * (std::f32::consts::SQRT_2 - 1.0)
+            } else {
+                0.0
+            };
+            self.reach = self.reach.max(it.hw + it.tail + stretched + HIT_PT);
         }
         let now = self.now;
         for (row, ends) in self.rows.iter_mut().zip(self.ends.iter_mut()) {
@@ -263,6 +338,19 @@ impl Scene {
                 ends.push(if it.t1.is_none() { now.max(run) } else { run });
             }
         }
+        // Paint order: the rest, then what stands out, then the selection.
+        let sel = self.selected;
+        let order = &mut self.paint_order;
+        for pass_top in [false, true] {
+            order.extend(
+                self.items
+                    .iter()
+                    .enumerate()
+                    .filter(|&(ii, it)| it.top == pass_top && Some(ii) != sel)
+                    .map(|(ii, _)| ii),
+            );
+        }
+        order.extend(sel);
     }
 
     /// The scene's world x of time `t`, points.
@@ -282,7 +370,8 @@ impl Scene {
         }
     }
 
-    /// An item's extent at `view`, points across the lanes: a point's centre, a span's whole run.
+    /// An item's extent at `view`, points across the lanes: a point's centre to its text's end,
+    /// a span's whole run.
     fn extent(&self, it: &Item, v: &View) -> (f64, f64) {
         let x0 = v.x_of(it.t);
         match it.what {
@@ -296,6 +385,14 @@ impl Scene {
                     None => v.x_of(end),
                 };
                 (x0, x1)
+            }
+            // The text's origin rides the x camera (inside a level the view stretches the level's
+            // scale by up to √2) while its glyphs keep their size: the dot's half and the gap
+            // stretch, the measured text does not.
+            _ if it.tail > 0.0 => {
+                let lead = f64::from(it.hw + BESIDE_GAP * self.layout.k);
+                let stretch = v.scale / self.scale;
+                (x0, x0 + f64::from(it.tail) + lead * (stretch - 1.0))
             }
             _ => (x0, x0),
         }
@@ -313,49 +410,69 @@ impl Scene {
         (dx <= f64::from(it.hw + HIT_PT) && (it.y - py).abs() <= it.hh + HIT_PT).then_some(dx)
     }
 
-    /// What lanes point (`px` across the lanes, `py` content points down, scroll added) is on,
-    /// in paint order from the top.
-    pub fn hit(&self, v: &View, px: f64, py: f32) -> Option<Hit> {
+    /// Item `ii`'s drawn box at `view`: x across the lanes, y in content points (unscrolled).
+    pub fn rect_of(&self, ii: usize, v: &View) -> Rect {
+        let it = &self.items[ii];
+        let (x0, x1) = self.extent(it, v);
+        let span = matches!(it.what, ItemRef::Mark(mi) if self.marks[mi].paint.span.is_some());
+        let left = if span { x0 } else { x0 - f64::from(it.hw) };
+        let right = x1 + f64::from(it.hw);
+        Rect::new(
+            left as f32,
+            it.y - it.hh,
+            (right - left).max(0.0) as f32,
+            it.hh * 2.0,
+        )
+    }
+
+    /// The item lanes point (`px` across the lanes, `py` content points down, scroll added) is
+    /// on, in paint order from the top: the selection, else the nearest (the top ones on a tie).
+    pub fn hit_item(&self, v: &View, px: f64, py: f32) -> Option<usize> {
         if let Some(si) = self.selected
             && self.holds(&self.items[si], v, px, py).is_some()
         {
-            return self.hit_of(si);
+            return Some(si);
         }
-        let row = self.layout.row_at(py);
+        let row = self.layout.row_at(py)?;
         let mut best: Option<(usize, f64)> = None;
-        if let Some(row) = row {
-            let t = v.t_of(px);
-            let reach = f64::from(self.reach) / v.scale;
-            let lo = row.index.saturating_sub(1);
-            let hi = (row.index + 1).min(self.rows.len() - 1);
-            for ri in lo..=hi {
-                if self.layout.rows[ri].group != row.group {
-                    continue;
+        let t = v.t_of(px);
+        let reach = f64::from(self.reach) / v.scale;
+        let lo = row.index.saturating_sub(1);
+        let hi = (row.index + 1).min(self.rows.len() - 1);
+        for ri in lo..=hi {
+            if self.layout.rows[ri].group != row.group {
+                continue;
+            }
+            let items = &self.rows[ri];
+            let ends = &self.ends[ri];
+            let upper = items.partition_point(|&ii| self.items[ii].t <= t + reach);
+            for j in (0..upper).rev() {
+                if ends[j] < t - reach {
+                    break;
                 }
-                let items = &self.rows[ri];
-                let ends = &self.ends[ri];
-                let upper = items.partition_point(|&ii| self.items[ii].t <= t + reach);
-                for j in (0..upper).rev() {
-                    if ends[j] < t - reach {
-                        break;
-                    }
-                    let it = &self.items[items[j]];
-                    let Some(dx) = self.holds(it, v, px, py) else {
-                        continue;
-                    };
-                    let dy = f64::from(it.y - py);
-                    let d = dx * dx + dy * dy;
-                    let wins = best
-                        .is_none_or(|(b, bd)| d < bd || (d == bd && it.top && !self.items[b].top));
-                    if wins {
-                        best = Some((items[j], d));
-                    }
+                let it = &self.items[items[j]];
+                let Some(dx) = self.holds(it, v, px, py) else {
+                    continue;
+                };
+                let dy = f64::from(it.y - py);
+                let d = dx * dx + dy * dy;
+                let wins =
+                    best.is_none_or(|(b, bd)| d < bd || (d == bd && it.top && !self.items[b].top));
+                if wins {
+                    best = Some((items[j], d));
                 }
             }
         }
-        if let Some((ii, _)) = best {
+        best.map(|(ii, _)| ii)
+    }
+
+    /// What lanes point (`px` across the lanes, `py` content points down, scroll added) is on,
+    /// in paint order from the top.
+    pub fn hit(&self, v: &View, px: f64, py: f32) -> Option<Hit> {
+        if let Some(ii) = self.hit_item(v, px, py) {
             return self.hit_of(ii);
         }
+        let row = self.layout.row_at(py);
         if let Some(row) = row {
             for r in &self.rails {
                 if r.row == row.key
@@ -368,10 +485,10 @@ impl Scene {
             }
         }
         for b in &self.bands {
-            let Some(g) = self.layout.groups.iter().find(|g| g.key == b.group) else {
+            let Some((top, h)) = self.band_span(b) else {
                 continue;
             };
-            if py < g.top || py > g.top + g.h {
+            if py < top || py > top + h {
                 continue;
             }
             if px >= v.x_of(b.from) && px <= v.x_of(b.to.unwrap_or(self.now)) {
@@ -381,6 +498,22 @@ impl Scene {
         None
     }
 
+    /// A band's top and height, content points: its group's, or every group's.
+    fn band_span(&self, b: &Band) -> Option<(f32, f32)> {
+        match &b.group {
+            Some(key) => self
+                .layout
+                .groups
+                .iter()
+                .find(|g| g.key == *key)
+                .map(|g| (g.top, g.h)),
+            None => {
+                let first = self.layout.groups.first()?;
+                Some((first.top, self.layout.height - first.top))
+            }
+        }
+    }
+
     fn hit_of(&self, ii: usize) -> Option<Hit> {
         Some(match self.items[ii].what {
             ItemRef::Mark(mi) => Hit::Mark(self.marks[mi].id.clone()),
@@ -388,28 +521,27 @@ impl Scene {
         })
     }
 
-    /// The scene as a display list: lanes `size` points, the label column `label_w` wide. Its
-    /// camera layers are placed by [`Scene::camera`].
+    /// The scene as a display list: the surface `size` points, its chrome `chrome` (the label
+    /// column, the axis strip, the future), labels on `clock`. Its camera layers are placed by
+    /// [`Scene::camera`].
     pub fn emit(
         &self,
         size: (f32, f32),
-        label_w: f32,
+        chrome: &Chrome,
         palette: &Palette,
+        clock: &Clock,
         text: &mut TextSystem,
         view: &View,
     ) -> DisplayList {
         let (w, h) = size;
         let k = self.layout.k;
+        let label_w = chrome.label_w;
+        let axis = chrome.axis_h();
         let mut dl = DisplayList::new(palette.background);
-        let lanes = Rect::new(
-            label_w,
-            AXIS_PT,
-            (w - label_w).max(0.0),
-            (h - AXIS_PT).max(0.0),
-        );
+        let lanes = Rect::new(label_w, axis, (w - label_w).max(0.0), (h - axis).max(0.0));
 
         // Group bands and lane borders: they scroll, they never pan.
-        dl.push_clip(Rect::new(0.0, AXIS_PT, w, (h - AXIS_PT).max(0.0)));
+        dl.push_clip(Rect::new(0.0, axis, w, (h - axis).max(0.0)));
         dl.push_camera(Follow::Y);
         for (gi, g) in self.layout.groups.iter().enumerate() {
             if gi % 2 == 1 {
@@ -428,9 +560,9 @@ impl Scene {
         dl.pop_camera();
         dl.pop_clip();
 
-        let ticks = ticks_between(self.semantic.from, self.semantic.to, self.scale);
+        let ticks = ticks_in(self.semantic.from, self.semantic.to, self.scale, clock);
         dl.push_clip(lanes);
-        // Tick lines: they pan, they never scroll.
+        // Tick lines, the future's hatching and the host's lines: they pan, they never scroll.
         dl.push_camera(Follow::X);
         for t in &ticks {
             let color = if t.day {
@@ -439,44 +571,55 @@ impl Scene {
                 palette.grid
             };
             dl.rect(RoundedRect::new(
-                Rect::new(self.x(t.t), AXIS_PT, 1.0, h),
+                Rect::new(self.x(t.t), axis, 1.0, h),
                 0.0,
                 color,
             ));
+        }
+        if let Future::Hatched(color) = chrome.future {
+            self.emit_hatch(&mut dl, color, axis, h);
+        }
+        for l in &self.lines {
+            let x = self.x(l.at);
+            dl.rect(RoundedRect::new(
+                Rect::new(x - 0.5, axis, 1.0, h),
+                0.0,
+                l.color,
+            ));
+            if !l.label.is_empty() {
+                dl.text(TextRun::new(
+                    l.label.to_string(),
+                    Point::new(x + 4.0, axis + 3.0),
+                    10.0,
+                    l.color,
+                ));
+            }
         }
         dl.pop_camera();
 
         dl.push_camera(Follow::BOTH);
         self.emit_bands(&mut dl, palette);
         self.emit_bins(&mut dl, palette);
-        self.emit_rails(&mut dl, palette, text);
-        for (ii, it) in self.items.iter().enumerate() {
-            if !it.top && Some(ii) != self.selected {
-                self.emit_item(&mut dl, it, palette, text);
-            }
-        }
-        for (ii, it) in self.items.iter().enumerate() {
-            if it.top && Some(ii) != self.selected {
-                self.emit_item(&mut dl, it, palette, text);
-            }
-        }
-        if let Some(si) = self.selected {
-            let it = self.items[si];
+        self.emit_rails(&mut dl, palette, clock);
+        for &ii in &self.paint_order {
+            let it = self.items[ii];
             self.emit_item(&mut dl, &it, palette, text);
-            self.emit_selection(&mut dl, &it, palette);
+            if Some(ii) == self.selected {
+                self.emit_selection(&mut dl, &it, palette);
+            }
         }
         dl.pop_camera();
 
         // Now and the playhead: they pan, they never scroll.
         dl.push_camera(Follow::X);
         dl.rect(RoundedRect::new(
-            Rect::new(self.x(self.now) - 0.5, AXIS_PT, 1.0, h),
+            Rect::new(self.x(self.now) - 0.5, axis, 1.0, h),
             0.0,
             palette.ok.with_alpha(0.7),
         ));
         if let Some(t) = self.playhead {
             dl.rect(RoundedRect::new(
-                Rect::new(self.x(t) - 1.0, AXIS_PT, 2.0, h),
+                Rect::new(self.x(t) - 1.0, axis, 2.0, h),
                 0.0,
                 palette.accent,
             ));
@@ -485,42 +628,47 @@ impl Scene {
         dl.pop_clip();
 
         // The axis strip.
-        dl.push_clip(Rect::new(label_w, 0.0, (w - label_w).max(0.0), AXIS_PT));
-        dl.push_camera(Follow::X);
-        for t in &ticks {
-            let x = self.x(t.t);
-            dl.rect(RoundedRect::new(
-                Rect::new(x, AXIS_PT - 6.0, 1.0, 6.0),
-                0.0,
-                palette.muted,
-            ));
-            let run = TextRun::new(
-                t.label.clone(),
-                Point::new(x + 4.0, 8.0),
-                10.5,
-                palette.muted,
-            );
-            dl.text(if t.day {
-                run.weight(Weight::Semibold)
-            } else {
-                run
-            });
+        if chrome.axis {
+            dl.push_clip(Rect::new(label_w, 0.0, (w - label_w).max(0.0), axis));
+            dl.push_camera(Follow::X);
+            for t in &ticks {
+                let x = self.x(t.t);
+                dl.rect(RoundedRect::new(
+                    Rect::new(x, axis - 6.0, 1.0, 6.0),
+                    0.0,
+                    palette.muted,
+                ));
+                let run = TextRun::new(
+                    t.label.clone(),
+                    Point::new(x + 4.0, 8.0),
+                    10.5,
+                    palette.muted,
+                );
+                dl.text(if t.day {
+                    run.weight(Weight::Semibold)
+                } else {
+                    run
+                });
+            }
+            if let Some(t) = self.playhead {
+                dl.rect(
+                    RoundedRect::new(
+                        Rect::new(self.x(t) - 4.0, axis - 8.0, 8.0, 8.0),
+                        2.0,
+                        palette.accent,
+                    )
+                    .pinned(),
+                );
+            }
+            dl.pop_camera();
+            dl.pop_clip();
         }
-        if let Some(t) = self.playhead {
-            dl.rect(
-                RoundedRect::new(
-                    Rect::new(self.x(t) - 4.0, AXIS_PT - 8.0, 8.0, 8.0),
-                    2.0,
-                    palette.accent,
-                )
-                .pinned(),
-            );
-        }
-        dl.pop_camera();
-        dl.pop_clip();
 
+        if label_w <= 0.0 {
+            return dl;
+        }
         // The label column: it scrolls, it never pans.
-        dl.push_clip(Rect::new(0.0, AXIS_PT, label_w, (h - AXIS_PT).max(0.0)));
+        dl.push_clip(Rect::new(0.0, axis, label_w, (h - axis).max(0.0)));
         dl.push_camera(Follow::Y);
         for g in &self.layout.groups {
             dl.text(
@@ -534,6 +682,9 @@ impl Scene {
                 .max_width(label_w - 16.0),
             );
             for r in &self.layout.rows[g.rows.clone()] {
+                if r.label.is_empty() {
+                    continue;
+                }
                 let (glyph, x) = match r.tint {
                     Some(tint) => (Some(tint), 22.0),
                     None => (None, 14.0),
@@ -560,44 +711,77 @@ impl Scene {
         dl.pop_clip();
 
         // The zoom, in the corner.
-        dl.text(
-            TextRun::new(
-                span_label(view.span()),
-                Point::new(10.0, 8.0),
-                10.5,
-                palette.muted,
-            )
-            .max_width(label_w - 14.0),
-        );
+        if chrome.axis {
+            dl.text(
+                TextRun::new(
+                    clock.words.span(view.span()),
+                    Point::new(10.0, 8.0),
+                    10.5,
+                    palette.muted,
+                )
+                .max_width(label_w - 14.0),
+            );
+        }
         dl
+    }
+
+    /// The time after now as diagonal strokes over every lane, clipped by arithmetic to
+    /// `[now, the window's end] × [top, bottom]` in the x camera's world. Their phase is fixed
+    /// in time, so a rebuild inside a level redraws the same strokes.
+    fn emit_hatch(&self, dl: &mut DisplayList, color: Rgba, top: f32, bottom: f32) {
+        let x0 = self.x(self.now).max(self.x(self.semantic.from));
+        let x1 = self.x(self.semantic.to);
+        if x1 <= x0 || bottom <= top {
+            return;
+        }
+        let gap = f64::from(HATCH_GAP);
+        // Strokes run up and right: x + y = c, c on a grid fixed in absolute time.
+        let phase = (self.origin * self.scale).rem_euclid(gap) as f32;
+        let first = ((f64::from(x0 + top + phase)) / gap).floor() as i64;
+        let last = ((f64::from(x1 + bottom + phase)) / gap).ceil() as i64;
+        let mut path = Path::new();
+        for n in first..=last {
+            let c = n as f32 * HATCH_GAP - phase;
+            let lo = x0.max(c - bottom);
+            let hi = x1.min(c - top);
+            if lo < hi {
+                path.move_to(Point::new(lo, c - lo))
+                    .line_to(Point::new(hi, c - hi));
+            }
+        }
+        if !path.is_empty() {
+            dl.path(PathOp::stroke(Arc::new(path), Stroke::new(HATCH_W, color)));
+        }
     }
 
     fn emit_bands(&self, dl: &mut DisplayList, p: &Palette) {
         for b in &self.bands {
-            let Some(g) = self.layout.groups.iter().find(|g| g.key == b.group) else {
+            let Some((top, gh)) = self.band_span(b) else {
                 continue;
             };
             let x0 = self.x(b.from);
             let x1 = self.x(b.to.unwrap_or(self.now));
             let r = Rect::new(
                 x0,
-                g.top + BAND_INSET,
+                top + BAND_INSET,
                 (x1 - x0).max(1.0),
-                g.h - 2.0 * BAND_INSET,
+                gh - 2.0 * BAND_INSET,
             );
             dl.rect(
                 RoundedRect::new(r, 3.0, b.color.with_alpha(0.14))
                     .border(1.0, b.color.with_alpha(0.45)),
             );
-            dl.text(
-                TextRun::new(
-                    b.label.to_string(),
-                    Point::new(x0 + 4.0, g.top + BAND_INSET + 2.0),
-                    10.0,
-                    p.foreground,
-                )
-                .max_width((x1 - x0 - 8.0).max(0.0)),
-            );
+            if !b.label.is_empty() {
+                dl.text(
+                    TextRun::new(
+                        b.label.to_string(),
+                        Point::new(x0 + 4.0, top + BAND_INSET + 2.0),
+                        10.0,
+                        p.foreground,
+                    )
+                    .max_width((x1 - x0 - 8.0).max(0.0)),
+                );
+            }
         }
     }
 
@@ -636,7 +820,7 @@ impl Scene {
         }
     }
 
-    fn emit_rails(&self, dl: &mut DisplayList, p: &Palette, _text: &mut TextSystem) {
+    fn emit_rails(&self, dl: &mut DisplayList, p: &Palette, clock: &Clock) {
         for r in &self.rails {
             let Some(&ri) = self.layout.by_key.get(&r.row) else {
                 continue;
@@ -662,7 +846,7 @@ impl Scene {
                 .members
                 .iter()
                 .filter_map(|&m| self.schedules.get(m))
-                .map(|s| format!("{} · {}", s.name, crate::density::every_label(s.period)))
+                .map(|s| format!("{} · {}", s.name, clock.words.every(s.period)))
                 .collect();
             dl.text(TextRun::new(
                 names.join(", "),
@@ -789,6 +973,15 @@ impl Scene {
                 .align(Align::Center),
             );
         }
+        if let Some(beside) = &paint.beside {
+            let size = BESIDE_SIZE * k;
+            dl.text(TextRun::new(
+                beside.to_string(),
+                Point::new(x + w / 2.0 + BESIDE_GAP * k, it.y - size * 0.625),
+                size,
+                p.foreground,
+            ));
+        }
     }
 
     fn emit_span(
@@ -796,7 +989,7 @@ impl Scene {
         dl: &mut DisplayList,
         it: &Item,
         m: &Mark,
-        span: &crate::mark::Span,
+        span: &Span,
         p: &Palette,
         text: &mut TextSystem,
     ) {
@@ -825,6 +1018,10 @@ impl Scene {
         let Some(x0) = run_x else {
             return;
         };
+        if !span.stretches.is_empty() {
+            self.emit_stretches(dl, it, m, span, x0, p, text);
+            return;
+        }
         let end = span.end.unwrap_or(self.now);
         let x1 = self.x(end).max(x0 + paint.w * k);
         let bar = Rect::new(x0, it.y - it.hh, x1 - x0, thick);
@@ -856,6 +1053,96 @@ impl Scene {
                 .border(2.0 * k, live)
                 .pinned(),
             );
+        }
+    }
+
+    /// A bar made of consecutive coloured stretches from `x0`: each stretch its colour, a gap
+    /// between two a thin lead line, the bar's two ends (and a run's ends at a gap) rounded, an
+    /// end cap last; its label inside where it fits, in whichever of the palette's ink and
+    /// ground reads on the first stretch.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_stretches(
+        &self,
+        dl: &mut DisplayList,
+        it: &Item,
+        m: &Mark,
+        span: &Span,
+        x0: f32,
+        p: &Palette,
+        text: &mut TextSystem,
+    ) {
+        let k = self.layout.k;
+        let thick = it.hh * 2.0;
+        let top = it.y - it.hh;
+        let radius = (m.paint.r * k).min(it.hh);
+        let n = span.stretches.len();
+        let open = span.end.is_none();
+        let to = |i: usize| {
+            let s = &span.stretches[i];
+            if open && i + 1 == n {
+                self.now.max(s.from)
+            } else {
+                s.to
+            }
+        };
+        let min_end = x0 + m.paint.w * k;
+        let lead = |dl: &mut DisplayList, a: f32, b: f32| {
+            if b > a {
+                dl.rect(RoundedRect::new(
+                    Rect::new(a, it.y - 0.75, b - a, 1.5),
+                    0.0,
+                    span.lead,
+                ));
+            }
+        };
+        let mut last: Option<(Ms, f32)> = None;
+        for (i, s) in span.stretches.iter().enumerate() {
+            let a = self.x(s.from);
+            let mut b = self.x(to(i));
+            if i + 1 == n && span.cap.is_none() {
+                b = b.max(min_end);
+            }
+            let joined_left = last.is_some_and(|(t, _)| s.from <= t);
+            if let Some((_, end_x)) = last
+                && !joined_left
+            {
+                lead(dl, end_x, a);
+            }
+            let joined_right = i + 1 < n && span.stretches[i + 1].from <= to(i);
+            segment(
+                dl,
+                Rect::new(a, top, (b - a).max(0.0), thick),
+                s.color,
+                radius,
+                !joined_left,
+                !joined_right,
+            );
+            last = Some((to(i), b));
+        }
+        let Some((last_t, mut end_x)) = last else {
+            return;
+        };
+        if let Some(cap) = span.cap {
+            let xc = self.x(cap.at).max(min_end);
+            let w = CAP_W * k;
+            let alone = cap.at > last_t;
+            if alone {
+                lead(dl, end_x, xc - w);
+            }
+            segment(
+                dl,
+                Rect::new(xc - w, top, w, thick),
+                cap.color,
+                radius,
+                alone,
+                true,
+            );
+            end_x = end_x.max(xc);
+        }
+        if thick >= LABEL_MIN_H {
+            let ink = ink_on(span.stretches[0].color, p);
+            let bar = Rect::new(x0, top, end_x - x0, thick);
+            self.fit_label(dl, text, &span.text, bar, ink, thick);
         }
     }
 
@@ -923,4 +1210,41 @@ impl Scene {
 fn pill_width(count: u64) -> f32 {
     let digits = count.to_string().len() as f32;
     (digits * 5.2 + 8.0).max(PILL_H)
+}
+
+/// A stretch of a bar: rounded at the ends that are the bar's (or a run's) ends, square where it
+/// meets its neighbour.
+fn segment(dl: &mut DisplayList, r: Rect, color: Rgba, radius: f32, left: bool, right: bool) {
+    match (left, right) {
+        (true, true) => dl.rect(RoundedRect::new(r, radius, color)),
+        (false, false) => dl.rect(RoundedRect::new(r, 0.0, color)),
+        (true, false) => {
+            dl.rect(RoundedRect::new(r, radius, color));
+            let w = (r.w - radius).max(0.0);
+            dl.rect(RoundedRect::new(
+                Rect::new(r.max_x() - w, r.y, w, r.h),
+                0.0,
+                color,
+            ));
+        }
+        (false, true) => {
+            dl.rect(RoundedRect::new(r, radius, color));
+            dl.rect(RoundedRect::new(
+                Rect::new(r.x, r.y, (r.w - radius).max(0.0), r.h),
+                0.0,
+                color,
+            ));
+        }
+    }
+}
+
+/// Whichever of the palette's ink and ground reads better on `fill` (by relative luminance).
+pub fn ink_on(fill: Rgba, p: &Palette) -> Rgba {
+    let lum = |c: Rgba| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    let l = lum(fill);
+    if (lum(p.foreground) - l).abs() >= (lum(p.background) - l).abs() {
+        p.foreground
+    } else {
+        p.background
+    }
 }

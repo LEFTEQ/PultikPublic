@@ -16,8 +16,12 @@ struct PRMergeTab: View {
     let active: Bool
     var clearCommit: () -> Void = {}
     @Environment(ModuleRouter.self) private var router
+    /// False while the workbench is staged off screen (focus D23).
+    @Environment(\.bodyShown) private var onScreen
 
     @State private var preview: MergePreview?
+    /// The `loadKey` whose read ran to its end: `preview` and `counts` answer it.
+    @State private var loadedKey: String?
     @State private var failure: String?
     @State private var attempt = 0
     /// Each file's conflicts left and regions resolved, as the engine counts them.
@@ -51,9 +55,12 @@ struct PRMergeTab: View {
             HStack(spacing: 0) {
                 ZStack {
                     if let file = shownFile, let preview {
+                        // Staged off screen (focus D23), the canvas is handed no scroll
+                        // and no step: ↑/↓ and ⇥ re-draw the Merge tab on screen only.
                         MergeCanvas(file: file, fileID: "\(loadKey)|\(file.path)", labels: labels(preview),
                                     showsBase: router.mergeShowsBase, active: active,
-                                    scrollRequest: router.scrollRequest, stepRequest: router.mergeStep,
+                                    scrollRequest: onScreen ? router.scrollRequest : nil,
+                                    stepRequest: onScreen ? router.mergeStep : nil,
                                     onRegion: { _, why in reason = why },
                                     onWrap: { forward in carry(forward) })
                     } else if let preview, preview.files.isEmpty {
@@ -77,12 +84,17 @@ struct PRMergeTab: View {
             reasonLine
         }
         .background(CodePreferences.shared.themes.theme[.background].color)
-        .task(id: loadKey) { await load() }
+        // A merge is read for the PR on screen only: a staged workbench asks
+        // the mirror for nothing, and one that comes back keeps what it read.
+        .task(id: onScreen ? loadKey : nil) {
+            if onScreen, loadedKey != loadKey { await load() }
+        }
     }
 
     // MARK: - Loading
 
     private func load() async {
+        let key = loadKey
         failure = nil
         do {
             let loaded: MergePreview?
@@ -96,13 +108,19 @@ struct PRMergeTab: View {
             preview = loaded
             counts = [:]
             reason = nil
-            guard let loaded else { return }
+            guard let loaded else {
+                loadedKey = key
+                return
+            }
             let counted = await Self.count(loaded.files)
             try Task.checkCancellation()
             counts = counted
             // The first file with something to look at opens.
             selected = loaded.files.first { (counted[$0.path]?.conflicts ?? 0) > 0 }?.path
                 ?? loaded.files.first { (counted[$0.path]?.stops ?? 0) > 0 }?.path ?? loaded.files.first?.path
+            // Only a read that ran to its end is kept: one cut short by
+            // leaving the screen starts over when the workbench is back.
+            loadedKey = key
         } catch is CancellationError {
             return
         } catch {
@@ -179,12 +197,6 @@ struct PRMergeTab: View {
                     .buttonStyle(.glass).controlSize(.small)
             }
             Spacer(minLength: 6)
-            if commit == nil, total.conflicts > 0, let shell = SessionShell.installed {
-                Button("Resolve in \(shell.name)") {
-                    SessionShell.resolveMerge(repo: pr.ref.repo, number: pr.number, in: shell)
-                }
-                .buttonStyle(.glass).controlSize(.small)
-            }
             KbdHint("⇥")
             Text("next").font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
             KbdHint("⌥B")

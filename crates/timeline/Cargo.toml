@@ -1,6 +1,6 @@
 [package]
 name = "timeline"
-description = "The infinite, zoomable timeline (CI, Estate, Backups lenses) and the estate map, drawn on the canvas crates."
+description = "The infinite, zoomable timeline (CI, Estate, Backups and Agents lenses) and the estate map, drawn on the canvas crates."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

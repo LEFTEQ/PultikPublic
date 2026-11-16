@@ -25,9 +25,6 @@ struct Preferences: Codable {
     /// Legacy plaintext Sentry token: `StatusStore.sentryToken` moves it into
     /// the login keychain (`pultik-sentry`) and blanks it on first read.
     var sentryToken: String?
-    /// Legacy plaintext eve `evk_` token: `StatusStore.eveToken` moves it into
-    /// the login keychain (`pultik-eve`) and blanks it on first read.
-    var eveToken: String?
     /// Sentry project slugs polled for production issues.
     var sentryProjects: [String] = Preferences.defaultSentryProjects
 
@@ -52,28 +49,18 @@ struct Preferences: Codable {
     static let defaultHlidacURL = PultikProfile.exampleHlidacURL
 
     /// The other estate hosts, each nil = the profile's (example: the mesh
-    /// Prometheus and its Loki ruler, eve, the self-hosted Sentry) and "" =
+    /// Prometheus and its Loki ruler, the self-hosted Sentry) and "" =
     /// none: the lane that reads it sends nothing.
     var prometheusURL: String?
     var lokiURL: String?
-    var eveURL: String?
     var sentryURL: String?
     /// The apps shelf Prod's Releases section reads (example: downloads.example.invalid);
     /// "" = none, and the section hides.
     var shelfURL: String?
 
-    /// The devbox lane, each nil = the profile's. The forced-command ssh key
-    /// ("" = none: no ssh at all; a key that does not exist, or a relative
-    /// path, is none too); the `devbox` CLI ("" = search; set, it is the only
-    /// candidate, and a relative or missing one runs nothing); the boxes
-    /// polled while `devbox boxes --json` has never answered.
-    var devboxIdentityFile: String?
-    var devboxExecutable: String?
-    var devboxFallbackBoxes: [DevboxEndpoint]?
-
     /// toolkit's absolute path, the only candidate when set (relative or
-    /// missing runs nothing). Nil = each call site's old search
-    /// (`ToolkitClient.path`, `ToolkitClient.focusCommand`).
+    /// missing runs nothing). Nil = Stop…'s install-path search
+    /// (`ExecutableSearch.toolkit`).
     var toolkitPath: String?
     /// Fixed main-list order: repos whose slug contains one of these names
     /// (case-insensitive) come first, in exactly this sequence; everything
@@ -84,8 +71,8 @@ struct Preferences: Codable {
         "ExampleApp", "assistant-service", "vitrinka", "Booking", "example-platform", "example-deployik",
     ]
 
-    /// Eve alert lanes shown in the panel — the ledger stores every lane,
-    /// pultik filters client-side. Default: the attention lanes.
+    /// Retired 2026-11-16 with eve's alerts (`docs/specs/2026-11-16-pultik-focus-decisions.md`);
+    /// decoded and re-encoded like `homeStyle`, never read.
     var visibleAlertLanes: [String] = Preferences.defaultAlertLanes
 
     static let defaultAlertLanes = ["incidents", "exampleapp_prod_alerts", "priority"]
@@ -109,14 +96,6 @@ struct Preferences: Codable {
     /// opens on Home instead of the last place (D1). Nil = 15.
     var homeAfterMinutes: Int?
 
-    /// Every lane eve routes to a Telegram forum topic today — the Settings
-    /// toggle list. An unknown lane in the feed still shows once toggled in
-    /// via settings.json; this is UI vocabulary, not a filter whitelist.
-    static let knownAlertLanes = [
-        "incidents", "priority", "exampleapp_prod_alerts", "reviews", "leads",
-        "inbox", "qa", "system", "general",
-    ]
-
     /// Fan curve currently driving the fans — a `FanCurve` preset id, or nil
     /// for OS-managed. The helper owns the running curve; this is only so a
     /// relaunch knows what to show as selected.
@@ -130,13 +109,12 @@ struct Preferences: Codable {
     /// describes how twitchy the user wants the fans, not the shape of a ramp.
     var fanCurveSmoothing: Double = TempSmoother.defaultSeconds
 
-    // Devbox slot metrics come straight from `devbox hub --json` since the
-    // hub verb landed — the old cadvisor instance/name-pattern settings
-    // (devboxInstance/devboxNamePattern) are gone; stale keys in
-    // settings.json are simply ignored.
+    // Retired keys (the devbox lane's `devboxIdentityFile`, `devboxExecutable`,
+    // `devboxFallbackBoxes`; Work's `vitrinkaWorkspace` and `todoProject`,
+    // 2026-11-16) are simply ignored on decode.
 
-    /// Expiry radar watchlist — things with an expiry date that should become
-    /// scheduled todos automatically. `tls` items are probed (cert notAfter);
+    /// Expiry radar watchlist — things with an expiry date that Now raises
+    /// inside their lead window. `tls` items are probed (cert notAfter);
     /// `manual` items carry the date you typed (PATs, domain renewals).
     var expiryWatch: [ExpiryWatchItem] = []
 
@@ -158,11 +136,6 @@ struct Preferences: Codable {
     /// in vitrinka. Still decoded and re-saved so an old settings.json round-
     /// trips untouched, but nothing reads it.
     var vaultPath: String?
-    /// The vitrinka project slug the panel's own writers file into — a
-    /// promoted note, an expiry-radar reminder. Nil = unset; those writers
-    /// then refuse with a pointer at Settings ▸ General. Sessions never use
-    /// it: `vitrinka me todo add` files into the checkout's project.
-    var todoProject: String?
     /// Code editor for the palette path card (`CodeEditor.known` id: cursor,
     /// vscode, zed). Nil = first installed. Settings ▸ General or `/editor`.
     var codeEditor: String?
@@ -208,7 +181,6 @@ struct Preferences: Codable {
     /// Retired 2026-09-23 with the split handle (the left column is fixed
     /// widgets now); decoded and re-encoded like `leftRailTab`, never read.
     var leftRailSplit: Double?
-    var vitrinkaWorkspace: String?
 
     /// Workspace layouts for the Hammerspoon `.organize` engine
     /// (hammerspoon/organize.lua; docs/specs/2026-09-01-organize-workspaces-
@@ -495,7 +467,6 @@ struct Preferences: Codable {
         loginItemConfiguredFor = try container.decodeIfPresent(String.self, forKey: .loginItemConfiguredFor)
         loginItemOnFirstRun = try container.decodeIfPresent(Bool.self, forKey: .loginItemOnFirstRun)
         sentryToken = try container.decodeIfPresent(String.self, forKey: .sentryToken)
-        eveToken = try container.decodeIfPresent(String.self, forKey: .eveToken)
         sentryProjects = try container.decodeIfPresent([String].self, forKey: .sentryProjects)
             ?? Preferences.defaultSentryProjects(for: defaults)
         hotkey = try container.decodeIfPresent(String.self, forKey: .hotkey) ?? defaults.hotkey
@@ -511,13 +482,8 @@ struct Preferences: Codable {
         hlidacURL = try container.decodeIfPresent(String.self, forKey: .hlidacURL)
         prometheusURL = try container.decodeIfPresent(String.self, forKey: .prometheusURL)
         lokiURL = try container.decodeIfPresent(String.self, forKey: .lokiURL)
-        eveURL = try container.decodeIfPresent(String.self, forKey: .eveURL)
         sentryURL = try container.decodeIfPresent(String.self, forKey: .sentryURL)
         shelfURL = try container.decodeIfPresent(String.self, forKey: .shelfURL)
-        devboxIdentityFile = try container.decodeIfPresent(String.self, forKey: .devboxIdentityFile)
-        devboxExecutable = try container.decodeIfPresent(String.self, forKey: .devboxExecutable)
-        devboxFallbackBoxes = try container.decodeIfPresent(
-            LossyArray<DevboxEndpoint>.self, forKey: .devboxFallbackBoxes)?.elements
         toolkitPath = try container.decodeIfPresent(String.self, forKey: .toolkitPath)
         repoOrder = try container.decodeIfPresent([String].self, forKey: .repoOrder)
             ?? Preferences.defaultRepoOrder(for: defaults)
@@ -536,12 +502,10 @@ struct Preferences: Codable {
         focusHoldsNotifications = try container.decodeIfPresent(
             Bool.self, forKey: .focusHoldsNotifications) ?? false
         vaultPath = try container.decodeIfPresent(String.self, forKey: .vaultPath)
-        todoProject = try container.decodeIfPresent(String.self, forKey: .todoProject)
         codeEditor = try container.decodeIfPresent(String.self, forKey: .codeEditor)
         collapsedRails = try container.decodeIfPresent([String].self, forKey: .collapsedRails) ?? []
         leftRailTab = try container.decodeIfPresent(String.self, forKey: .leftRailTab)
         leftRailSplit = try container.decodeIfPresent(Double.self, forKey: .leftRailSplit)
-        vitrinkaWorkspace = try container.decodeIfPresent(String.self, forKey: .vitrinkaWorkspace)
         workspaces = try container.decodeIfPresent(WorkspacesConfig.self, forKey: .workspaces)
         displayPresets = try container.decodeIfPresent([DisplayPreset].self, forKey: .displayPresets)
         externalBrightnessOffset = try container.decodeIfPresent(Int.self, forKey: .externalBrightnessOffset)
@@ -619,15 +583,6 @@ struct Preferences: Codable {
         return RuntimeConfig.host(configured, default: "")
     }
 
-    /// The boxes polled until discovery answers. Every value reaches ssh's
-    /// argv, so a box with an unsafe name, alias, host or port is dropped.
-    var resolvedDevboxFallbackBoxes: [DevboxEndpoint] {
-        (devboxFallbackBoxes ?? resolvedProfile.devboxFallbackBoxes).filter {
-            DevboxDiscovery.isSafeWord($0.name) && DevboxDiscovery.isSafeWord($0.sshAlias)
-                && DevboxDiscovery.isSafeHost($0.host) && (1 ... 65535).contains($0.port)
-        }
-    }
-
     /// What the clients read (`RuntimeConfig.current`).
     var runtimeConfig: RuntimeConfig {
         let defaults = resolvedProfile
@@ -635,12 +590,8 @@ struct Preferences: Codable {
             profile: defaults,
             prometheus: RuntimeConfig.host(prometheusURL, default: defaults.prometheusURL),
             loki: RuntimeConfig.host(lokiURL, default: defaults.lokiURL),
-            eve: RuntimeConfig.host(eveURL, default: defaults.eveURL),
             sentry: RuntimeConfig.host(sentryURL, default: defaults.sentryURL),
             shelf: RuntimeConfig.host(shelfURL, default: defaults.shelfURL),
-            devboxIdentityFile: ExecutableSearch.expand(devboxIdentityFile ?? defaults.devboxIdentityFile),
-            devboxExecutable: ExecutableSearch.expand(devboxExecutable),
-            devboxSearchesPath: defaults.devboxSearchesPath,
             toolkitPath: ExecutableSearch.expand(toolkitPath)
         )
     }

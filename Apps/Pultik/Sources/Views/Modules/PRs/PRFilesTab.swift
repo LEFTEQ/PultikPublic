@@ -19,6 +19,8 @@ struct PRFilesTab: View {
     var scope: (title: String, clear: () -> Void)?
     let retry: () -> Void
     @Environment(ModuleRouter.self) private var router
+    /// False while the workbench is staged off screen (focus D23).
+    @Environment(\.bodyShown) private var onScreen
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Files the operator folded or unfolded against their default.
     @State private var toggledFiles: Set<String> = []
@@ -70,18 +72,33 @@ struct PRFilesTab: View {
             + toggledFiles.sorted().joined(separator: "\u{1F}")
     }
 
+    /// The render cache's document for this diff, while nothing here departs
+    /// from what it was built for: the exact diff, whole, no fold toggled.
+    private var preparedDocument: DiffDocument? {
+        guard scope == nil, !stale, toggledFiles.isEmpty, let changes, changes == files else { return nil }
+        return PRRenderCache.shared.document(scope: "\(pr.ref.key)@\(pr.baseSHA)...\(pr.headSHA)")
+    }
+
     var body: some View {
         // A verb landing re-reads the activity: the marks follow it.
         _ = store.prVerbRevision[pr.ref]
         let pending = store.cachedPRActivity(pr.ref)?.pendingReview
+        // Until this tab's own build lands, the document the render cache
+        // laid out for exactly this diff at its default fold (instant PR
+        // open): the first frame of Files changed is the diff.
+        let prepared = document == nil ? preparedDocument : nil
+        let shown = document ?? prepared
+        let shownID = prepared == nil ? documentID : documentKey
         return VStack(alignment: .leading, spacing: 0) {
             statusLine
             HStack(spacing: 0) {
                 ZStack(alignment: .bottom) {
-                    if let document {
-                        CodeCanvas(document: document, documentID: documentID, wraps: CodePreferences.shared.wraps,
+                    if let document = shown {
+                        // Staged off screen (focus D23), the canvas is handed no scroll
+                        // and no ring: ↑/↓ and ⇥ re-draw the Files tab on screen only.
+                        CodeCanvas(document: document, documentID: shownID, wraps: CodePreferences.shared.wraps,
                                    split: CodePreferences.shared.split, active: active,
-                                   focusedFile: focusedFile(document), scrollRequest: router.scrollRequest,
+                                   focusedFile: focusedFile(document), scrollRequest: onScreen ? router.scrollRequest : nil,
                                    blob: { [store, repo = pr.ref.repo] sha in try await store.blobText(repo: repo, sha: sha) },
                                    reveal: reveal, marks: marks(document, pending: pending),
                                    anchor: composer.map { ($0.file, $0.lines) },
@@ -90,7 +107,7 @@ struct PRFilesTab: View {
                         SkeletonBars(widths: [0.5, 0.7, 0.4]).padding(14)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
-                    if let document, composer != nil {
+                    if let document = shown, composer != nil {
                         composerCard(document, pending: pending?.comments.count ?? 0)
                             .transition(Theme.Motion.toast(reduceMotion))
                     } else if let peek {
@@ -111,16 +128,27 @@ struct PRFilesTab: View {
         .background(CodePreferences.shared.themes.theme[.background].color)
         .onChange(of: composer != nil, initial: true) { _, open in if active { router.setComposing(open) } }
         .onChange(of: active) { _, active in router.setComposing(active && composer != nil) }
-        .onChange(of: router.composerCommand) { _, command in
-            guard active, composer != nil, let command else { return }
+        // The router's key requests are heard on screen only (`Heard`): none
+        // re-runs the Files tab of a staged workbench.
+        .onChange(of: Heard(onScreen, router.composerCommand)) { old, heard in
+            guard active, composer != nil, let command = heard.taken(after: old) else { return }
             switch command.action {
             case .submit: submitComment()
             case .close: withAnimation(Theme.Motion.pop(reduceMotion)) { composer = nil }
             }
         }
         .onDisappear { if active { router.setComposing(false) } }
-        .onChange(of: router.codeRequest) { _, request in
-            guard active, let request else { return }
+        // A workbench that leaves the screen stays built: its draft and peek
+        // close, as they did when leaving destroyed it, so none waits behind
+        // the list holding the composer's keys for the PR that comes back.
+        .onChange(of: onScreen) { _, now in
+            if !now {
+                composer = nil
+                peek = nil
+            }
+        }
+        .onChange(of: Heard(onScreen, router.codeRequest)) { old, heard in
+            guard active, let request = heard.taken(after: old) else { return }
             switch request.kind {
             case .search:
                 withAnimation(Theme.Motion.swap(reduceMotion)) {
@@ -145,8 +173,8 @@ struct PRFilesTab: View {
             document = changes == nil ? nil : built
             documentID = key
         }
-        .onChange(of: router.activated) { _, target in
-            guard active, let target, target.hasPrefix("file:") else { return }
+        .onChange(of: Heard(onScreen, router.activated)) { old, heard in
+            guard active, let target = heard.taken(after: old), target.hasPrefix("file:") else { return }
             toggledFiles.formSymmetricDifference([String(target.dropFirst(5))])
             router.consumeActivation()
         }
@@ -389,7 +417,7 @@ struct PRFilesTab: View {
     }
 
     private func focusedFile(_ document: DiffDocument) -> Int? {
-        guard let focus = router.focus, focus.hasPrefix("file:") else { return nil }
+        guard onScreen, let focus = router.focus, focus.hasPrefix("file:") else { return nil }
         let path = String(focus.dropFirst(5))
         return document.files.firstIndex { $0.path == path }
     }

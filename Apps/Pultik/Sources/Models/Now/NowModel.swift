@@ -77,7 +77,7 @@ enum NowOnset: Codable, Hashable, Sendable {
     }
 }
 
-/// What a need is — the unit D15 folds by ("+3 sessions waiting").
+/// What a need is — the unit D15 folds by ("+3 stale PRs").
 enum NowKind: String, CaseIterable, Codable, Sendable {
     /// A Hlídač deployment verdict or failing check.
     case deployment
@@ -85,18 +85,10 @@ enum NowKind: String, CaseIterable, Codable, Sendable {
     case monitoringBlind
     case sentryIssue
     case firingAlert
-    case eveNotification
-    case eveApproval
-    case sessionWaiting
     /// A failing check or run on the operator's own PR.
     case failedCheck
     case reviewRequested
     case stalePR
-    /// A ripe vitrinka todo — reminder, recurring schedule, lead window.
-    case reminder
-    /// A vitrinka task past its due date (the Work feed).
-    case overdueTask
-    case staleWorkspace
     case macFinding
     case expiry
 }
@@ -129,8 +121,8 @@ struct NowVerb: Codable, Hashable, Sendable {
     static func open(_ title: String) -> NowVerb { NowVerb(title: title, shortcut: "↵") }
 }
 
-/// Who waits, inside the waiting-on-you lane only: an agent or eve request
-/// blocked on you outranks your own failed CI, which outranks a review
+/// Who waits, inside the waiting-on-you lane only: a request blocked on
+/// you outranks your own failed CI, which outranks a review
 /// someone asked for (contract assumption, data.md's order).
 enum NowWaiterRank: String, CaseIterable, Codable, Comparable, Sendable {
     case blockedRequest, ownFailure, reviewRequest, other
@@ -274,16 +266,7 @@ enum NowCoverage: String, Codable, Sendable {
 
 /// The adapter a read came from.
 enum NowFeed: String, Codable, Sendable {
-    case hlidacBlindness, hlidacSentry, estateAlerts, eveNotifications, githubStalePRs,
-         vitrinkaTodos, devboxStale, macHealth, expiryRadar, fleetSessions, eveApprovals
-
-    /// How far back the feed looks, by onset: a need older than this left
-    /// its view without resolving (eve's notifications past Now's window),
-    /// so it leaves the screen — on a read, a summon or a relaunch —
-    /// unhandled. Nil = no horizon.
-    var horizon: TimeInterval? {
-        self == .eveNotifications ? NowWindow.span : nil
-    }
+    case hlidacBlindness, hlidacSentry, estateAlerts, githubStalePRs, macHealth, expiryRadar
 }
 
 /// Whose view a read is. `identity` carries the origin plus the account,
@@ -304,7 +287,7 @@ struct NowRead: Equatable, Sendable {
     let coverage: NowCoverage
     let needs: [NowNeed]
     /// Terminal instants the source reported for needs it no longer lists
-    /// (an eve `action.result`, a GitHub completion): the Handled section
+    /// (a GitHub completion): the Handled section
     /// prefers them to the poll that saw the need gone.
     var finished: [String: Date] = [:]
 }

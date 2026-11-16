@@ -41,7 +41,7 @@ final class NowStore {
         let ledger = ObservationLedger.load(from: directory)
         var seeded: [NowSource: [NowNeed]] = [:]
         for source in Set(ledger.entries.values.map(\.source)) {
-            let open = ledger.open(source, now: now)
+            let open = ledger.open(source)
             if !open.isEmpty { seeded[source] = open }
         }
         self.directory = directory
@@ -55,7 +55,7 @@ final class NowStore {
 
     /// One adapter pass, recorded by the lane that read it. A source shows
     /// what the ledger still holds open for it, so a partial read keeps the
-    /// needs it could not see — unless they began before its horizon.
+    /// needs it could not see.
     func record(_ read: NowRead, now: Date = Date()) {
         _ = ledger.record(read, now: now)
         // One identity per feed, on screen and on disk: another account's
@@ -66,19 +66,12 @@ final class NowStore {
             restored.remove(source)
         }
         if read.coverage != .failed {
-            needs[read.source] = ledger.open(read.source, now: now)
+            needs[read.source] = ledger.open(read.source)
             restored.remove(read.source)
             awaitingFirstRead = false
         }
         rebuild(now: now)
         scheduleSave()
-    }
-
-    /// What the ledger still holds open for `source` — for an adapter that
-    /// must not let a read clear a need it could not see (the fleet's
-    /// silently hidden rows).
-    func open(_ source: NowSource, now: Date = Date()) -> [NowNeed] {
-        ledger.open(source, now: now)
     }
 
     /// A source switched off — its section hidden, Hlídač unset, nothing
@@ -101,7 +94,7 @@ final class NowStore {
     func refresh(now: Date = Date()) {
         ledger.evict(now: now)
         for source in restored {
-            let open = ledger.open(source, now: now)
+            let open = ledger.open(source)
             needs[source] = open.isEmpty ? nil : open
         }
         restored = restored.filter { needs[$0] != nil }
@@ -110,7 +103,9 @@ final class NowStore {
 
     private func rebuild(now: Date) {
         let next = NowQueue.build(needs: needs.values.flatMap { $0 }, now: now)
-        if next != queue { queue = next }
+        // Compared without `now`, which differs on every build: comparing it
+        // republished the queue, and re-rendered the panel, on every record.
+        if next.incidents != queue.incidents || next.rows != queue.rows || next.lanes != queue.lanes { queue = next }
         let cleared = ledger.handled(now: now)
         if cleared != handled { handled = cleared }
         let asOf = ledger.entries.values

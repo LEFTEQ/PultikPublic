@@ -45,9 +45,8 @@ struct KeyContext {
     var completion = false
     /// `.notes` with text: ⌘↵ saves it even when it matches a note.
     var notesDraft = false
-    /// The todos tab or a project page replaces the list.
+    /// A project page replaces the list.
     var page = false
-    var eve = false
     var noteEditing = false
     var noteExpanded = false
     /// The detail's ⇥ targets on its top layer, and the one focused (D3).
@@ -88,13 +87,13 @@ struct KeyContext {
 }
 
 /// One peel of Esc (copilot shell layered Esc): note edit → expanded note →
-/// eve → the detail's focus ring → the top card (stay in Pultík D3) → the
+/// the detail's focus ring → the top card (stay in Pultík D3) → the
 /// entered workbench (PR workbench D5) → the entered canvas (vt-7727 D5) →
 /// the bulk confirm → the marks and the bulk pane (bulk actions D1) → the
 /// field's text (completion, path card, filter) → detail → selection → page
 /// → module → Home → close. It never closes the panel while a layer remains.
 enum EscStep: String, Equatable {
-    case cancelNoteEdit, closeComposer, blurText, foldNote, dismissEve, clearFocus, popCard, leaveDetail, leaveCanvas,
+    case cancelNoteEdit, closeComposer, blurText, foldNote, clearFocus, popCard, leaveDetail, leaveCanvas,
          cancelConfirm, clearMarks, clearText, closeDetail, clearSelection, closePage, leaveModule, close
 }
 
@@ -140,7 +139,7 @@ enum KeyIntent: Equatable {
     /// ↵ (or its ⌘/⌥/⇧ chord) on the path card.
     case runPathVerb
     case cyclePathVerb(Int)
-    /// ⇥ on a global, PRs or Sessions row: resolved ↔ unresolved.
+    /// ⇥ on a global or PRs row: resolved ↔ unresolved.
     case triage(String)
     /// ⇥ completes the first slash verb or mode.
     case complete
@@ -276,7 +275,7 @@ enum KeyboardCoordinator {
             // With text (or a picker, path card or page up) they stay the field's,
             // and so does ⌥←/→ outside an entered canvas.
             guard context.fieldFocused, context.text.isEmpty, !stroke.command, !stroke.shift, !stroke.option,
-                  !context.pathCard, !context.completion, !context.page, !context.eve, !context.noteEditing
+                  !context.pathCard, !context.completion, !context.page, !context.noteEditing
             else { return nil }
             return .module((context.module ?? .home).neighbour(stroke.key == .right ? 1 : -1, in: context.order))
         case .down where context.card != nil:
@@ -354,7 +353,7 @@ enum KeyboardCoordinator {
     /// Modules whose rows ⇥ triages (`ResolvedStore`: dimmed now, hidden on
     /// the next summon) — the lists that hide resolved ids, as before.
     static func triages(_ module: PanelModule) -> Bool {
-        module == .prs || module == .sessions
+        module == .prs
     }
 
     /// An entered canvas's keys (vt-7727 D5, D11): ←/→ step a timeline's
@@ -400,7 +399,6 @@ enum KeyboardCoordinator {
         // Another field (the tree's filter) gives the keys back to the search.
         if context.textViewFocused { return .blurText }
         if context.noteExpanded { return .foldNote }
-        if context.eve { return .dismissEve }
         if context.focus != nil { return .clearFocus }
         if context.card != nil { return .popCard }
         if context.entered { return .leaveDetail }

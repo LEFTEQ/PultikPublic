@@ -7,7 +7,9 @@ One shaping/cache/atlas owner for `canvas-gpu`.
 - `wasm32-unknown-unknown` uses browser Canvas2D to measure and rasterize text
   into the existing alpha atlas. No font assets or second GPU stack are bundled.
   Construct `TextSystem` on the browser main thread, after required web fonts
-  have loaded. Browser font selection and rasterization are platform-dependent.
+  have loaded. UI text is `sans-serif` until `TextSystem::set_ui_family` names the
+  page's own family list; call it again when web fonts finish loading. Browser
+  font selection and rasterization are platform-dependent.
   The text canvas requests frequent CPU readback and keeps a grow-only backing
   store, clearing and reading only each run's ink rectangle.
 

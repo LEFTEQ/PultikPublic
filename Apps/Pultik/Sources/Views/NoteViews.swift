@@ -31,7 +31,6 @@ struct NoteRow: View {
     var onRemove: (() -> Void)?
     var onCopy: (() -> Void)?
     var onEdit: (() -> Void)?
-    var onPromote: (() -> Void)?
 
     @State private var hovering = false
 
@@ -75,7 +74,6 @@ struct NoteRow: View {
         .accessibilityActions {
             if let onCopy { Button("Copy note") { onCopy() } }
             if let onEdit { Button("Edit note") { onEdit() } }
-            if let onPromote { Button("Promote to a todo") { onPromote() } }
             if let onRemove { Button("Remove note") { onRemove() } }
         }
     }
@@ -130,9 +128,6 @@ struct NoteRow: View {
         }
         if let onEdit {
             NoteAction(systemImage: "pencil", help: "Edit note", action: onEdit)
-        }
-        if let onPromote {
-            NoteAction(systemImage: "arrow.right.circle", help: "Promote to a todo", action: onPromote)
         }
         if let onRemove {
             NoteAction(systemImage: "xmark.circle.fill", help: "Remove note",
@@ -244,7 +239,7 @@ struct NoteDraftRow: View {
 
 /// Every note, full width, filterable. The rail is a glance capped at five;
 /// this is where the rest live and where the verbs that need room happen —
-/// edit, copy, promote to a todo, remove.
+/// edit, copy, remove.
 struct NotesPageView: View {
     let store: NoteStore
     /// Pre-filtered by the panel so rows and ↑/↓ stay in step.
@@ -264,7 +259,6 @@ struct NotesPageView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
-    @State private var promoteNotice: String?
     @FocusState private var editorFocused: Bool
 
     var body: some View {
@@ -272,13 +266,6 @@ struct NotesPageView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     header
-                    if let promoteNotice {
-                        Text(promoteNotice)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                    }
                     if let newNote {
                         NoteDraftRow(
                             text: newNote,
@@ -308,14 +295,12 @@ struct NotesPageView: View {
                                 onToggle: { onToggle(note) },
                                 onRemove: { store.remove(id: note.id) },
                                 onCopy: { copy(note) },
-                                onEdit: { beginEditing(note) },
-                                onPromote: { promote(note) }
+                                onEdit: { beginEditing(note) }
                             )
                             .id("note:\(note.id)")
                             .contextMenu {
                                 Button("Edit") { beginEditing(note) }
                                 Button("Copy") { copy(note) }
-                                Button("Promote to todo") { promote(note) }
                                 Divider()
                                 Button("Remove", role: .destructive) { store.remove(id: note.id) }
                             }
@@ -404,99 +389,5 @@ struct NotesPageView: View {
     private func copy(_ note: SavedNote) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(note.text, forType: .string)
-    }
-
-    /// The escape hatch for a note that outgrew the envelope. Todos have
-    /// exactly one writer — `vitrinka me todo` — so this shells out rather than
-    /// re-deriving the engine's field contract here.
-    private func promote(_ note: SavedNote) {
-        promoteNotice = "promoting…"
-        Task {
-            switch await NotePromoter.promote(note, project: StatusStore.shared.todoProject) {
-            case .success(let notice):
-                // Remove only the exact text that was promoted — an edit that
-                // landed while the CLI ran is a newer draft, not ours to delete.
-                if let current = store.notes.first(where: { $0.id == note.id }),
-                   current.text == note.text {
-                    store.remove(id: note.id)
-                }
-                await StatusStore.shared.refreshIfStale(minimumInterval: 0)
-                promoteNotice = notice
-            case .failure(let message):
-                promoteNotice = "could not promote: \(message)"
-            }
-        }
-    }
-}
-
-// MARK: - Promote to a todo
-
-enum NotePromoter {
-    enum Outcome {
-        /// The notice to show: where the todo landed, or that it is queued.
-        case success(String)
-        case failure(String)
-    }
-
-    /// Runs the CLI off the main actor — `me todo add` goes over the mesh, and
-    /// the panel must not freeze for its duration.
-    static func promote(_ note: SavedNote, project: String?) async -> Outcome {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: promoteBlocking(note, project: project))
-            }
-        }
-    }
-
-    /// The first ~8 words become the title; the whole note is the body,
-    /// staged to a temp file and passed as `--body-file` — never argv, so a
-    /// pasted spec cannot trip ARG_MAX (the file goes away after the run).
-    /// `--json` gives back the CLI's envelope — the filed task's id in `data`,
-    /// or `data.queued` when vitrinka was unreachable and the write waits in
-    /// the CLI's outbox — and its failure detail, which then never reaches
-    /// stderr. The project is the configured one: a GUI app has no checkout
-    /// to derive it from.
-    private static func promoteBlocking(_ note: SavedNote, project: String?) -> Outcome {
-        guard VitrinkaCLI.path != nil else { return .failure(VitrinkaCLI.installHint) }
-        guard let project else { return .failure(VitrinkaCLI.projectHint) }
-        let title = note.oneLine.split(separator: " ").prefix(8).joined(separator: " ")
-        guard !title.isEmpty else { return .failure("note is empty") }
-
-        // Unique per invocation, not per note: two promotions of the same
-        // note in flight must not write and delete one another's file.
-        let bodyFile = FileManager.default.temporaryDirectory
-            .appending(path: "pultik-promote-\(UUID().uuidString).md")
-        do {
-            try note.text.write(to: bodyFile, atomically: true, encoding: .utf8)
-        } catch {
-            return .failure("could not stage the note: \(error.localizedDescription)")
-        }
-        defer { try? FileManager.default.removeItem(at: bodyFile) }
-        guard let output = VitrinkaCLI.run([
-            "me", "todo", "add", title,
-            "--project", project,
-            "--body-file", bodyFile.path,
-            "--trigger", "promoted from a pultik note",
-            "--json", "--no-input",
-        ]) else {
-            return .failure(VitrinkaCLI.installHint)
-        }
-        let envelope = try? JSONSerialization.jsonObject(with: Data(output.stdout.utf8)) as? [String: Any]
-        guard output.status == 0 else {
-            let detail = ((envelope?["diagnostics"] as? [[String: Any]])?.first?["detail"] as? String)
-                ?? output.trimmedError
-            return .failure(detail.isEmpty ? "vitrinka me todo add exited \(output.status)" : detail)
-        }
-        let data = envelope?["data"] as? [String: Any]
-        if let id = data?["id"] as? Int {
-            return .success("promoted to todo #\(id) — vitrinka me todo show \(id)")
-        }
-        if let queued = data?["queued"] as? [String: Any] {
-            let entry = queued["short"] as? String ?? "an outbox entry"
-            return .success("vitrinka unreachable — queued as \(entry), files on its next reachable call")
-        }
-        // Exit 0 with unparseable output: the todo exists — degrade to the
-        // title rather than claiming failure over a formatting skew.
-        return .success("promoted to todo “\(title)”")
     }
 }

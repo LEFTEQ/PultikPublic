@@ -65,89 +65,16 @@ final class IntegrationRegistry {
         all = [
             GitHubIntegration(store: store),
             SentryIntegration(store: store),
-            ProbeIntegration.eve(store: store),
-            ProbeIntegration.vitrinka(),
-            ProbeIntegration.devbox(),
             ProbeIntegration.metrics(),
-            EventKitIntegration(),
             ExpiryRadarIntegration(),
             FocusIntegration(),
         ]
     }
 }
 
-/// Shared helper: run the vitrinka CLI — the writer for todos (`me todo add`,
-/// `me schedule add`) when the panel itself needs to file one. Blocking — call
-/// from a background task.
-///
-/// The shim `vitrinka install` writes is preferred: the bun/npm launcher is
-/// a JavaScript file that needs a runtime on PATH, and a GUI app launched
-/// from Finder has almost no PATH. The runtime dirs are appended for the
-/// launcher case anyway — the same hedge, never the plan.
-enum VitrinkaCLI {
-    static let searchPaths = [
-        NSHomeDirectory() + "/.local/bin/vitrinka",
-        NSHomeDirectory() + "/.bun/bin/vitrinka",
-        "/opt/homebrew/bin/vitrinka",
-        "/usr/local/bin/vitrinka",
-    ]
-
-    static var path: String? {
-        searchPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    static let installHint =
-        "vitrinka CLI not found — bun add -g @vitrinka/cli, then vitrinka install"
-
-    static let projectHint =
-        "no todo project — set one in Settings ▸ General ▸ Todos"
-
-    struct Output: Sendable {
-        let status: Int32
-        let stdout: String
-        let stderr: String
-        var trimmedError: String { stderr.trimmingCharacters(in: .whitespacesAndNewlines) }
-    }
-
-    /// `run` off the main actor. Every caller on `@MainActor` must use this:
-    /// `run` blocks in `waitUntilExit()` and synchronous pipe reads, and a
-    /// write goes over the mesh to vitrinka — long enough to freeze the panel
-    /// and the status item if it runs inline.
-    static func runAsync(_ args: [String], stdin: String? = nil) async -> Output? {
-        await Task.detached(priority: .utility) { run(args, stdin: stdin) }.value
-    }
-
-    /// Runs `vitrinka <args>`, optionally piping stdin. Never throws for a
-    /// non-zero exit — the caller reads `status` and surfaces stderr.
-    static func run(_ args: [String], stdin: String? = nil) -> Output? {
-        guard let path else { return nil }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
-        var environment = ProcessInfo.processInfo.environment
-        let runtimeDirs = [NSHomeDirectory() + "/.bun/bin", "/opt/homebrew/bin", "/usr/local/bin"]
-        environment["PATH"] = (runtimeDirs + [environment["PATH"] ?? "/usr/bin:/bin"]).joined(separator: ":")
-        process.environment = environment
-        let outPipe = Pipe(), errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-        if let stdin {
-            let inPipe = Pipe()
-            process.standardInput = inPipe
-            inPipe.fileHandleForWriting.write(Data(stdin.utf8))
-            inPipe.fileHandleForWriting.closeFile()
-        }
-        do { try process.run() } catch { return Output(status: -1, stdout: "", stderr: "\(error)") }
-        let (outData, errData) = ProcessOutput.collect(process, stdout: outPipe, stderr: errPipe)
-        let out = String(data: outData, encoding: .utf8) ?? ""
-        let err = String(data: errData, encoding: .utf8) ?? ""
-        return Output(status: process.terminationStatus, stdout: out, stderr: err)
-    }
-}
-
 /// A credential an integration row can edit inline.
 ///
-/// Shared by every row that holds a secret (Sentry, eve) so the save rule is
+/// Shared by every row that holds a secret (Sentry) so the save rule is
 /// written once: ⏎, the Save button, blur, and closing Settings all persist.
 /// A token pasted and tabbed away from must not silently revert on next open.
 struct TokenSlot {

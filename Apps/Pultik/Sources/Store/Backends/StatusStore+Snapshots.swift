@@ -3,16 +3,10 @@ import Foundation
 /// Each backend's last answer on disk (copilot shell D8, `QueryRepository`):
 /// restored before the first poll so a cold start shows the last known state
 /// with its age, recorded after every successful answer. Keys carry the
-/// identity that fetched them — a credential digest, an origin, a box set —
+/// identity that fetched them — a credential digest, an origin, a host set —
 /// so one account's state is never shown under another. Prod restored from
 /// disk reads "as of HH:MM", never green, until Hlídač answers live.
 extension StatusStore {
-    struct EveState: Codable, Sendable {
-        var sessions: [EveSession]
-        var alerts: [EveAlert]
-        var approvals: [EveApproval]
-    }
-
     struct InfraState: Codable, Sendable {
         var servers: [ServerMetrics]
         var services: [ServiceStatus]
@@ -22,40 +16,12 @@ extension StatusStore {
         var throughputs: [String: CIThroughput]
     }
 
-    struct VitrinkaState: Codable, Sendable {
-        var workspaces: [VitrinkaWorkspaceSnapshot]
-        var todos: [TodoItem]
-        var ripe: [TodoItem]
-        /// Set by `VitrinkaClient.ripe()` after decoding, so `TodoItem`'s own
-        /// coding never carries them; `isRipe` reads `reason == "milestone"`.
-        var ripeReasons: [RipeReason]
-    }
-
-    /// The discovered boxes ride along: at launch discovery has not answered
-    /// yet, and the snapshots must land on the boxes they came from.
-    struct DevboxState: Codable, Sendable {
-        var boxes: [DevboxEndpoint]
-        var snapshots: [DevboxSnapshot]
-    }
-
-    struct RipeReason: Codable, Sendable {
-        let id: Int64
-        let reason: String?
-        let milestoneName: String?
-    }
-
     enum Snapshots {
         static let prod = QueryResource<HlidacDigest>(name: "hlidac.digest", staleAfter: 45)
         static let github = QueryResource<[RepoStatus]>(name: "github.repos", staleAfter: 180)
-        static let eve = QueryResource<EveState>(name: "eve.ledger", schema: 2, staleAfter: 180)
         static let infra = QueryResource<InfraState>(name: "infra.metrics", schema: 2, staleAfter: 180)
-        static let vitrinka = QueryResource<VitrinkaState>(name: "vitrinka.daily", staleAfter: 180)
-        static let devbox = QueryResource<DevboxState>(name: "devbox.estate", schema: 2, staleAfter: 180)
         /// One host's Semafor views, keyed by its base URL (vt-7727 D10).
         static let semafor = QueryResource<SemaforHostState>(name: "semafor.views", staleAfter: 180)
-        /// `toolkit catalog dashboard`, keyed by the binary that answered.
-        static let toolkit = QueryResource<ToolkitDashboard>(name: "toolkit.dashboard",
-                                                           staleAfter: ToolkitHeld.staleAfter)
         // Each host × lens's newest 24 h of timeline (`semafor.timeline.<lens>`,
         // keyed by the host's base URL, vt-7781 D10) is
         // `TimelinePages.snapshotResource`: it writes them, and restores one
@@ -73,15 +39,6 @@ extension StatusStore {
     /// so a pin change mid-flight can never file one set's answer under another.
     func githubSnapshotKey(identity: String, slugs: [String]) -> QueryKey {
         QueryKey(resource: Snapshots.github.name, identity: identity, scope: slugs.joined(separator: ","))
-    }
-
-    func eveSnapshotKey(settingsToken: String?) -> QueryKey {
-        let token = settingsToken ?? ""
-        // example's eve keeps the key it always had; any other host is part
-        // of the identity, so its answer never restores under another's.
-        let origin = Self.hostIdentity(RuntimeConfig.current.eve, shipped: PultikProfile.example.eveURL)
-        let seed = origin.map { "eve\u{0}\($0)\u{0}\(token)" } ?? "eve\u{0}\(token)"
-        return QueryKey(resource: Snapshots.eve.name, identity: QueryKey.digest(seed))
     }
 
     /// nil for the host example ships (its keys predate profiles and stay as
@@ -108,27 +65,6 @@ extension StatusStore {
                         scope: QueryKey.digest((servers + services).joined(separator: "\n")))
     }
 
-    func vitrinkaSnapshotKey() async -> QueryKey? {
-        guard let identity = await VitrinkaClient.shared.cacheIdentity() else { return nil }
-        return QueryKey(resource: Snapshots.vitrinka.name, identity: identity, scope: vitrinkaWorkspace)
-    }
-
-    /// One ssh identity reaches every box this Mac discovers, so the key and
-    /// the fallback boxes are the identity; the boxes are in the value.
-    /// example's (`~/.ssh/pultik_devbox`, box c) keeps its old "mesh", so a
-    /// changed estate never restores another's boxes.
-    var devboxSnapshotKey: QueryKey {
-        let identity = RuntimeConfig.current.devboxIdentityFile ?? ""
-        let fallback = preferences.resolvedDevboxFallbackBoxes
-        if identity == ExecutableSearch.expand(PultikProfile.example.devboxIdentityFile),
-           fallback == PultikProfile.example.devboxFallbackBoxes {
-            return QueryKey(resource: Snapshots.devbox.name, identity: "mesh")
-        }
-        let seed = ([identity] + fallback.map { "\($0.name)|\($0.sshAlias)|\($0.host)|\($0.port)" })
-            .joined(separator: "\n")
-        return QueryKey(resource: Snapshots.devbox.name, identity: QueryKey.digest(seed))
-    }
-
     // MARK: Restore
 
     /// Before the first poll: every backend's last snapshot under the
@@ -139,12 +75,8 @@ extension StatusStore {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.restoreProd() }
             group.addTask { await self.restoreGitHub() }
-            group.addTask { await self.restoreEve() }
             group.addTask { await self.restoreInfra() }
-            group.addTask { await self.restoreVitrinka() }
-            group.addTask { await self.restoreDevbox() }
             group.addTask { await self.restoreSemafor() }
-            group.addTask { await self.restoreToolkit() }
         }
         onChange?()
     }
@@ -163,16 +95,8 @@ extension StatusStore {
            repos.isEmpty {
             repos = snapshot.value
             lastRefresh = snapshot.fetchedAt
-        }
-    }
-
-    private func restoreEve() async {
-        guard RuntimeConfig.current.eve != nil else { return }
-        if let snapshot = await QueryRepository.shared.restore(Snapshots.eve, key: eveSnapshotKey(settingsToken: eveToken)),
-           eveSessions.isEmpty, eveAlerts.isEmpty, eveApprovals.isEmpty {
-            eveSessions = snapshot.value.sessions
-            eveApprovals = snapshot.value.approvals
-            eveAlerts = isSectionVisible("alerts") ? snapshot.value.alerts : []
+            // The restored inbox names the operator's own rows: warm them too.
+            warmPRMemory()
         }
     }
 
@@ -191,32 +115,6 @@ extension StatusStore {
         }
     }
 
-    private func restoreVitrinka() async {
-        if let key = await vitrinkaSnapshotKey(),
-           let snapshot = await QueryRepository.shared.restore(Snapshots.vitrinka, key: key), vitrinkaWorkspaces.isEmpty {
-            if isSectionVisible("vitrinka") { vitrinkaWorkspaces = snapshot.value.workspaces }
-            let reasons = Dictionary(snapshot.value.ripeReasons.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            let ripe = snapshot.value.ripe.map { item -> TodoItem in
-                var item = item
-                item.reason = reasons[item.id]?.reason
-                item.milestoneName = reasons[item.id]?.milestoneName
-                return item
-            }
-            TodoStore.shared.restore(todos: snapshot.value.todos, ripe: ripe)
-        }
-    }
-
-    private func restoreDevbox() async {
-        if isSectionVisible("devbox"), devboxSnapshots.isEmpty,
-           let snapshot = await QueryRepository.shared.restore(Snapshots.devbox, key: devboxSnapshotKey) {
-            if devboxDiscoveredAt == nil, !snapshot.value.boxes.isEmpty { devboxBoxes = snapshot.value.boxes }
-            for box in snapshot.value.snapshots where devboxBoxes.contains(box.endpoint) {
-                devboxSnapshots[box.endpoint.name] = box
-            }
-            publishDevboxEstate()
-        }
-    }
-
     // MARK: Record
 
     func recordProdSnapshot(key: QueryKey?) {
@@ -229,34 +127,10 @@ extension StatusStore {
                                       value: repos)
     }
 
-    func recordEveSnapshot(key: QueryKey) {
-        QueryRepository.shared.record(Snapshots.eve, key: key,
-                                      value: EveState(sessions: eveSessions, alerts: eveAlerts, approvals: eveApprovals))
-    }
-
     func recordInfraSnapshot(key: QueryKey) {
         QueryRepository.shared.record(Snapshots.infra, key: key,
                                       value: InfraState(servers: serverMetrics, services: serviceStatuses,
                                                         firing: firingAlerts, lanes: laneBoard,
                                                         throughputs: ciThroughputs))
-    }
-
-    func recordVitrinkaSnapshot(key: QueryKey?) {
-        guard let key else { return }
-        QueryRepository.shared.record(Snapshots.vitrinka, key: key,
-                                      value: VitrinkaState(workspaces: vitrinkaWorkspaces,
-                                                           todos: TodoStore.shared.todos,
-                                                           ripe: TodoStore.shared.ripeNow,
-                                                           ripeReasons: TodoStore.shared.ripeNow.map {
-                                                               RipeReason(id: $0.id, reason: $0.reason,
-                                                                          milestoneName: $0.milestoneName)
-                                                           }))
-    }
-
-    func recordDevboxSnapshot() {
-        let boxes = devboxSnapshots.values.sorted { $0.endpoint.name < $1.endpoint.name }
-        guard !boxes.isEmpty else { return }
-        QueryRepository.shared.record(Snapshots.devbox, key: devboxSnapshotKey,
-                                      value: DevboxState(boxes: devboxBoxes, snapshots: boxes))
     }
 }

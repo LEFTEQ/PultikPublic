@@ -37,19 +37,20 @@ control.
 | `accent` | `#ff3b57` | **selection edge, focus, primary action, brand.** Never a status, never a value colour and never a fill behind a row |
 | `accentSoft` | `#ff3b57` @ 12 % | the search field's scope chip and a selected filter chip, only |
 | `selection` | white @ 7.5–10 % | the selected row's neutral glass lift (vitrinka's sidebar grey) |
-| `ok` | `#53c07e` | healthy, passed, up, alive (pulse) |
+| `ok` | `#53c07e` | healthy, passed, up, alive (haloed dot) |
 | `warn` | `#f5b83d` | needs you, waiting, stale, threshold near |
 | `danger` | `#ff6369` | failed, critical, over threshold, overdue |
 | `idle` | `ink3` | parked, unknown, no data, blind |
-| `eve` | `#bf5af2` | eve and agent identity, glyphs and the eve chip only |
+| `eve` | `#bf5af2` | purple: GitHub's merged and completed states and GFM's important alert only (eve left the panel 2026-11-16) |
 | `data` | `#d6c7b6` | single-series charts: bars, sparkline, the current hour at `ink` |
 | `dataMuted` | `#6b625b` | past or secondary series, chart grid labels |
 | `heat` | `#e8703a` | activity intensity: heatmap cells (0.18 to 1.0 opacity) and the streak flame |
 
 **Banned:** `Color.blue`, `.accentColor` without the root tint, system link
 blue, blue-grey neutrals, and vitrinka's `#4f9cf9` "in-review" blue (in review
-reads `warn`). Running reads as `ok` drawn as a spinning ring, which is a
-different shape from a passed check.
+reads `warn`). Running reads as `ok` drawn as an open ring, which is a
+different shape from a passed check. Every status glyph is still (focus
+record D1).
 
 **Selection** is a neutral glass lift — the `selection` fill, a 1 pt top
 highlight and a 1 pt shadow — plus a thin 2 pt `accent` leading edge
@@ -132,9 +133,9 @@ Corners are concentric: `inner = outer − inset`.
   the meta line, so only the prose after them truncates; where an id must
   sit mid-line it gets `.layoutPriority(1)` and the prose truncates instead.
   Columns are sized so no Now subtitle truncates at 1240 pt.
-- Lists whose titles are the content (Work tasks) allow two-line titles
+- Lists whose titles are the content allow two-line titles
   (`.lineLimit(2)`); ids and `n/m` progress move to the meta line.
-- Name every pool, box or host (`devbox a 5.5 GB free`), never a bare letter.
+- Name every pool, box or host (`build-server-next 5.5 GB free`), never a bare letter.
 - Every tile leads with data: a hero, a stat strip or the first row. There is
   no empty header band and no prose intro.
 - Figures are right-aligned in fixed-width columns (`.frame(width:alignment:.trailing)`),
@@ -186,8 +187,8 @@ Each component is one SwiftUI view in `Sources/Views/Kit/`, and each has a
 | **StatStrip** (`.stat-strip`) | 3–5 cells: micro label, 22 pt value, `meta` caption; cells separated by hairlines | `Grid` with `GridRow`, `Divider().frame(height:)` |
 | **DataTable** (`.dtable`) | micro header band on `surfaceRaised`; 22 pt rows; leading identity column, trailing fixed-width figure columns coloured by threshold; group headings in `micro` | `Grid(alignment: .leading)` or `Table` with `.tableStyle(.inset)` and `.alternatingRowBackgrounds(.disabled)` |
 | **SegmentedControl** (`.seg`) | recessed capsule track with a specular rim; neutral glass thumb (lens fill, bright top-leading edge, lifted shadow); labels with optional counts. Its selection always agrees with the search scope (`CI × failed` selects `Failed 3`) | `Picker(...).pickerStyle(.segmented)`, `.controlSize(.small)` |
-| **Chip** (`.chip`) | capsule, 20 pt tall, `micro` or `meta` text; variants: neutral, ok, warn, danger, eve, dashed (partial), selected (accent). **Check chips**: the failing check leads, `danger` fill + ring with an `xmark` (`jobs stuck`); passing checks stay neutral with a 5 pt `ok` dot (`● API 8 ms`) | `Text` + `.padding(.horizontal, 7)` + `.background(tint.opacity(0.14), in: Capsule())` |
-| **StatusDot** (`.dot`) | 7 pt dot: ok, warn, danger or idle; `.ring` hollow = blind; `.pulse` = alive; `.spin` = running | `Circle()`; pulse uses `.symbolEffect(.pulse)` on `circle.fill`; spin uses `ProgressView().controlSize(.mini)` tinted `ok` |
+| **Chip** (`.chip`) | capsule, 20 pt tall, `micro` or `meta` text; variants: neutral, ok, warn, danger, dashed (partial), selected (accent). **Check chips**: the failing check leads, `danger` fill + ring with an `xmark` (`jobs stuck`); passing checks stay neutral with a 5 pt `ok` dot (`● API 8 ms`) | `Text` + `.padding(.horizontal, 7)` + `.background(tint.opacity(0.14), in: Capsule())` |
+| **StatusDot** (`.dot`) | 7 pt dot: ok, warn, danger or idle; `.ring` hollow = blind; `.pulse` = alive, a dot in a 30 % halo; `.spin` = running, a 3/4 open ring. All still: no repeating effect | `Circle()`; pulse adds a `size + 4` halo behind it; spin is `Circle().trim(from: 0, to: 0.75).stroke` |
 | **MeterBar** (`.meter`) | label · value on one line; 4 pt capsule track (`hairlineStrong`); fill coloured by threshold (< 70 % ok, < 90 % warn, else danger); an optional floor tick | `Gauge(value:).gaugeStyle(.linearCapacity)` with a custom `GaugeStyle` |
 | **HourBars** (`.hours`) | 24 slots, 00→now; past bars in `data`, the current hour in `ink`, failures stacked in `danger`; axis labels 00·06·12·18 in `micro` | Swift Charts `BarMark`, `.chartXAxis` stride 6, `.chartYAxis(.hidden)` |
 | **Heatmap** (`.heatmap`) | 12 weeks × 7 days, 10 pt cells, radius 2; a scale caption on the heading line (`best 25 B · Sep 24`); empty past days `ink` @ 6 %; future days hollow 1 pt outlines at `ink` @ 22 %; `heat` at `0.18 + 0.82 × √(v/max)`; today ringed in `ink`; a `less ▪▪▪▪ more · ▢ ahead` legend | Swift Charts `RectangleMark`, cornerRadius 2; future cells `.foregroundStyle(.clear)` + an outlined `RectangleMark` |
@@ -200,9 +201,9 @@ Each component is one SwiftUI view in `Sources/Views/Kit/`, and each has a
 | **LogWell** (`.well`) | `canvasDeep` inset, `code` lines with a gutter; the failing line gets a `danger` rule and an 8 % wash; long lines wrap | `ScrollView` + `LazyVStack` of `Text`, `.textSelection(.enabled)` |
 | **KbdHint** (`.kbd`) | `⌘R`, `↵`, `⌘1`, in `micro` on a 1 pt `hairlineStrong` border, radius 4 | `Text` with `.overlay(RoundedRectangle(cornerRadius: 4).stroke(...))` |
 | **TopBar** (`.topbar`, `topbar.html`) | two rows, 100 pt, identical in every module except the current chip and the search state: the SearchField at full width with the app badge at its right, then the ModuleStrip | `VStack(spacing: 8)` on the window glass, padding 12/14 |
-| **SearchField** (`.search`) | 36 pt vibrant capsule (specular rim, inner shadow, drop shadow): magnifying glass, scope chip with the module's glyph (`CI ×`, accent-soft; none on Home), query, accent caret, trailing result count, a hairline, `modules ⌘1–9` and `esc` kbd. Always focused, so a neutral 1 pt hairline and never a red ring | `TextField` with `.textFieldStyle(.plain)` in a capsule with a `.fill.quaternary` background and a `white.opacity(0.14)` stroke; `.tint(Theme.accent)` colours the caret; scope chip is a `Button`; Backspace on an empty field removes the scope |
-| **ModuleStrip** (`.mods` › `.mod`) | the status strip *is* the switcher (D5-A): nine 34 pt vibrant capsules, Home · PRs · CI · Prod · Devbox · Work · Sessions · Estate · Toolkit on ⌘1–9, sharing the row's width. Each is a glyph, a name and its live signal at its trailing end (a warn count pill, `✗ 3 failed`, prod dots, `30 stale`, `✋ 2 waiting`, `🔔 8 firing`, `disk 94%`). The current module is the neutral `selection` lift plus a 2 pt accent leading edge and an accent glyph, never a red fill. A module in danger (Prod while a deployment is critical) is the one danger-washed capsule and widens to say why (`ExampleApp prod · jobs stuck +1`) | `HStack(spacing: 6)` of `Button`s with a custom capsule `ButtonStyle` on `.fill.quaternary` (no glass on glass); `.keyboardShortcut("1"…"9")`; the lift moves with `matchedGeometryEffect` |
-| **StatusFooter** (`.footer`) | 3 pt progress line on top (`ok`→`warn`→`danger` by value), **labelled at its end** in `micro` (`ohexampleapp 5h 93% left`); the bar below never repeats that value: sync state, the live pulse (sessions running), a sparkline with its figure, waiting count, the account's weekly quota, tokens today; trailing refresh, settings and quit | `ViewThatFits` drops the sparkline first, then the tokens; `Capsule` track + fill |
+| **SearchField** (`.search`) | 36 pt vibrant capsule (specular rim, inner shadow, drop shadow): magnifying glass, scope chip with the module's glyph (`CI ×`, accent-soft; none on Home), query, accent caret, trailing result count, a hairline, `modules ⌘1–N` (N = the module count) and `esc` kbd. Always focused, so a neutral 1 pt hairline and never a red ring | `TextField` with `.textFieldStyle(.plain)` in a capsule with a `.fill.quaternary` background and a `white.opacity(0.14)` stroke; `.tint(Theme.accent)` colours the caret; scope chip is a `Button`; Backspace on an empty field removes the scope |
+| **ModuleStrip** (`.mods` › `.mod`) | the status strip *is* the switcher (D5-A): five 34 pt vibrant capsules, Home · PRs · CI · Prod · Estate on ⌘1–5, sharing the row's width. Each is a glyph, a name and its live signal at its trailing end (a warn count pill, `✗ 3 failed`, prod dots, `🔔 8 firing`, `disk 94%`). The current module is the neutral `selection` lift plus a 2 pt accent leading edge and an accent glyph, never a red fill. A module in danger (Prod while a deployment is critical) is the one danger-washed capsule and widens to say why (`ExampleApp prod · jobs stuck +1`) | `HStack(spacing: 6)` of `Button`s with a custom capsule `ButtonStyle` on `.fill.quaternary` (no glass on glass); `.keyboardShortcut("1"…"9")`; the lift moves with `matchedGeometryEffect` |
+| **StatusFooter** (`.footer`) | one line: sync state (`Synced 15:12`, a still glyph while syncing), an error or paused-probes icon whose prose is in the hover, the Mac health chip while a fresh report flags something, the version; trailing refresh, settings and quit | `HStack`, every child `lineLimit(1)` and fixed-shape |
 | **Tile** (`.tile`) | `surface` fill, radius 14, padding 14, micro kicker + trailing caption, a 1 pt top highlight | `.background(Theme.surface, in: .rect(cornerRadius: 14))`, `.overlay(alignment: .top)` highlight |
 | **Button** (`.btn`) | `.btn.prim` is red prominent glass; `.btn` is neutral glass; `.btn.plain` is text-only `ink2` | `.glassProminent` + `.tint(Theme.accent)`, `.glass`, `.plain` |
 | **RunBadge** (`RunBadgeView`) | one CI run on a change request: its state's shape (✗ / spinning dot / ✓ / –), the workflow, the failing job in `danger` or the passed/total count, a live timer while running, the lane and its queue in `warn`; `danger`-washed when it failed; the ⇥ focus ring is a 2 pt accent capsule | `Button` on a `Capsule` fill; `TimelineView(.periodic)` only while the panel is presented; `.contentTransition(.symbolEffect(.replace))` |

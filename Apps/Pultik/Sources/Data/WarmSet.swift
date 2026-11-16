@@ -13,6 +13,10 @@ enum WarmSet {
     static let mirrorBatch = 8
     /// A conversation read this recently is current whatever the index says.
     static let fresh: TimeInterval = 30
+    /// Activities read per sync (instant PR open): the first sync after a
+    /// launch with nothing on disk spreads over a few polls of the lane it
+    /// rides instead of holding it, the operator's own rows first.
+    static let activitiesPerSync = 40
 
     /// Every change request in the window and in `scope` (lowercased repo
     /// slugs), newest first.
@@ -51,27 +55,41 @@ enum WarmSet {
                      host: any CodeHost, identity: String, repository: QueryRepository,
                      resource: QueryResource<ChangeRequest>, key: (ChangeRequestRef) -> QueryKey) async throws
         -> [ChangeRequest] {
+        try await sync(candidates, ledger: &ledger, repository: repository, resource: resource, key: key,
+                       updatedAt: \.updatedAt) { try await host.changeRequests($0, identity: identity) }
+    }
+
+    /// The same sync for anything kept per change request under its
+    /// `updatedAt` (the conversation, the workbench's activity): `read` is
+    /// the host's batched read, and at most `limit` stale ones go to it —
+    /// the rest stay stale for the next sync.
+    @MainActor
+    static func sync<Value>(_ candidates: [(ref: ChangeRequestRef, updatedAt: Date)],
+                            ledger: inout [ChangeRequestRef: Date], repository: QueryRepository,
+                            resource: QueryResource<Value>, key: (ChangeRequestRef) -> QueryKey,
+                            updatedAt: (Value) -> Date, limit: Int = .max,
+                            read: ([ChangeRequestRef]) async throws -> [ChangeRequestRef: Value]) async throws -> [Value] {
         var stale: [ChangeRequestRef] = []
-        var settled: [ChangeRequest] = []
+        var settled: [Value] = []
         for candidate in candidates {
             if let synced = ledger[candidate.ref], synced >= candidate.updatedAt { continue }
             if ledger[candidate.ref] == nil,
                let held = await repository.held(resource, key: key(candidate.ref), remember: false),
-               held.value.updatedAt >= candidate.updatedAt {
-                ledger[candidate.ref] = held.value.updatedAt
+               updatedAt(held.value) >= candidate.updatedAt {
+                ledger[candidate.ref] = updatedAt(held.value)
                 settled.append(held.value)
                 continue
             }
-            stale.append(candidate.ref)
+            if stale.count < limit { stale.append(candidate.ref) }
         }
         guard !stale.isEmpty else { return settled }
-        let answer = try await host.changeRequests(stale, identity: identity)
+        let answer = try await read(stale)
         let at = Date()
         var writes: [Task<Void, Never>] = []
         for ref in stale {
             guard let request = answer[ref] else { continue }
             if let write = repository.persist(resource, key: key(ref), value: request, at: at) { writes.append(write) }
-            ledger[ref] = request.updatedAt
+            ledger[ref] = updatedAt(request)
             settled.append(request)
         }
         for write in writes { await write.value }

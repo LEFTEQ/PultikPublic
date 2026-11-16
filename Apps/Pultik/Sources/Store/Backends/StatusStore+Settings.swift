@@ -39,16 +39,7 @@ extension StatusStore {
         settingsWritable = snapshot.writable
         // Not clean, the snapshot is the last good copy with any skipped
         // entries standing in — still the best view, just never written.
-        let devboxBefore = (preferences.resolvedDevboxFallbackBoxes, preferences.runtimeConfig.devboxIdentityFile)
         preferences = snapshot.value
-        // A new devbox key or fallback set is another estate: drop the old
-        // boxes and answers, and discover again on the next poll.
-        if devboxBefore != (preferences.resolvedDevboxFallbackBoxes, preferences.runtimeConfig.devboxIdentityFile) {
-            devboxBoxes = preferences.resolvedDevboxFallbackBoxes
-            devboxSnapshots = [:]
-            devboxDiscoveredAt = nil
-            publishDevboxEstate()
-        }
         if pinned != snapshot.value.pinnedRepos {
             // `pinned`'s didSet writes back: the same value, one harmless save
             // (refused while the file is not clean).
@@ -93,13 +84,6 @@ extension StatusStore {
         preferences.servers.map(\.name)
     }
 
-    var vitrinkaWorkspace: String { preferences.vitrinkaWorkspace ?? VitrinkaClient.shared.workspace ?? "" }
-    /// Rail and palette derive their data from this pick, including when a
-    /// refresh finishes after a switch or the picked workspace is unavailable.
-    func setVitrinkaWorkspace(_ value: String) {
-        mutate { $0.vitrinkaWorkspace = value }
-    }
-
     /// Right-rail collapse state (decision D11). Persisted, so a folded rail
     /// stays folded across relaunches.
     func isRailCollapsed(_ key: String) -> Bool {
@@ -111,17 +95,6 @@ extension StatusStore {
             $0.collapsedRails.removeAll { $0 == key }
             if collapsed { $0.collapsedRails.append(key) }
         }
-    }
-
-    /// The vitrinka project the panel's own writers file into (a promoted
-    /// note, an expiry-radar reminder); nil = unset, and they refuse.
-    var todoProject: String? {
-        preferences.todoProject
-    }
-
-    /// Settings ▸ General ▸ Todos.
-    func setTodoProject(_ slug: String?) {
-        mutate { $0.todoProject = slug }
     }
 
     var codeEditor: String? {
@@ -165,18 +138,6 @@ extension StatusStore {
             $0.hiddenSections.removeAll { $0 == key }
             if !visible { $0.hiddenSections.append(key) }
         }
-    }
-
-    func isAlertLaneVisible(_ lane: String) -> Bool {
-        preferences.visibleAlertLanes.contains(lane)
-    }
-
-    func setAlertLane(_ lane: String, visible: Bool) {
-        mutate {
-            $0.visibleAlertLanes.removeAll { $0 == lane }
-            if visible { $0.visibleAlertLanes.append(lane) }
-        }
-        onChange?()
     }
 
     /// Query → project, matched on key/title prefix ("fix" → ExampleApp).
@@ -260,36 +221,6 @@ extension StatusStore {
         // armed by a missing or refused token must not hold this one for 30 min.
         if failure == nil { gate.succeeded(.sentry) }
         lastSentryRefresh = nil
-        Task { await refresh() }
-        return failure.map { "keychain refused the token: \($0)" }
-    }
-
-    // MARK: - eve settings
-
-    /// The eve token lives in the login keychain (service `pultik-eve`), the
-    /// same way as `sentryToken`.
-    var eveToken: String? {
-        keychainToken("pultik-eve", legacy: \.eveToken, name: "eve")
-    }
-
-    /// nil on success, or the keychain's complaint, exactly as `setSentryToken`.
-    @discardableResult
-    func setEveToken(_ token: String?) -> String? {
-        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let failure: String? = if let trimmed, !trimmed.isEmpty {
-            Keychain.write(service: "pultik-eve", account: "token", value: trimmed)
-        } else {
-            Keychain.delete(service: "pultik-eve", account: "token")
-        }
-        if let failure {
-            // As for Sentry: a failed write or delete leaves the old
-            // credential live, so the legacy copy must not be blanked yet.
-            NSLog("pultik: eve token keychain write failed: %@", failure)
-        } else if preferences.eveToken != nil {
-            mutate { $0.eveToken = nil }
-        }
-        // A new token voids a pause armed by the missing or refused old one.
-        if failure == nil { gate.succeeded(.eve) }
         Task { await refresh() }
         return failure.map { "keychain refused the token: \($0)" }
     }

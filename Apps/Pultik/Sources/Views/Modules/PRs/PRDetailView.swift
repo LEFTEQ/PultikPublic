@@ -25,13 +25,21 @@ enum PRTab: String, CaseIterable {
 /// (threads, files, run badges) and ↵ on a badge slides its run card over
 /// the PR (D2). Drawn at once from what the warm set holds (D9); the CI
 /// watch keeps its badges live while it is on screen (D7).
-struct PRWorkbench: View {
+///
+/// The shell stages it (focus D23): it is built before the key that shows
+/// it, off screen with `\.bodyShown` false, and stays built for a step
+/// after it leaves. Off screen it draws what is held and nothing else: no
+/// router state, no CI watch, no key, no host read, no probe mark. Each of
+/// those starts when it comes on screen and ends when it leaves.
+struct PRWorkbench: View, Equatable {
     let store: StatusStore
     let ref: ChangeRequestRef
     /// The list's row: its title, glyph and page until the conversation lands.
     let object: ModuleObject
     @Environment(ModuleRouter.self) private var router
     @Environment(\.panelIsPresented) private var presented
+    /// False while staged: mounted, not the detail on screen.
+    @Environment(\.bodyShown) private var onScreen
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var conversation: ChangeRequest?
@@ -46,10 +54,11 @@ struct PRWorkbench: View {
     @State private var filesFailure: String?
     @State private var attempt = 0
     @State private var showsResolved = false
-    /// The description parsed once per body (D8).
-    @State private var description: (source: String, blocks: [GFMBlock])?
     /// Tabs drawn once stay mounted, so going back keeps their scroll.
-    @State private var visited: Set<PRTab> = []
+    /// Overview, where a detail opens, starts in it: filling it from the
+    /// shown tab's onChange ran the whole workbench body a second time.
+    /// Staged, these are the only tabs built (`followTab`).
+    @State private var visited: Set<PRTab> = [.overview]
     /// The timeline, merge options and verb handles (D4, D8).
     @State private var activity: ChangeRequestActivity?
     /// The sheet a verb opened over the tab, and how its run went.
@@ -94,23 +103,40 @@ struct PRWorkbench: View {
         _activity = State(initialValue: store.cachedPRActivity(ref))
     }
 
+    /// The shell's passes (every key re-runs the host, and the list's
+    /// objects are rebuilt per selection) skip a workbench whose row reads
+    /// the same: three are mounted, and a step must not re-run them all.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        let (old, new) = (lhs.object, rhs.object)
+        return lhs.store === rhs.store && lhs.ref == rhs.ref && old.id == new.id && old.title == new.title
+            && old.label == new.label && old.meta == new.meta && old.symbol == new.symbol && old.project == new.project
+            && old.url == new.url && old.status?.text == new.status?.text && old.status?.variant == new.status?.variant
+            && old.status?.symbol == new.status?.symbol
+    }
+
     private var verbs: [PRVerb] {
         conversation.map { PRVerbCatalogue.verbs($0, activity: activity) } ?? []
     }
 
     private var badges: [RunBadge] {
         guard let conversation else { return [] }
-        let live = store.ciWatchTarget?.request == ref ? store.ciLive : nil
+        let live = onScreen && store.ciWatchTarget?.request == ref ? store.ciLive : nil
         return RunBadge.badges(conversation.checks, repo: ref.repo, host: ref.host, live: live)
     }
 
     private var shownTab: PRTab {
-        router.shownTab.flatMap(PRTab.init(rawValue:)) ?? .overview
+        let routed = router.shownTab.flatMap(PRTab.init(rawValue:)) ?? .overview
+        // Closed, the router still names the tab of the last open detail,
+        // and the next ↵ opens on the first (`ModuleRouter.openDetail`): a
+        // workbench staged behind a closed list builds that one. One that
+        // just closed keeps the tab it shows while it slides out.
+        return router.detailOpen || visited.contains(routed) ? routed : .overview
     }
 
     var body: some View {
         let badges = badges
         let shown = shownTab
+        let _ = PROpenProbe.pass(onScreen ? "workbench" : "staged")
         VStack(alignment: .leading, spacing: 0) {
             header(badges)
                 .padding([.horizontal, .top], 14)
@@ -119,7 +145,7 @@ struct PRWorkbench: View {
                 withAnimation(Theme.Motion.tab(reduceMotion)) { router.selectTab(name) }
             }
             ZStack(alignment: .topLeading) {
-                ForEach(PRTab.allCases.filter { visited.contains($0) || $0 == shown }, id: \.self) { tab in
+                ForEach(PRTab.allCases.filter { visited.contains($0) || (onScreen && $0 == shown) }, id: \.self) { tab in
                     content(tab, badges: badges)
                         .opacity(tab == shown ? 1 : 0)
                         // WP7: a tab sits to the side it lies on; the shown one slides in.
@@ -149,14 +175,23 @@ struct PRWorkbench: View {
             }
         }
         .task(id: LoadKey(ref: ref, attempt: attempt, confirmed: store.ciConfirmed[ref] ?? 0,
-                          revision: store.prVerbRevision[ref] ?? 0)) { await load() }
-        .onAppear { router.setTabs(PRTab.allCases.map(\.rawValue)) }
+                          revision: store.prVerbRevision[ref] ?? 0, onScreen: onScreen)) { await load() }
+        .onChange(of: onScreen, initial: true) { was, now in
+            if now {
+                router.setTabs(PRTab.allCases.map(\.rawValue))
+                adoptHeld()
+            } else if was {
+                leaveScreen()
+            }
+        }
         // D5: the letters this PR takes while entered, and what they reach.
         .onChange(of: ownsKeys ? PRVerbCatalogue.keys(verbs) : [], initial: true) { _, keys in
             if ownsKeys { router.setVerbKeys(keys) }
         }
-        .onChange(of: router.verbRequest) { _, request in
-            guard ownsKeys, let request else { return }
+        // Heard on screen only: a verb's letter or a composer's key re-runs
+        // one workbench, not the staged ones beside it.
+        .onChange(of: Heard(onScreen, router.verbRequest)) { old, heard in
+            guard ownsKeys, let request = heard.taken(after: old) else { return }
             router.consumeVerb()
             if request.key == VerbRequest.menu {
                 open(sheet == .menu ? nil : .menu)
@@ -164,8 +199,8 @@ struct PRWorkbench: View {
                 reach(verb)
             }
         }
-        .onChange(of: router.composerCommand) { _, command in
-            guard ownsKeys, let command else { return }
+        .onChange(of: Heard(onScreen, router.composerCommand)) { old, heard in
+            guard ownsKeys, let command = heard.taken(after: old) else { return }
             if sheet != nil {
                 command.action == .submit ? runSheet() : open(nil)
             } else if commentFocused {
@@ -178,20 +213,43 @@ struct PRWorkbench: View {
             router.setVerbConfirm(flags.confirm)
             router.setComposing(flags.typing)
         }
-        .onDisappear {
-            router.setVerbConfirm(false)
-            router.setComposing(false)
+        // Removed while on screen (its row left the list, the tree was
+        // released): a staged one that goes holds none of the router's flags.
+        .onDisappear { if onScreen { handBackKeys() } }
+        // The tab on screen is built with the key that shows it. A staged
+        // workbench builds the tab it starts on, and follows a later ←/→ a
+        // moment behind (`followTab`): that key builds one tab, not three.
+        .onChange(of: TabReport(tab: shown, onScreen: onScreen), initial: true) { old, new in
+            if new.onScreen || old == new { visited.insert(new.tab) }
         }
-        .onChange(of: shown, initial: true) { _, tab in visited.insert(tab) }
+        .task(id: TabReport(tab: shown, onScreen: onScreen)) { await followTab(shown) }
         // D3: the shown tab is the top layer while no card covers it.
         .onChange(of: FocusReport(targets: focusTargets(shown, badges), top: ownsKeys), initial: true) { _, report in
             if report.top { router.setFocusTargets(report.targets) }
         }
-        // D7: watched while on screen and something runs.
-        .onChange(of: watchTarget(badges), initial: true) { _, target in store.watchCI(target) }
-        .onDisappear { store.watchCI(nil) }
+        // D7: watched while on screen and something runs. The store holds one
+        // watch, so only the workbench on screen sets it, and one that leaves
+        // the screen or the tree retires the watch only while it is its own:
+        // the next PR's may already be there.
+        .onChange(of: watchTarget(badges), initial: true) { _, target in
+            if onScreen { store.watchCI(target) } else { retireWatch() }
+        }
+        .onDisappear { retireWatch() }
         #if DEBUG
-        .onChange(of: drawnSections(badges), initial: true) { _, sections in Self.drawnSections = sections }
+        .onChange(of: onScreen ? drawnSections(badges) : nil, initial: true) { _, sections in
+            if let sections { Self.drawnSections = sections }
+        }
+        // The open bench (`state` → prOpen): when each part of this PR is on
+        // screen — for a staged one, the pass that shows it, not its build.
+        // The description is drawn by the pass that draws the conversation.
+        .onChange(of: [onScreen, conversation != nil, activity != nil, files != nil], initial: true) { _, parts in
+            guard parts[0] else { return }
+            PROpenProbe.mark("shown", id: object.id)
+            if parts[1] { PROpenProbe.mark("conversation", id: object.id) }
+            if parts[2] { PROpenProbe.mark("activity", id: object.id) }
+            if parts[3] { PROpenProbe.mark("files", id: object.id) }
+            if parts[1] { PROpenProbe.mark("description", id: object.id) }
+        }
         #endif
     }
 
@@ -202,6 +260,53 @@ struct PRWorkbench: View {
         let confirmed: Int
         /// A verb landed: the store re-read both; draw what it holds.
         let revision: Int
+        /// Coming on screen revalidates what a staged workbench only held.
+        let onScreen: Bool
+    }
+
+    private struct TabReport: Equatable {
+        let tab: PRTab
+        let onScreen: Bool
+    }
+
+    /// How long a staged workbench waits before it builds the tab ←/→ moved
+    /// to: the tab on screen has drawn by then, and a walk along the tabs
+    /// has rested. It is needed only by the next ↑/↓.
+    private static let tabFollow: Duration = .milliseconds(300)
+
+    private func followTab(_ tab: PRTab) async {
+        guard !onScreen, !visited.contains(tab) else { return }
+        do { try await Task.sleep(for: Self.tabFollow) } catch { return }
+        // Like every staged build: only from an idle main thread.
+        await DetailStaging.idle()
+        if !Task.isCancelled { visited.insert(tab) }
+    }
+
+    /// Coming on screen: what memory holds now, in the frame that shows it.
+    /// A staged workbench was built before the list's prefetch of its row
+    /// (or a sync) landed, and memory does not tell a view it has moved.
+    private func adoptHeld() {
+        if let held = store.cachedPRDetail(ref).conversation { show(held, animated: false) }
+        if let held = store.cachedPRActivity(ref) { show(held, animated: false) }
+        if files == nil, let conversation, let exact = store.cachedPRFiles(conversation) { files = exact }
+    }
+
+    /// Off screen but still built: what it had open closes, as it did when
+    /// leaving destroyed the workbench — a merge confirm must never wait
+    /// behind the list for the next ↵.
+    private func leaveScreen() {
+        sheet = nil
+        commentFocused = false
+        handBackKeys()
+    }
+
+    private func handBackKeys() {
+        router.setVerbConfirm(false)
+        router.setComposing(false)
+    }
+
+    private func retireWatch() {
+        if store.ciWatchTarget?.request == ref { store.watchCI(nil) }
     }
 
     private struct SheetFlags: Equatable {
@@ -216,7 +321,13 @@ struct PRWorkbench: View {
 
     /// This workbench is the detail on screen and no card covers it.
     private var ownsKeys: Bool {
-        router.module == .prs && router.detailOpen && router.stack.isEmpty
+        onScreen && router.module == .prs && router.detailOpen && router.stack.isEmpty
+    }
+
+    /// ⇥'s ring, for the workbench on screen: a staged one reads none of it,
+    /// so ⇥ re-draws one workbench.
+    private var focus: String? {
+        onScreen ? router.focus : nil
     }
 
     /// ⇥'s walk on the shown tab (D3): open threads, files, run badges.
@@ -312,7 +423,7 @@ struct PRWorkbench: View {
                 }
                 .scrollEdgeEffectStyle(.soft, for: .top)
                 .workbenchScroll(active: active)
-                .onChange(of: router.focus) { _, focus in
+                .onChange(of: focus) { _, focus in
                     guard active, let focus, focus.hasPrefix("thread:") else { return }
                     withAnimation(Theme.Motion.focus(reduceMotion)) { scroller.scrollTo(focus, anchor: .center) }
                 }
@@ -366,7 +477,7 @@ struct PRWorkbench: View {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 10) {
                         rail(badges)
-                        if let focused = badges.first(where: { $0.id == router.focus }) { jobsLine(focused) }
+                        if let focused = badges.first(where: { $0.id == focus }) { jobsLine(focused) }
                     }
                     let failing = badges.filter { $0.outcome == .failed }
                     if !failing.isEmpty { failingSection(failing) }
@@ -377,7 +488,7 @@ struct PRWorkbench: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .workbenchScroll(active: active)
-            .onChange(of: router.focus) { _, focus in
+            .onChange(of: focus) { _, focus in
                 guard active, let focus, focus.hasPrefix("run:") else { return }
                 withAnimation(Theme.Motion.focus(reduceMotion)) { scroller.scrollTo(focus, anchor: .center) }
             }
@@ -385,7 +496,7 @@ struct PRWorkbench: View {
     }
 
     private func watchTarget(_ badges: [RunBadge]) -> StatusStore.CIWatchTarget? {
-        guard presented else { return nil }
+        guard presented, onScreen else { return nil }
         let running = Set(badges.filter { $0.outcome == .running }.compactMap(\.run))
         return running.isEmpty ? nil : StatusStore.CIWatchTarget(request: ref, runs: running)
     }
@@ -401,45 +512,69 @@ struct PRWorkbench: View {
         return sections
     }
 
-    private func load() async {
-        do {
-            let fresh = try await store.prConversation(ref)
-            try Task.checkCancellation()
-            if let exact = store.cachedPRFiles(fresh) {
-                files = exact
-                filesStale = false
-            } else if files != nil, conversation?.headSHA == fresh.headSHA {
-                filesStale = true // same head, the base moved: keep it, marked
-            } else {
-                files = nil
-                filesStale = false
-            }
+    /// Draws `fresh`: the first conversation lands as it is, a newer one
+    /// moves in (`animated`: not in the frame that puts the workbench on
+    /// screen). Its files are memory's exact diff, the same head's older
+    /// one (marked), or none yet.
+    private func show(_ fresh: ChangeRequest, animated: Bool = true) {
+        guard fresh != conversation else { return }
+        if let exact = store.cachedPRFiles(fresh) {
+            files = exact
+            filesStale = false
+        } else if files != nil, conversation?.headSHA == fresh.headSHA {
+            filesStale = true // same head, the base moved: keep it, marked
+        } else {
+            files = nil
+            filesStale = false
+        }
+        if conversation == nil || !animated {
+            conversation = fresh
+        } else {
             withAnimation(Theme.Motion.status(reduceMotion)) { conversation = fresh }
-            failure = nil
-        } catch is CancellationError {
-            return
-        } catch {
-            NSLog("pultik: PR detail %@ failed: %@", ref.key, error.localizedDescription)
-            failure = error.localizedDescription
         }
-        // The verbs' handles and the timeline: a refusal leaves the verbs
-        // saying they are still reading, never guessing.
-        do {
-            let fresh = try await store.prActivity(ref)
-            try Task.checkCancellation()
+    }
+
+    private func show(_ fresh: ChangeRequestActivity, animated: Bool = true) {
+        guard fresh != activity else { return }
+        if activity == nil || !animated {
+            activity = fresh
+        } else {
             withAnimation(Theme.Motion.status(reduceMotion)) { activity = fresh }
-            resolvedHere = [:]
-        } catch is CancellationError {
-            return
-        } catch {
-            NSLog("pultik: PR activity %@ failed: %@", ref.key, error.localizedDescription)
         }
+    }
+
+    private func load() async {
+        // What is held draws first, at any age, never behind a request
+        // (instant PR open). A warm PR's came with the init; what a verb or
+        // the CI watch just re-read is in memory; a colder PR's is one disk
+        // read.
+        if let held = store.cachedPRDetail(ref).conversation { show(held) }
+        if let held = store.cachedPRActivity(ref) { show(held) }
+        if conversation == nil || activity == nil {
+            let held = await store.heldPRDetail(ref)
+            guard !Task.isCancelled else { return }
+            if conversation == nil, let request = held.conversation { show(request) }
+            if activity == nil, let activity = held.activity { show(activity) }
+        }
+        // A staged workbench stops at what is held: the host is asked when
+        // it comes on screen (`LoadKey.onScreen`), so staging adds no read
+        // to the list's own prefetch of the row the cursor rests on.
+        guard onScreen else { return }
+        // Fresh data revalidates behind it. With something drawn, the host
+        // is asked only once the cursor rests here: ↑/↓ past a PR with the
+        // detail open never queues its read.
+        if conversation != nil, !store.prDetailIsCurrent(ref) {
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+        }
+        async let activityRead: Void = revalidateActivity()
+        await revalidateConversation()
+        await activityRead
         // A departed selection stops here: the files read is the heavy one.
         guard let conversation, !Task.isCancelled else { return }
         do {
             let loaded = try await store.prFiles(conversation)
             try Task.checkCancellation()
-            files = loaded
+            if files != loaded { files = loaded }
             filesStale = false
             filesFailure = nil
         } catch is CancellationError {
@@ -458,6 +593,36 @@ struct PRWorkbench: View {
         } catch {
             NSLog("pultik: PR commits %@ failed: %@", ref.key, error.localizedDescription)
             commitsFailure = error.localizedDescription
+        }
+    }
+
+    /// The conversation: the held one while current, else the host's.
+    private func revalidateConversation() async {
+        do {
+            let fresh = try await store.prConversation(ref)
+            try Task.checkCancellation()
+            show(fresh)
+            failure = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            NSLog("pultik: PR detail %@ failed: %@", ref.key, error.localizedDescription)
+            failure = error.localizedDescription
+        }
+    }
+
+    /// The verbs' handles and the timeline: a refusal leaves the verbs
+    /// saying they are still reading, never guessing.
+    private func revalidateActivity() async {
+        do {
+            let fresh = try await store.prActivity(ref)
+            try Task.checkCancellation()
+            show(fresh)
+            resolvedHere = [:]
+        } catch is CancellationError {
+            return
+        } catch {
+            NSLog("pultik: PR activity %@ failed: %@", ref.key, error.localizedDescription)
         }
     }
 
@@ -806,7 +971,7 @@ struct PRWorkbench: View {
     private func rail(_ badges: [RunBadge]) -> some View {
         FlowRow(hSpacing: 6, vSpacing: 6) {
             ForEach(badges) { badge in
-                RunBadgeView(badge: badge, focused: router.focus == badge.id) {
+                RunBadgeView(badge: badge, focused: focus == badge.id) {
                     guard badge.run != nil else { return }
                     withAnimation(Theme.Motion.push(reduceMotion)) {
                         router.push(DetailRef(kind: .run, id: String(badge.id.dropFirst(4))))
@@ -933,7 +1098,7 @@ struct PRWorkbench: View {
                     ThreadView(thread: thread, repo: ref.repo, resolver: resolver, resolved: false,
                                resolve: { resolve(thread, true) }, reply: { await reply(thread, $0) })
                         .padding(4)
-                        .focusRing(router.focus == "thread:\(thread.id)")
+                        .focusRing(focus == "thread:\(thread.id)")
                         .id("thread:\(thread.id)")
                 }
                 if !resolved.isEmpty {
@@ -973,11 +1138,10 @@ struct PRWorkbench: View {
     private func descriptionItems(_ pr: ChangeRequest) -> some View {
         let body = pr.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if !body.isEmpty {
-            let blocks = description?.source == body ? description?.blocks ?? [] : GFM.blocks(body, repo: ref.repo,
-                                                                                               resolver: resolver)
+            // Parsed once, off the main thread for a warm PR (`PRRenderCache`).
+            let blocks = PRRenderCache.shared.blocks(body, repo: ref.repo, resolver: resolver)
             Text("Description").microLabel()
                 .tileSlice(top: true)
-                .onAppear { if description?.source != body { description = (body, blocks) } }
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 GFMBlockView(block: block)
                     .padding(.top, 8)
@@ -1005,6 +1169,8 @@ struct RunBadgeView: View {
     var focused = false
     let action: () -> Void
     @Environment(\.panelIsPresented) private var presented
+    /// A staged workbench's badge keeps no clock: it would re-render every second.
+    @Environment(\.bodyShown) private var bodyShown
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
@@ -1050,7 +1216,7 @@ struct RunBadgeView: View {
     }
 
     @ViewBuilder private var timer: some View {
-        if badge.outcome == .running, presented, badge.startedAt != nil {
+        if badge.outcome == .running, presented, bodyShown, badge.startedAt != nil {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 Text(verbatim: badge.elapsed(now: context.date).map(PultikFormat.duration) ?? "")
                     .font(Theme.Typo.meta).monospacedDigit().foregroundStyle(Theme.ink2)
@@ -1131,7 +1297,7 @@ private struct ThreadView: View {
                         Text(verbatim: PultikFormat.ago(comment.createdAt, now: Date()))
                             .font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
                     }
-                    GFMStack(blocks: GFM.blocks(comment.body, repo: repo, resolver: resolver), spacing: 6)
+                    GFMStack(blocks: PRRenderCache.shared.blocks(comment.body, repo: repo, resolver: resolver), spacing: 6)
                 }
             }
             if replying {
@@ -1139,6 +1305,7 @@ private struct ThreadView: View {
                     TextEditor(text: $draft)
                         .font(Theme.Typo.body)
                         .scrollContentBackground(.hidden)
+                        .stagedField()
                         .frame(height: 54)
                         .padding(4)
                         .background(Theme.canvasDeep, in: RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous))

@@ -4,8 +4,8 @@ import Foundation
 /// names one, so a blob is parsed once across every change request, else a
 /// digest of the reconstructed side of a patch. Parses run off the main
 /// thread at user-initiated priority, two at a time; an identical request
-/// in flight shares the one parse. LRU-bounded by run count, and emptied
-/// when the panel releases its tree (the hidden footprint budget, P10).
+/// in flight shares the one parse. LRU-bounded by run count, and kept
+/// across the panel's tree release (instant PR open): about 7 MB at most.
 actor HighlightCache {
     static let shared = HighlightCache()
 

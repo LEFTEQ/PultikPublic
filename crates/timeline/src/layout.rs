@@ -98,11 +98,21 @@ impl Layout {
     /// Lay `groups` out at size `k`. `row_h` (base points) opens a stacked group's rows into
     /// taller slots (a CI lane's tracks) and its group grows to hold them.
     pub fn of(groups: &[GroupSpec], k: f32, row_h: impl Fn(&str) -> Option<f32>) -> Layout {
+        Layout::of_at(groups, k, AXIS_PT, row_h)
+    }
+
+    /// [`Layout::of`] with the first group at content point `top` (0: no axis strip above).
+    pub fn of_at(
+        groups: &[GroupSpec],
+        k: f32,
+        top: f32,
+        row_h: impl Fn(&str) -> Option<f32>,
+    ) -> Layout {
         let mut out = Layout {
             k,
             ..Layout::default()
         };
-        let mut top = AXIS_PT;
+        let mut top = top;
         for g in groups {
             let slots: Option<Vec<f32>> = g.stack.map(|_| {
                 g.rows

@@ -3,7 +3,7 @@ import SwiftUI
 /// The status strip across the panel's bottom edge.
 ///
 /// It is supporting chrome rather than the panel's primary hierarchy: search
-/// and the grouped inbox own the top edge, while alerts, Eve, freshness and
+/// and the grouped inbox own the top edge, while freshness and
 /// window actions close the panel as one stable full-width footer. CI's totals
 /// moved to the right rail's CI section (spec 2026-09-23, D10).
 ///
@@ -11,36 +11,13 @@ import SwiftUI
 /// and fixed-shape, because an overflowing cell in a fixed frame makes SwiftUI
 /// wrap character-by-character and balloons the strip into a column of glyphs.
 struct PanelFooter: View {
-    @Environment(\.animates) private var animates
     let store: StatusStore
-    let eveOnline: Bool?
-    var todoCount: Int = 0
-    var onTodos: () -> Void = {}
     var macHealth: MacHealthStore = .shared
     var onMacHealth: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 12) {
             refreshState
-            EveSummary(sessions: store.eveSessions, online: eveOnline)
-            if store.isSectionVisible("alerts"), let latest = store.visibleAlerts.first {
-                AlertPulse(latest: latest, unread: store.unreadAlertCount)
-            }
-            if todoCount > 0 {
-                Button(action: onTodos) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checklist")
-                            .font(.system(size: 9))
-                        Text("\(todoCount)")
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .monospacedDigit()
-                    }
-                    .foregroundStyle(.secondary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .help("\(todoCount) open todo\(todoCount == 1 ? "" : "s") in vitrinka — open the list")
-            }
             Spacer(minLength: 8)
             if let chip = macHealth.status.chip {
                 MacHealthFooterChip(chip: chip, onOpen: onMacHealth)
@@ -62,8 +39,10 @@ struct PanelFooter: View {
     @ViewBuilder
     private var refreshState: some View {
         HStack(spacing: 5) {
-            if store.isRefreshing, animates {
-                ProgressView().controlSize(.mini)
+            // Still, like every status glyph: some lane is nearly always
+            // refreshing, so a spinner here redrew the panel every frame.
+            if store.isRefreshing {
+                Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 9.5))
                 Text("Syncing")
             } else {
                 Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 9.5))
@@ -128,88 +107,6 @@ private struct ChromeButton: View {
         }
         .buttonStyle(.borderless)
         .help(help)
-    }
-}
-
-// MARK: - eve alerts pulse
-
-/// The latest visible-lane alert as a compact badge — bell plus unread count,
-/// red when the latest is critical. Deliberately NO title text: the bar stays
-/// lean and fixed-shape, the prose lives in the hover popover, and the alerts
-/// rail is the list. A click opens the eve console for the deep dive.
-struct AlertPulse: View {
-    let latest: EveAlert
-    let unread: Int
-
-    private var tone: Color {
-        latest.severity == .critical ? .red : .secondary
-    }
-
-    var body: some View {
-        Button {
-            if let url = RuntimeConfig.current.eve {
-                NSWorkspace.shared.open(url)
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: latest.severity == .critical
-                      ? "bell.badge.fill" : "bell")
-                    .font(.system(size: 9))
-                if unread > 0 {
-                    Text("\(unread)")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .monospacedDigit()
-                }
-            }
-            .foregroundStyle(tone)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .help("\(latest.title)\n\(latest.category) · \(latest.ts.shortAge) ago — \(unread) unread\n\(latest.body)")
-    }
-}
-
-// MARK: - eve
-
-/// eve's corner: reachability plus what it is actually doing. The palette only
-/// ever showed a green dot, which said "the service answers" and nothing about
-/// the work in flight.
-struct EveSummary: View {
-    let sessions: [EveSession]
-    let online: Bool?
-
-    private var running: Int { sessions.filter(\.isRunning).count }
-    private var waiting: Int { sessions.filter { $0.status == "waiting" }.count }
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text("✦")
-                .font(.system(size: 10))
-                .foregroundStyle(online == false ? Color.secondary : Theme.eve)
-            Text(label)
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundStyle(online == false ? .tertiary : .secondary)
-                .lineLimit(1)
-        }
-        .help(help)
-    }
-
-    private var label: String {
-        guard online != false else { return "eve offline" }
-        if running == 0 && waiting == 0 { return "eve idle" }
-        var parts: [String] = []
-        if running > 0 { parts.append("\(running) running") }
-        if waiting > 0 { parts.append("\(waiting) waiting") }
-        return parts.joined(separator: " · ")
-    }
-
-    private var help: String {
-        guard online != false else { return "eve is not reachable — check the mesh" }
-        guard !sessions.isEmpty else { return "eve is reachable, no PR sessions running" }
-        return sessions.prefix(8).map { session in
-            let state = session.status ?? "?"
-            return "\(state) — \(session.prompt?.prefix(60) ?? "session \(session.id)")"
-        }.joined(separator: "\n")
     }
 }
 

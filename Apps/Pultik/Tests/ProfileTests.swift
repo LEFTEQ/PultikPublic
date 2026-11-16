@@ -24,31 +24,20 @@ final class ProfileTests: XCTestCase {
         XCTAssertEqual(example.prometheusURL, "http://192.0.2.10:9090")
         XCTAssertEqual(example.lokiURL, "http://192.0.2.10:3100")
         XCTAssertEqual(example.hlidacURL, "https://hlidac.ops.example.invalid")
-        XCTAssertEqual(example.eveURL, "https://app.assistant.example.invalid")
         XCTAssertEqual(example.sentryURL, "https://sentry.ops.example.invalid")
-        XCTAssertEqual(example.devboxIdentityFile, "~/.ssh/pultik_devbox")
-        XCTAssertFalse(example.devboxSearchesPath)
-        XCTAssertEqual(example.devboxFallbackBoxes, [.fallback])
-        XCTAssertEqual(DevboxEndpoint.fallback.destination, "devbox@192.0.2.11")
-        XCTAssertEqual(DevboxEndpoint.fallback.port, 2225)
-        // Now's identities for its rules and its eve stay what they were.
-        let hosts = RuntimeConfig(prometheus: RuntimeConfig.host(nil, default: example.prometheusURL),
-                                  eve: RuntimeConfig.host(nil, default: example.eveURL))
+        // Now's identities for its rules stay what they were.
+        let hosts = RuntimeConfig(prometheus: RuntimeConfig.host(nil, default: example.prometheusURL))
         XCTAssertEqual(hosts.prometheus?.host(), "192.0.2.10")
-        XCTAssertEqual(hosts.eve?.host(), "app.assistant.example.invalid")
     }
 
     func testGenesisAndCustomNameNoEstateHost() {
         for profile in [PultikProfile.genesis, .custom] {
             XCTAssertFalse(profile.loginItemOnFirstRun, "\(profile)")
             XCTAssertFalse(profile.seedsShippedEstate, "\(profile)")
-            for host in [profile.prometheusURL, profile.lokiURL, profile.hlidacURL, profile.eveURL, profile.sentryURL] {
+            for host in [profile.prometheusURL, profile.lokiURL, profile.hlidacURL, profile.sentryURL] {
                 XCTAssertEqual(host, "", "\(profile)")
                 XCTAssertNil(RuntimeConfig.host(nil, default: host), "\(profile)")
             }
-            XCTAssertEqual(profile.devboxIdentityFile, "", "\(profile)")
-            XCTAssertEqual(profile.devboxFallbackBoxes, [], "\(profile)")
-            XCTAssertTrue(profile.devboxSearchesPath, "\(profile)")
         }
         XCTAssertEqual(PultikProfile.genesis.hotkey, "control+space")
         XCTAssertEqual(PultikProfile.custom.hotkey, "option+space")
@@ -70,34 +59,6 @@ final class ProfileTests: XCTestCase {
         XCTAssertNil(RuntimeConfig.host("not a host", default: shipped))
     }
 
-    /// No key, no ssh: a configured key that is missing is none too.
-    func testTheDevboxProbeNeedsAnExistingKey() {
-        var config = RuntimeConfig(devboxIdentityFile: "/keys/pultik_devbox")
-        XCTAssertNil(config.devboxIdentity(exists: { _ in false }))
-        XCTAssertEqual(config.devboxIdentity(exists: { $0 == "/keys/pultik_devbox" }), "/keys/pultik_devbox")
-        config.devboxIdentityFile = nil
-        XCTAssertNil(config.devboxIdentity(exists: { _ in true }))
-        XCTAssertNil(ExecutableSearch.expand(PultikProfile.genesis.devboxIdentityFile))
-        XCTAssertEqual(ExecutableSearch.expand(PultikProfile.example.devboxIdentityFile),
-                       NSHomeDirectory() + "/.ssh/pultik_devbox")
-    }
-
-    /// example runs `~/bin/devbox` alone, as before; the others try PATH first.
-    func testTheDevboxCLIFollowsTheProfile() {
-        let home = NSHomeDirectory() + "/bin/devbox"
-        let path = ["PATH": "/opt/tools/bin:relative/bin"]
-        let example = RuntimeConfig(devboxSearchesPath: false)
-        XCTAssertEqual(example.devboxCLI(environment: path, isExecutable: { _ in true }), home)
-        XCTAssertNil(example.devboxCLI(environment: path, isExecutable: { $0 == "/opt/tools/bin/devbox" }))
-        let genesis = RuntimeConfig(devboxSearchesPath: true)
-        XCTAssertEqual(genesis.devboxCLI(environment: path, isExecutable: { _ in true }), "/opt/tools/bin/devbox")
-        XCTAssertEqual(genesis.devboxCLI(environment: path, isExecutable: { $0 == home }), home)
-        XCTAssertNil(genesis.devboxCLI(environment: path, isExecutable: { $0 == "relative/bin/devbox" }))
-        let pinned = RuntimeConfig(devboxExecutable: "/pinned/devbox", devboxSearchesPath: true)
-        XCTAssertEqual(pinned.devboxCLI(environment: path, isExecutable: { _ in true }), "/pinned/devbox")
-        XCTAssertNil(pinned.devboxCLI(environment: path, isExecutable: { $0 != "/pinned/devbox" }))
-    }
-
     func testExecutableSearchOrder() {
         let all: (String) -> Bool = { _ in true }
         let env = ["PATH": "/a/bin/:/b/bin:.:"]
@@ -117,15 +78,6 @@ final class ProfileTests: XCTestCase {
                                            environment: env, isExecutable: all))
         XCTAssertNil(ExecutableSearch.find("tool", configured: "/missing/tool", fallbacks: ["/f/tool"],
                                            environment: env, isExecutable: { $0 != "/missing/tool" }))
-        XCTAssertNil(RuntimeConfig(devboxIdentityFile: "keys/pultik_devbox").devboxIdentity(exists: { _ in true }))
-    }
-
-    func testDiscoveryFallsBackToTheProfilesBoxes() {
-        XCTAssertEqual(DevboxDiscovery.resolve(discovered: nil, previous: nil), [.fallback])
-        XCTAssertEqual(DevboxDiscovery.resolve(discovered: nil, previous: nil,
-                                               fallback: PultikProfile.genesis.devboxFallbackBoxes), [])
-        XCTAssertEqual(DevboxDiscovery.resolve(discovered: nil, previous: [],
-                                               fallback: PultikProfile.example.devboxFallbackBoxes), [.fallback])
     }
 
     /// A settings.json the full decode refuses still says its profile, so a
@@ -213,30 +165,18 @@ final class ProfileTests: XCTestCase {
         XCTAssertEqual(try shelf(#"{"profile": "genesis", "shelfURL": "https://shelf.test"}"#)?.host(), "shelf.test")
     }
 
-    /// Each toolkit call site keeps the order it always had, with only the
-    /// configured path in front: the Toolkit module and Stop… the install
-    /// paths (no PATH), Sessions' Focus `/usr/bin/env toolkit`.
-    func testToolkitKeepsEachCallSitesOrder() {
+    /// Stop…'s toolkit keeps the order it always had, with only the
+    /// configured path in front: the install paths, no PATH step.
+    func testToolkitKeepsItsInstallPathOrder() {
         let homebrew = "/opt/homebrew/bin/toolkit"
         let local = NSHomeDirectory() + "/.local/bin/toolkit"
-        XCTAssertEqual(ToolkitClient.installPaths, [homebrew, "/usr/local/bin/toolkit", local])
-        XCTAssertEqual(ToolkitClient.path(configured: nil, isExecutable: { _ in true }), homebrew)
-        XCTAssertEqual(ToolkitClient.path(configured: nil, isExecutable: { $0 != homebrew }), "/usr/local/bin/toolkit")
-        XCTAssertEqual(ToolkitClient.path(configured: nil, isExecutable: { $0 == local }), local)
-        XCTAssertNil(ToolkitClient.path(configured: nil, isExecutable: { $0.hasPrefix("/usr/bin") }), "no PATH step")
-        XCTAssertEqual(ToolkitClient.path(configured: "/pinned/toolkit", isExecutable: { _ in true }), "/pinned/toolkit")
-        XCTAssertNil(ToolkitClient.path(configured: "/pinned/toolkit", isExecutable: { $0 != "/pinned/toolkit" }))
-        XCTAssertNil(ToolkitClient.path(configured: "bin/toolkit", isExecutable: { _ in true }))
-
-        let focus = ["fleet", "focus", "--session", "s1"]
-        let plain = ToolkitClient.focusCommand(focus, configured: nil, isExecutable: { _ in false })
-        XCTAssertEqual(plain?.executable.path, "/usr/bin/env")
-        XCTAssertEqual(plain?.arguments, ["toolkit"] + focus)
-        XCTAssertEqual(ToolkitClient.focusPATH, "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/.local/bin:/usr/bin:/bin")
-        let pinned = ToolkitClient.focusCommand(focus, configured: "~/pinned/toolkit", isExecutable: { _ in true })
-        XCTAssertEqual(pinned?.executable.path, NSHomeDirectory() + "/pinned/toolkit")
-        XCTAssertEqual(pinned?.arguments, focus)
-        XCTAssertNil(ToolkitClient.focusCommand(focus, configured: "/pinned/toolkit", isExecutable: { _ in false }))
-        XCTAssertNil(ToolkitClient.focusCommand(focus, configured: "toolkit", isExecutable: { _ in true }))
+        XCTAssertEqual(ExecutableSearch.toolkitInstallPaths, [homebrew, "/usr/local/bin/toolkit", local])
+        XCTAssertEqual(ExecutableSearch.toolkit(configured: nil, isExecutable: { _ in true }), homebrew)
+        XCTAssertEqual(ExecutableSearch.toolkit(configured: nil, isExecutable: { $0 != homebrew }), "/usr/local/bin/toolkit")
+        XCTAssertEqual(ExecutableSearch.toolkit(configured: nil, isExecutable: { $0 == local }), local)
+        XCTAssertNil(ExecutableSearch.toolkit(configured: nil, isExecutable: { $0.hasPrefix("/usr/bin") }), "no PATH step")
+        XCTAssertEqual(ExecutableSearch.toolkit(configured: "/pinned/toolkit", isExecutable: { _ in true }), "/pinned/toolkit")
+        XCTAssertNil(ExecutableSearch.toolkit(configured: "/pinned/toolkit", isExecutable: { $0 != "/pinned/toolkit" }))
+        XCTAssertNil(ExecutableSearch.toolkit(configured: "bin/toolkit", isExecutable: { _ in true }))
     }
 }

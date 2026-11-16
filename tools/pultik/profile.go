@@ -24,13 +24,13 @@ import (
 var installProfiles = []string{"example", "genesis", "custom"}
 
 var profileBlurbs = map[string]string{
-	"example":  "the estate Pultik was written for: its hosts, devbox, repos, option+space, login item",
-	"genesis": "control+space, no login item, no estate host; devbox only with its CLI and key",
-	"custom":  "no estate host, ssh key, login item or repos, option+space; settings.json gets every profile key to edit",
+	"example":  "the estate Pultik was written for: its hosts, repos, option+space, login item",
+	"genesis": "control+space, no login item, no estate host",
+	"custom":  "no estate host, login item or repos, option+space; settings.json gets every profile key to edit",
 }
 
 // profileKey is one settings.json key a profile supplies, at the custom
-// profile's own default: no host, no ssh key, no login item, no repos, and
+// profile's own default: no host, no login item, no repos, and
 // the app's default hotkey.
 type profileKey struct {
 	key   string
@@ -45,12 +45,8 @@ var customProfileKeys = []profileKey{
 	{"prometheusURL", ""},
 	{"lokiURL", ""},
 	{"hlidacURL", ""},
-	{"eveURL", ""},
 	{"sentryURL", ""},
 	{"shelfURL", ""},
-	{"devboxIdentityFile", ""},
-	{"devboxExecutable", ""},
-	{"devboxFallbackBoxes", []any{}},
 	{"servers", []any{}},
 	{"services", []any{}},
 	{"projects", []any{}},

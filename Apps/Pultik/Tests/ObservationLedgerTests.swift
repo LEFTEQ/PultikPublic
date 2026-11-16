@@ -90,6 +90,34 @@ final class ObservationLedgerTests: XCTestCase {
         XCTAssertTrue(ObservationLedger.load(from: directory).entries.isEmpty)
     }
 
+    /// An entry naming a module, kind or feed this build no longer has drops
+    /// alone; every other entry and its onset survives the reload.
+    func testAnEntryThisBuildCannotDecodeDropsAlone() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "now-ledger-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var ledger = ObservationLedger()
+        _ = ledger.record(read(["pr:1", "pr:2", "pr:3"], observedAt: t0), now: t0)
+        try ledger.save(to: directory)
+
+        let url = directory.appending(path: ObservationLedger.fileName)
+        var file = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var entries = try XCTUnwrap(file["entries"] as? [[String: Any]])
+        var need = try XCTUnwrap(entries[0]["need"] as? [String: Any])
+        need["target"] = ["module": "retired", "objectID": "x"]
+        entries[0]["need"] = need
+        var other = try XCTUnwrap(entries[1]["need"] as? [String: Any])
+        other["kind"] = "retiredKind"
+        entries[1]["need"] = other
+        file["entries"] = entries
+        try JSONSerialization.data(withJSONObject: file).write(to: url)
+
+        let reloaded = ObservationLedger.load(from: directory)
+        XCTAssertEqual(reloaded.entries.count, 1)
+        XCTAssertEqual(reloaded.entries.values.first?.need.needID, "pr:3")
+        XCTAssertEqual(reloaded.entries.values.first?.firstObservedAt, t0)
+    }
+
     /// One account's complete read never clears or re-dates another's need,
     /// even under the same need id.
     func testIdentitiesNeverMix() {
@@ -112,12 +140,6 @@ final class ObservationLedgerTests: XCTestCase {
         _ = ledger.record(read(["pr:1", "pr:2"]), now: t0)
         _ = ledger.record(read(["pr:1"], .partial), now: minutes(1))
         XCTAssertEqual(Set(ledger.open(github).map(\.needID)), ["pr:1", "pr:2"])
-        // Past its feed's horizon (eve: the 24 h window) a need is out of
-        // view — on a read, a summon or a relaunch — and still unhandled.
-        let eve = NowSource(feed: .eveNotifications, identity: "eve.test/a1")
-        _ = ledger.record(read(["eve:1"], .partial, source: eve), now: t0)
-        XCTAssertEqual(ledger.open(eve, now: minutes(2)).map(\.needID), ["eve:1"])
-        XCTAssertEqual(ledger.open(eve, now: minutes(25 * 60)), [])
         XCTAssertTrue(ledger.handled(now: minutes(2)).isEmpty)
 
         _ = ledger.record(read(["pr:9"], source: other), now: minutes(2))
@@ -125,7 +147,7 @@ final class ObservationLedgerTests: XCTestCase {
         XCTAssertEqual(ledger.open(github), [])
         XCTAssertEqual(ledger.open(other).map(\.needID), ["pr:9"])
         ledger.forget(.githubStalePRs)
-        XCTAssertEqual(ledger.entries.values.map(\.source), [eve])
+        XCTAssertTrue(ledger.entries.isEmpty)
         XCTAssertTrue(ledger.handled(now: minutes(3)).isEmpty)
     }
 }

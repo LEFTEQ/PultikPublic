@@ -17,7 +17,7 @@ struct NowHomeModel {
 
 /// The glances beside Now (vt-7727 D8), in their one order: two to a row.
 enum HomeWidget: String, CaseIterable, Identifiable {
-    case prod, prs, ci, devbox, estate, mac
+    case prod, prs, ci, estate, mac
 
     var id: String { rawValue }
 }
@@ -43,7 +43,7 @@ struct HomeView<Widget: View>: View {
 }
 
 /// Now as the PR list draws PRs (D7): lanes as headings, one 28 pt line per
-/// need, folds as "+27 sessions waiting · …", Handled below. A fixed 590 pt
+/// need, folds as "+27 stale PRs · …", Handled below. A fixed 590 pt
 /// holds every lane of a folded ~100-need queue at 1600 × 985 (D8).
 struct NowColumn: View {
     static let width: CGFloat = 590

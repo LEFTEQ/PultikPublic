@@ -33,6 +33,22 @@ struct GitHubCodeHost: CodeHost {
         return answer
     }
 
+    /// Chunked to `GitHubPRDetail.activityBatchSize` per query, in order,
+    /// with `changeRequests`' rule for a deferral.
+    func activities(_ refs: [ChangeRequestRef], identity: String) async throws -> [ChangeRequestRef: ChangeRequestActivity] {
+        var answer: [ChangeRequestRef: ChangeRequestActivity] = [:]
+        for start in stride(from: 0, to: refs.count, by: GitHubPRDetail.activityBatchSize) {
+            let chunk = Array(refs[start ..< min(start + GitHubPRDetail.activityBatchSize, refs.count)])
+            do {
+                answer.merge(try await client.prActivities(chunk, identity: identity)) { $1 }
+            } catch GitHubError.deferred(let until) {
+                if answer.isEmpty { throw GitHubError.deferred(until) }
+                return answer
+            }
+        }
+        return answer
+    }
+
     func changeSet(_ request: ChangeRequest, identity: String) async throws -> ChangeSet {
         try await client.prFiles(request, identity: identity)
     }

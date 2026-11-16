@@ -29,6 +29,7 @@ extension StatusStore {
             searchResults = []
             searchFetchedAt = nil
             prIndexIdentity = nil
+            forgetWarmSet()
             let disk = prIndexDisk
             prIndexLoad = (identity, Task { await disk.load(identity: identity) })
         }
@@ -38,6 +39,9 @@ extension StatusStore {
         prIndex = index
         prIndexIdentity = identity
         prIndexLoad = nil
+        // The index names the warm set: its snapshots go to memory now, so
+        // the first open after a launch draws them (instant PR open).
+        warmPRMemory()
         if searchQuery.count >= 2 { showLocalPRs(query: searchQuery, repos: searchableRepos) }
         if searchScope.isEmpty, searchQuery.count >= 2 { search(searchQuery) }
     }

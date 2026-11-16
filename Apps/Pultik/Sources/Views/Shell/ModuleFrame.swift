@@ -63,6 +63,15 @@ protocol ModulePage: View {
     /// What the marked rows can take, in the bulk pane's order (bulk D2).
     /// Read on the main actor when the pane draws and when a verb runs.
     var bulkVerbs: [BulkVerb] { get }
+    /// The shell keeps the selection's detail built before the key that
+    /// shows it, and its neighbours' while it is open (`DetailStaging`,
+    /// focus D23): ↵ and ↑/↓ are then a flip, not a build. For a detail that
+    /// is expensive to build and draws from memory. Such a detail is mounted
+    /// off screen with `\.bodyShown` false, and must then write no shared
+    /// state, start no watch and claim no key. It reads the router's key
+    /// requests through `Heard` (read bare, every key re-runs it), and its
+    /// text fields are `stagedField()`s.
+    var stagesDetails: Bool { get }
 }
 
 extension ModulePage {
@@ -71,6 +80,7 @@ extension ModulePage {
     var detailScrollsItself: Bool { false }
     var detailOwnsHeader: Bool { false }
     var bulkVerbs: [BulkVerb] { [] }
+    var stagesDetails: Bool { false }
 }
 
 extension ModulePage where DetailContent == EmptyView {
@@ -93,30 +103,115 @@ struct ModuleHost<Page: ModulePage>: View {
     var card: (DetailRef) -> AnyView = { _ in AnyView(EmptyView()) }
     /// The bulk pane (bulk D2): while rows are marked it holds the detail's place.
     var bulk: AnyView?
+    /// A staged detail left the screen and stays built (focus D23): the panel
+    /// takes back the keys a field of it may hold.
+    var onDetailLeft: () -> Void = {}
+    /// The details a staging page keeps built (`DetailStaging`, focus D23).
+    @State private var staged: [String] = []
+    /// This module's body is the one displayed (D4).
+    @Environment(\.bodyShown) private var bodyShown
 
     var body: some View {
+        let _ = PROpenProbe.pass("host")
         let open = detailOpen && bulk == nil ? selection.flatMap { id in objects.first { $0.id == id } } : nil
-        ModuleFrame(listWidth: page.listWidth, minListWidth: page.minListWidth,
-                    inspectorOpen: inspectorOpen, detail: open, bulk: bulk) {
-            page
-        } detailView: { object in
-            StackedDetail(stack: stack, onPop: onPop) {
-                if page.detailOwnsHeader {
-                    page.detailContent(for: object)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                } else {
-                    ObjectDetail(object: object, showsFacts: !inspectorOpen, scrollsItself: page.detailScrollsItself) {
-                        page.detailContent(for: object)
-                    }
+        if page.stagesDetails {
+            stagedFrame(open)
+        } else {
+            ModuleFrame(listWidth: page.listWidth, minListWidth: page.minListWidth,
+                        inspectorOpen: inspectorOpen, detail: open, bulk: bulk) {
+                page
+            } detailView: { object in
+                StackedDetail(stack: stack, onPop: onPop) {
+                    detail(object)
+                } card: { ref in
+                    card(ref)
                 }
-            } card: { ref in
-                card(ref)
+            } inspector: { object in
+                inspector(object)
+            }
+        }
+    }
+
+    /// The frame of a page that stages its details (focus D23). Every staged
+    /// detail is mounted at full size in the slot, keyed by its object id:
+    /// the selection's is the one drawn, and only the open one is on screen
+    /// (hit testing, accessibility, `\.bodyShown`, the card stack). A step
+    /// onto a staged neighbour therefore changes which one is drawn and
+    /// builds nothing.
+    private func stagedFrame(_ open: ModuleObject?) -> some View {
+        let ids = objects.map(\.id)
+        let isOpen = open != nil
+        // Only the displayed module stages, and never under the bulk pane:
+        // nothing can open there until the marks are gone.
+        let wanted = bodyShown && bulk == nil ? DetailStaging.wanted(selection: selection, open: isOpen, in: ids) : []
+        let mounted = DetailStaging.mounted(staged: staged, selection: selection, open: isOpen, in: ids)
+        return StagedModuleFrame(listWidth: page.listWidth, minListWidth: page.minListWidth,
+                                 inspectorOpen: inspectorOpen, detail: open, bulk: bulk) {
+            page
+        } slot: {
+            ZStack(alignment: .topLeading) {
+                ForEach(mounted.compactMap { id in objects.first { $0.id == id } }) { object in
+                    let onScreen = object.id == open?.id
+                    StackedDetail(stack: onScreen ? stack : [], onPop: onPop) {
+                        detail(object)
+                    } card: { ref in
+                        card(ref)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    // Drawn, under the selection's opaque one: a view at
+                    // opacity 0 is not rendered, so a step paid its first
+                    // render; covered, a neighbour is already drawn.
+                    .background(Theme.canvas)
+                    .environment(\.bodyShown, onScreen && bodyShown)
+                    .allowsHitTesting(onScreen)
+                    .accessibilityHidden(!onScreen)
+                    // On top, as the displayed warm body is: no staged
+                    // detail's AppKit view lies over the one on screen.
+                    .zIndex(object.id == selection ? 1 : 0)
+                }
             }
         } inspector: { object in
-            ScrollView {
-                ContextSections(facts: object.facts)
-                    .padding(14)
+            inspector(object)
+        }
+        // The set follows the selection after the frame that drew the key,
+        // one detail a turn and only from an idle main thread: a key never
+        // waits for a neighbour to be built.
+        .task(id: wanted) {
+            var wait = DetailStaging.delay(staged: staged, wanted: wanted, open: isOpen)
+            while Set(staged) != Set(wanted) {
+                do { try await Task.sleep(for: wait) } catch { return }
+                await DetailStaging.idle()
+                guard !Task.isCancelled else { return }
+                staged = DetailStaging.step(from: staged, toward: wanted, open: isOpen)
+                wait = DetailStaging.turn
             }
+        }
+        // A detail that leaves the screen is still built, and so is a field
+        // of it that held the keys (a thread's reply, the tree's filter):
+        // left there, every key would be typed into a detail nobody sees.
+        .onChange(of: open?.id) { old, _ in
+            if old != nil { onDetailLeft() }
+        }
+    }
+
+    /// An object's detail: the page's own content, under the shell's header
+    /// unless the page draws it.
+    @ViewBuilder
+    private func detail(_ object: ModuleObject) -> some View {
+        if page.detailOwnsHeader {
+            page.detailContent(for: object)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            ObjectDetail(object: object, showsFacts: !inspectorOpen, scrollsItself: page.detailScrollsItself) {
+                page.detailContent(for: object)
+            }
+        }
+    }
+
+    private func inspector(_ object: ModuleObject) -> some View {
+        ScrollView {
+            ContextSections(facts: object.facts)
+                .padding(14)
         }
     }
 }
@@ -177,16 +272,11 @@ struct ModuleFrame<List: View, Detail: View, Inspector: View>: View {
     @ViewBuilder var detailView: (ModuleObject) -> Detail
     @ViewBuilder var inspector: (ModuleObject) -> Inspector
 
-    /// The detail never gets narrower than this; the list gives way first.
-    static var detailFloor: CGFloat { 420 }
-    static var inspectorWidth: CGFloat { 260 }
-
     var body: some View {
         GeometryReader { geo in
             let inspecting = inspectorOpen && detail != nil
-            let room = geo.size.width - (inspecting ? Self.inspectorWidth + 1 : 0) - Self.detailFloor - 1
             let paned = detail != nil || bulk != nil
-            let width = paned ? min(listWidth, max(320, room)) : geo.size.width
+            let width = paned ? ModuleColumns.list(listWidth, in: geo.size.width, inspecting: inspecting) : geo.size.width
             HStack(spacing: 0) {
                 // Always the same scroller, so the page keeps its state when
                 // the detail or inspector narrows it: it only scrolls once the
@@ -211,18 +301,132 @@ struct ModuleFrame<List: View, Detail: View, Inspector: View>: View {
                     if inspecting {
                         divider
                         inspector(detail)
-                            .frame(width: Self.inspectorWidth)
+                            .frame(width: ModuleColumns.inspector)
                             .frame(maxHeight: .infinity, alignment: .top)
                     }
                 }
             }
-            .animation(.snappy(duration: 0.2), value: paned)
+            // A detail opens in one step: its first frame is the whole of it,
+            // never 200 ms of the list narrowing under it. Closing still moves.
+            .animation(paned ? nil : .snappy(duration: 0.2), value: paned)
             .animation(.snappy(duration: 0.2), value: inspecting)
         }
     }
 
     private var divider: some View {
         Rectangle().fill(Theme.hairline).frame(width: 1)
+    }
+}
+
+/// The frame's column widths (D4-B), one rule for both frames.
+enum ModuleColumns {
+    /// The detail never gets narrower than this; the list gives way first.
+    static let detailFloor: CGFloat = 420
+    static let inspector: CGFloat = 260
+
+    /// The list's width beside a detail or the bulk pane: the page's, less
+    /// where the detail (beside ⌘I's inspector) would go under its floor.
+    static func list(_ listWidth: CGFloat, in total: CGFloat, inspecting: Bool) -> CGFloat {
+        min(listWidth, max(320, total - (inspecting ? inspector + 1 : 0) - detailFloor - 1))
+    }
+}
+
+/// `ModuleFrame` for a page that stages its details (focus D23). The detail
+/// slot is always in the tree, at the width a detail opens at, so what is
+/// staged in it is built and laid out before the key. Closed, it is parked
+/// past the frame's trailing edge and clipped; ↵ narrows the list and moves
+/// the slot in — the same views, nothing rebuilt. The bulk pane and ⌘I's
+/// inspector hold the places they hold in `ModuleFrame`, and nothing here
+/// sizes the frame: it fills what the panel gives it.
+struct StagedModuleFrame<List: View, Slot: View, Inspector: View>: View {
+    var listWidth: CGFloat
+    /// `ModulePage.minListWidth`: below it the list scrolls sideways.
+    var minListWidth: CGFloat = 0
+    var inspectorOpen: Bool
+    /// The open detail's object; nil parks the slot.
+    let detail: ModuleObject?
+    /// The bulk pane, drawn where the detail would be.
+    var bulk: AnyView?
+    @ViewBuilder var list: () -> List
+    @ViewBuilder var slot: () -> Slot
+    @ViewBuilder var inspector: (ModuleObject) -> Inspector
+
+    var body: some View {
+        GeometryReader { geo in
+            let total = geo.size.width
+            let open = detail != nil
+            let inspecting = inspectorOpen && open
+            let paned = open || bulk != nil
+            // Parked, the slot already has the width ↵ gives it: ⌘I's column
+            // is taken off while the inspector is on, open or not.
+            let beside = ModuleColumns.list(listWidth, in: total, inspecting: inspectorOpen)
+            let slotWidth = max(0, total - beside - 1 - (inspectorOpen ? ModuleColumns.inspector + 1 : 0))
+            let width = open ? beside : bulk != nil ? ModuleColumns.list(listWidth, in: total, inspecting: false) : total
+            ZStack(alignment: .topLeading) {
+                // The same scroller as `ModuleFrame`'s, for the same reason.
+                ScrollView(.horizontal) {
+                    list()
+                        .frame(width: max(width, minListWidth))
+                }
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+                .frame(width: width)
+                // Closed, the full-width list covers the parked slot: the
+                // staged detail is drawn beneath it, so ↵ only narrows the
+                // list over a detail already rendered (clipped past the edge,
+                // it was not rendered until it came in).
+                .background(Theme.canvas)
+                .zIndex(open ? 0 : 1)
+                divider.offset(x: width).zIndex(1)
+                slot()
+                    .frame(width: slotWidth, height: geo.size.height, alignment: .topLeading)
+                    .background(Theme.canvas)
+                    .offset(x: beside + 1)
+                    .allowsHitTesting(open)
+                    .accessibilityHidden(!open)
+                if let bulk {
+                    bulk
+                        .frame(width: max(0, total - width - 1), height: geo.size.height, alignment: .topLeading)
+                        .background(Theme.canvas)
+                        .offset(x: width + 1)
+                }
+                if inspecting, let detail {
+                    divider.offset(x: total - ModuleColumns.inspector - 1)
+                    inspector(detail)
+                        .frame(width: ModuleColumns.inspector)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .offset(x: total - ModuleColumns.inspector)
+                }
+            }
+            .frame(width: total, height: geo.size.height, alignment: .topLeading)
+            .clipped()
+            // As in `ModuleFrame`: a detail opens in one step, closing moves —
+            // the widening list pushes the slot out past the edge.
+            .animation(paned ? nil : .snappy(duration: 0.2), value: paned)
+            .animation(.snappy(duration: 0.2), value: inspecting)
+        }
+    }
+
+    private var divider: some View {
+        Rectangle().fill(Theme.hairline).frame(width: 1)
+    }
+}
+
+extension View {
+    /// A text field inside a detail a page stages (focus D23): while its
+    /// detail is off screen it takes no focus. Opacity 0 leaves a field in
+    /// the key-view loop, so ⇥ from a field on screen would land in one
+    /// nobody sees. On the field alone: disabling the whole detail would
+    /// re-draw every control of two workbenches inside a step's own frame.
+    func stagedField() -> some View {
+        modifier(StagedField())
+    }
+}
+
+private struct StagedField: ViewModifier {
+    @Environment(\.bodyShown) private var onScreen
+
+    func body(content: Content) -> some View {
+        content.disabled(!onScreen)
     }
 }
 

@@ -393,6 +393,24 @@ actor GitHubClient {
         }
     }
 
+    /// The warm set's batched activity read (instant PR open): up to
+    /// `GitHubPRDetail.activityBatchSize` per query, in the background,
+    /// spending the polling budget like `prConversations`. One query per
+    /// call — the caller chunks.
+    func prActivities(_ refs: [ChangeRequestRef], identity: String) async throws -> [ChangeRequestRef: ChangeRequestActivity] {
+        guard !refs.isEmpty else { return [:] }
+        let authorization = try token(for: identity)
+        prBatchRequests += 1
+        let data = try await performRequest("/graphql", method: "POST", body: GitHubPRDetail.activityBatchBody(refs),
+                                            cache: false, priority: .background, polling: true,
+                                            authorization: authorization)
+        do {
+            return try GitHubPRDetail.decodeActivityBatch(data, refs: refs, decoder: decoder)
+        } catch GitHubPRDetail.Failure.rateLimited {
+            throw graphQLQuotaDeferral()
+        }
+    }
+
     /// A spent primary quota pauses GraphQL alone; only a limit without one
     /// is secondary, which GitHub applies across every resource.
     private func graphQLQuotaDeferral() -> GitHubError {

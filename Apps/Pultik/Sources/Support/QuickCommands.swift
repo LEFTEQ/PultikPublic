@@ -1,8 +1,7 @@
 import AppKit
 
 /// Palette quick commands — instant launchers the palette surfaces while
-/// typing. Matching is substring-on-keywords; Enter runs the first match
-/// (commands win over ask-eve).
+/// typing. Matching is substring-on-keywords; Enter runs the first match.
 struct QuickCommand: Identifiable {
     let id: String
     let title: String
@@ -77,7 +76,6 @@ struct QuickCommand: Identifiable {
                 keywords: ["vitrinka", "board", "boards"],
                 run: { openVitrinka() }
             ),
-        ] + eveConsole + [
             QuickCommand(
                 id: "settings",
                 title: "Pultík Settings",
@@ -87,20 +85,6 @@ struct QuickCommand: Identifiable {
                 run: { AppDelegate.shared?.openSettings() }
             ),
         ]
-    }
-
-    /// Only while settings.json or the profile names an eve.
-    @MainActor
-    private static var eveConsole: [QuickCommand] {
-        guard let eve = RuntimeConfig.current.eve else { return [] }
-        return [QuickCommand(
-            id: "eve-console",
-            title: "Open eve console",
-            subtitle: "sessions & approvals",
-            systemImage: "sparkles",
-            keywords: ["eve", "console", "sessions"],
-            run: { NSWorkspace.shared.open(eve) }
-        )]
     }
 
     @MainActor

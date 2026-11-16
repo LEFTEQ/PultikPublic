@@ -90,12 +90,10 @@ struct ObservationLedger: Equatable, Sendable {
     }
 
     /// What `source` still has open: everything a complete read listed, plus
-    /// what a partial or failed read could not see — missing is not resolved
-    /// — less what began before its feed's `horizon`, out of its view.
-    func open(_ source: NowSource, now: Date = Date()) -> [NowNeed] {
+    /// what a partial or failed read could not see — missing is not resolved.
+    func open(_ source: NowSource) -> [NowNeed] {
         entries.values.filter { entry in
             entry.source == source && entry.isActive
-                && source.feed.horizon.map { now.timeIntervalSince(entry.need.onset.date) <= $0 } ?? true
         }.map(\.need)
     }
 
@@ -158,8 +156,21 @@ extension ObservationLedger {
         let entries: [Entry]
     }
 
+    /// The read side of `File`: an entry this build cannot decode (a kind,
+    /// feed or module since retired) is dropped alone, never the whole file.
+    private struct LoadedFile: Decodable {
+        let version: Int
+        let entries: [LoadedEntry]
+    }
+
+    private struct LoadedEntry: Decodable {
+        let entry: Entry?
+        init(from decoder: Decoder) throws { entry = try? Entry(from: decoder) }
+    }
+
     /// A missing file is a first launch; an unreadable one or another
-    /// version starts empty and says so in the log.
+    /// version starts empty and says so in the log; an entry this build
+    /// cannot decode is skipped and the rest kept.
     static func load(from directory: URL, cap: Int = defaultCap) -> ObservationLedger {
         var ledger = ObservationLedger(cap: cap)
         let url = directory.appending(path: fileName)
@@ -173,12 +184,12 @@ extension ObservationLedger {
             return ledger
         }
         do {
-            let file = try JSONDecoder().decode(File.self, from: data)
+            let file = try JSONDecoder().decode(LoadedFile.self, from: data)
             guard file.version == fileVersion else {
                 NSLog("pultik: now ledger v%d, this build reads v%d — starting empty", file.version, fileVersion)
                 return ledger
             }
-            for entry in file.entries {
+            for entry in file.entries.compactMap(\.entry) {
                 ledger.entries[key(entry.source, entry.need.needID)] = entry
             }
         } catch {

@@ -8,7 +8,8 @@ use super::{Lens, LensSpec, Palette};
 use crate::density::FoldRules;
 use crate::geometry::ZoomPolicy;
 use crate::mark::{Inset, Mark, Paint, Shape, Span};
-use crate::time::{DAY_MS, HOUR_MS, Ms, SECOND_MS, duration};
+use crate::time::{DAY_MS, HOUR_MS, Ms, SECOND_MS, Words};
+use crate::tracks::Tracking;
 use canvas_draw::Rgba;
 use std::sync::Arc;
 
@@ -85,15 +86,22 @@ impl Lens for CiLens {
                 folds: false,
                 reach: 6.0 * DAY_MS,
             },
-            tracks: true,
+            tracks: Tracking::Zoomed,
             future: 60.0 * SECOND_MS,
         }
     }
 
     fn mark(&self, j: &CiJob, p: &Palette) -> Mark {
+        self.mark_in(j, p, Words::english())
+    }
+}
+
+impl CiLens {
+    /// `j` as the engine draws it, its labels in `words`.
+    pub fn mark_in(&self, j: &CiJob, p: &Palette, words: &Words) -> Mark {
         let ran = match (j.started_at, j.completed_at) {
-            (Some(s), Some(e)) => Some(duration(e - s)),
-            (Some(_), None) => Some("running".to_string()),
+            (Some(s), Some(e)) => Some(words.duration(e - s)),
+            (Some(_), None) => Some(words.running.to_string()),
             _ => None,
         };
         let mem = j
@@ -110,7 +118,7 @@ impl Lens for CiLens {
         let wait = j
             .started_at
             .filter(|s| s - j.queued_at >= SECOND_MS)
-            .map(|s| format!("waited {}", duration(s - j.queued_at)).into());
+            .map(|s| words.waited_for(s - j.queued_at).into());
         let mut paint = Paint {
             shape: Shape::Rect,
             w: 9.0,
@@ -122,6 +130,7 @@ impl Lens for CiLens {
             ring: None,
             glyph: None,
             above: None,
+            beside: None,
             live: (j.result == CiResult::Running).then_some(p.ok),
             span: Some(Span {
                 run: j.started_at,
@@ -134,6 +143,8 @@ impl Lens for CiLens {
                     .map(|(peak, reserved)| peak as f32 / reserved as f32),
                 text,
                 ink: p.background,
+                stretches: Vec::new(),
+                cap: None,
             }),
         };
         match j.result {

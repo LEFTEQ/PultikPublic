@@ -1,15 +1,11 @@
 import Foundation
 
 extension JSONDecoder.DateDecodingStrategy {
-    /// ISO8601 with or without fractional seconds — Sentry and eve both emit
-    /// fractional timestamps, which the plain .iso8601 strategy rejects.
-    /// Formatters are created inside the closure: ISO8601DateFormatter is not
-    /// Sendable, so a captured instance would trip strict concurrency.
+    /// ISO8601 with or without fractional seconds — Sentry emits fractional
+    /// timestamps, which the plain .iso8601 strategy rejects.
     static let iso8601Flexible = custom { decoder in
         let raw = try decoder.singleValueContainer().decode(String.self)
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw) {
+        if let date = ISO8601Parsers.fractional.date(from: raw) ?? ISO8601Parsers.plain.date(from: raw) {
             return date
         }
         throw DecodingError.dataCorrupted(.init(
@@ -17,6 +13,18 @@ extension JSONDecoder.DateDecodingStrategy {
             debugDescription: "Unparseable ISO8601 date: \(raw)"
         ))
     }
+}
+
+/// One parser of each kind for every decode: a formatter per date field cost
+/// two allocations per timestamp (the Mac health decode's top frame). Parsing
+/// with an ISO8601DateFormatter is thread-safe; it is never mutated after init.
+private enum ISO8601Parsers {
+    nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    nonisolated(unsafe) static let plain = ISO8601DateFormatter()
 }
 
 extension Date {

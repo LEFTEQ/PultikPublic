@@ -436,9 +436,20 @@ impl TextSystem {
         spec: FontSpec,
         max_width: f32,
     ) -> Arc<ShapedLine> {
+        self.fit(text, spec, max_width).1
+    }
+
+    /// [`shape_truncated`](Self::shape_truncated) with the text it shaped: `text` itself when it
+    /// fits, else its cut prefix and the ellipsis (what a painter that sets text itself draws).
+    pub fn fit<'a>(
+        &mut self,
+        text: &'a str,
+        spec: FontSpec,
+        max_width: f32,
+    ) -> (std::borrow::Cow<'a, str>, Arc<ShapedLine>) {
         let full = self.shape(text, spec);
         if full.width <= max_width + 0.01 {
-            return full;
+            return (std::borrow::Cow::Borrowed(text), full);
         }
         let ell = self.shape(ELLIPSIS, spec).width;
         let room = (max_width - ell).max(0.0);
@@ -455,7 +466,22 @@ impl TextSystem {
         let mut s: String = text.chars().take(cut).collect();
         s.truncate(s.trim_end().len());
         s.push_str(ELLIPSIS);
-        self.shape(&s, spec)
+        let shaped = self.shape(&s, spec);
+        (std::borrow::Cow::Owned(s), shaped)
+    }
+
+    /// Browsers: set UI text in CSS font family list `family` (as the host's stylesheet names
+    /// it, e.g. `"Inter", system-ui, sans-serif`; empty: `sans-serif`) instead of `sans-serif`,
+    /// so text is measured in the face a page paints. Call it again once the page's web fonts
+    /// have loaded: cached shapes and the atlas are dropped on every call.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_ui_family(&mut self, family: &str) {
+        // Every shape keys its face by id, and the ids start over.
+        self.platform.set_ui_family(family);
+        self.shapes.clear();
+        self.rows.clear();
+        self.code_rows.clear();
+        self.atlas.clear();
     }
 
     /// The atlas slot for a glyph, rasterizing it on first use. `None` for ink-less glyphs.
@@ -593,6 +619,20 @@ mod tests {
         let cut = ts.shape_truncated("a fairly long agent title that will not fit", spec, 80.0);
         assert!(cut.width <= 80.5, "{}", cut.width);
         assert!(cut.width < full.width);
+    }
+
+    #[test]
+    fn a_fit_names_the_text_it_shaped() {
+        let mut ts = TextSystem::new();
+        let spec = FontSpec::ui(13.0);
+        let long = "a fairly long agent title that will not fit";
+        let (text, line) = ts.fit(long, spec, 80.0);
+        assert!(matches!(text, std::borrow::Cow::Owned(_)));
+        assert!(text.ends_with(ELLIPSIS) && long.starts_with(text.trim_end_matches(ELLIPSIS)));
+        assert_eq!(line, ts.shape_truncated(long, spec, 80.0));
+        assert_eq!(line, ts.shape(&text, spec));
+        let (text, _) = ts.fit("short", spec, 80.0);
+        assert!(matches!(text, std::borrow::Cow::Borrowed("short")));
     }
 
     #[cfg(target_vendor = "apple")]

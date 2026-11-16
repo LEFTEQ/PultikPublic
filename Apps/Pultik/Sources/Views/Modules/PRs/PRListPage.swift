@@ -57,6 +57,7 @@ struct PRListPage: View {
 
     var body: some View {
         let entries = entries
+        let _ = PROpenProbe.pass("prList")
         SelectionScrollView(selection: selectedID) {
             VStack(alignment: .leading, spacing: 2) {
                 // Silent while the archive has (or is fetching) something to
@@ -133,7 +134,6 @@ extension PRListPage: ModulePage {
             var facts = [ModuleObject.Fact(label: "repo", value: entry.repoSlug),
                          .init(label: "branch", value: info.pr.head.ref)]
             if let updated = info.pr.updatedAt { facts.append(.init(label: "updated", value: PultikFormat.ago(updated, now: now))) }
-            if let status = entry.eveSession?.status { facts.append(.init(label: "eve session", value: status)) }
             return ModuleObject(id: "pr:\(entry.id)", title: info.pr.title, label: "#\(info.pr.number)",
                                 status: Self.status(info), meta: entry.repoName, symbol: "arrow.triangle.pull",
                                 project: entry.repoName, url: URL(string: info.pr.htmlUrl), facts: facts,
@@ -174,10 +174,14 @@ extension PRListPage: ModulePage {
     /// The workbench draws its compact roll-up header (D7).
     var detailOwnsHeader: Bool { true }
 
+    /// A workbench costs most of an open to build and draws from the warm
+    /// set: the shell keeps the selection's and its neighbours' built (focus D23).
+    var stagesDetails: Bool { true }
+
     @ViewBuilder
     func detailContent(for object: ModuleObject) -> some View {
         if let ref = ref(for: object.id) {
-            PRWorkbench(store: store, ref: ref, object: object).id(ref)
+            PRWorkbench(store: store, ref: ref, object: object).equatable().id(ref)
         }
     }
 

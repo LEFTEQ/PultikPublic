@@ -2,9 +2,8 @@ import Foundation
 import Observation
 
 /// Firing critical episodes (`FiringWatch.episodeKey`) the user has already
-/// seen in the panel — the icon's badge counts the rest. AlertSeenStore's
-/// contract for the Firing rail: opening the panel marks what it shows as
-/// seen, persisted beside settings.json so a relaunch does not re-badge them.
+/// seen in the panel — the icon's badge counts the rest. Opening the panel
+/// marks what the Firing rail shows as seen, persisted beside settings.json so a relaunch does not re-badge them.
 @MainActor
 @Observable
 final class FiringSeenStore {

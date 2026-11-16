@@ -224,6 +224,7 @@ struct MergeCanvas: NSViewRepresentable {
         let view = MergeCanvasView(frame: .zero)
         context.coordinator.scrollSerial = scrollRequest?.serial
         context.coordinator.stepSerial = stepRequest?.serial
+        context.coordinator.shown = context.environment.bodyShown
         return view
     }
 
@@ -235,12 +236,23 @@ struct MergeCanvas: NSViewRepresentable {
             view.show(file, id: fileID, labels: labels)
         }
         view.setShowsBase(showsBase)
-        view.setDrawing(context.environment.panelIsPresented && context.environment.bodyShown)
+        let shown = context.environment.bodyShown
+        view.setDrawing(context.environment.panelIsPresented && shown)
         if active {
             MergeCanvasView.active = view
-            if let scrollRequest, scrollRequest.serial != coordinator.scrollSerial { view.scroll(scrollRequest.amount) }
-            if let stepRequest, stepRequest.serial != coordinator.stepSerial { view.next(forward: stepRequest.forward) }
+            // As `CodeCanvas`: a staged workbench hands its canvas no request
+            // while it is off screen (focus D23), and the one it finds on
+            // coming back was made for another canvas.
+            if coordinator.shown {
+                if let scrollRequest, scrollRequest.serial != coordinator.scrollSerial { view.scroll(scrollRequest.amount) }
+                if let stepRequest, stepRequest.serial != coordinator.stepSerial { view.next(forward: stepRequest.forward) }
+            }
+        } else if MergeCanvasView.active === view {
+            // A staged workbench keeps its canvas mounted: the panel driver
+            // reads the one on screen, never one nobody sees.
+            MergeCanvasView.active = nil
         }
+        coordinator.shown = shown
         // A request made while another tab was shown is never replayed here.
         coordinator.scrollSerial = scrollRequest?.serial
         coordinator.stepSerial = stepRequest?.serial
@@ -255,5 +267,7 @@ struct MergeCanvas: NSViewRepresentable {
     final class Coordinator {
         var scrollSerial: Int?
         var stepSerial: Int?
+        /// `\.bodyShown` at the last update: false while its workbench was staged off screen.
+        var shown = false
     }
 }

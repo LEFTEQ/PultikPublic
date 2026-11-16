@@ -81,15 +81,14 @@ struct KbdHint: View {
 }
 
 /// A 7 pt status dot. Colour is never the only signal: a ring is blind, a
-/// pulse is alive, a spinner is running.
+/// haloed dot is alive, an open ring is running. All of them are still: a
+/// repeating effect re-rendered the whole panel every frame and held the main
+/// thread on the window server 97% of the time while idle (2026-11-16 bench).
 struct StatusDot: View {
     enum Style { case solid, ring, pulse, spin }
     let tone: Color
     var style: Style = .solid
     var size: CGFloat = 7
-    /// Pulse and spin only on a displayed body of a presented panel: a hidden
-    /// warm body's repeating effect re-renders the panel every frame (`animates`).
-    @Environment(\.animates) private var animates
 
     var body: some View {
         switch style {
@@ -98,18 +97,12 @@ struct StatusDot: View {
         case .ring:
             Circle().strokeBorder(tone, lineWidth: 1.5).frame(width: size, height: size)
         case .pulse:
-            Image(systemName: "circle.fill")
-                .font(.system(size: size))
-                .foregroundStyle(tone)
-                .symbolEffect(.pulse, options: .repeating, isActive: animates)
+            Circle().fill(tone).frame(width: size, height: size)
+                .background(Circle().fill(tone.opacity(0.3)).frame(width: size + 4, height: size + 4))
                 .frame(width: size, height: size)
         case .spin:
-            if animates {
-                ProgressView().controlSize(.mini).tint(tone).frame(width: size + 3, height: size + 3)
-            } else {
-                Circle().trim(from: 0, to: 0.75).stroke(tone, lineWidth: 1.5)
-                    .frame(width: size, height: size).frame(width: size + 3, height: size + 3)
-            }
+            Circle().trim(from: 0, to: 0.75).stroke(tone, lineWidth: 1.5)
+                .frame(width: size, height: size).frame(width: size + 3, height: size + 3)
         }
     }
 }
@@ -118,7 +111,7 @@ struct StatusDot: View {
 /// check chips: the failing check leads in danger with an ✗; passing checks
 /// stay neutral with a 5 pt ok dot.
 struct Chip: View {
-    enum Variant { case neutral, ok, warn, danger, eve, dashed, selected, failing, passing }
+    enum Variant { case neutral, ok, warn, danger, dashed, selected, failing, passing }
     let text: String
     var variant: Variant = .neutral
     var symbol: String? = nil
@@ -163,7 +156,6 @@ struct Chip: View {
         case .ok: Theme.ok
         case .warn: Theme.warn
         case .danger, .failing: Theme.danger
-        case .eve: Theme.eve
         case .selected: Theme.accent
         }
     }

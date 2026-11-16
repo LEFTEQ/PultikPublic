@@ -17,29 +17,9 @@ enum NowAdapters {
 }
 
 /// Inputs for sources whose app types live outside the Foundation harness
-/// (AppKit stores, settings): the app builds these from `TodoItem`,
-/// `MacHealth` and `ExpiryRadar`, so the adapters never see app types.
+/// (AppKit stores, settings): the app builds these from `MacHealth` and
+/// `ExpiryRadar`, so the adapters never see app types.
 enum NowInputs {
-    /// One vitrinka `todo` task (`TodoItem`).
-    struct Todo: Equatable, Sendable {
-        /// `TodoItem.defaultLead`: a todo without a `lead` ripens 2 h early.
-        static let defaultLead: TimeInterval = 2 * 3600
-
-        let id: Int64
-        /// The task key ("FIX-1365"), when the engine gave one.
-        var key: String? = nil
-        let project: String
-        let title: String
-        /// todo · in_progress · done · cancelled
-        var status: String = "todo"
-        let dueAt: Date?
-        var lead: TimeInterval? = nil
-        /// `/me/ripe`'s reason: overdue · due · milestone.
-        var reason: String? = nil
-        /// The server's task URL — never rebuilt, so a click keeps its workspace.
-        var url: String? = nil
-    }
-
     /// Toolkit's Mac health report (`MacHealth`).
     struct MacReport: Equatable, Sendable {
         let generatedAt: Date

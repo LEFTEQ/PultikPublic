@@ -14,6 +14,9 @@ enum GitHubPRDetail {
     static let checkLimit = 100
     /// Conversations per batched query (the warm set, D9).
     static let batchSize = 10
+    /// Activities per batched query (instant PR open): each carries a
+    /// hundred timeline events, so fewer travel together.
+    static let activityBatchSize = 5
 
     /// The workbench's timeline reads the newest this many events
     /// (`timelineTruncated`), the pending review this many comments.
@@ -199,17 +202,18 @@ enum GitHubPRDetail {
         LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, RENAMED_TITLE_EVENT, BASE_REF_CHANGED_EVENT
         """
 
-    /// Everything the workbench reads beside the conversation, in one query.
+    /// The repository's merge settings beside each activity.
+    private static let activityRepositoryFields =
+        "mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed deleteBranchOnMerge viewerDefaultMergeMethod"
+
+    /// Everything the workbench reads beside the conversation — the single
+    /// read and the batched one select exactly the same, so a warm activity
+    /// is the one ↵ would have read.
     /// A pending review comment carries no diff side of its own; its thread
     /// does, so the newest threads' sides travel with their first comment's id.
-    private static var activityQuery: String {
+    private static var activityFields: String {
         """
-        query($owner: String!, $name: String!, $number: Int!) {
-          viewer { login }
-          repository(owner: $owner, name: $name) {
-            mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed deleteBranchOnMerge
-            viewerDefaultMergeMethod
-            pullRequest(number: $number) {
+        fragment ActivityFields on PullRequest {
               id state updatedAt headRefOid isCrossRepository mergeStateStatus
               viewerCanUpdate viewerCanMergeAsAdmin viewerCanUpdateBranch viewerCanDeleteHeadRef
               viewerCanEnableAutoMerge viewerCanDisableAutoMerge
@@ -248,10 +252,57 @@ enum GitHubPRDetail {
                   ... on BaseRefChangedEvent { id actor { login } createdAt previousRefName currentRefName }
                 }
               }
-            }
-          }
         }
         """
+    }
+
+    private static var activityQuery: String {
+        """
+        query($owner: String!, $name: String!, $number: Int!) {
+          viewer { login }
+          repository(owner: $owner, name: $name) { \(activityRepositoryFields) pullRequest(number: $number) { ...ActivityFields } }
+        }
+
+        """ + activityFields
+    }
+
+    /// Up to `activityBatchSize` activities in one query (the warm set), one
+    /// aliased repository each like `batchBody`, and the viewer once.
+    static func activityBatchBody(_ refs: [ChangeRequestRef]) throws -> Data {
+        var declarations: [String] = []
+        var selections: [String] = []
+        var variables: [String: Any] = [:]
+        for (index, ref) in refs.enumerated() {
+            let parts = ref.repo.split(separator: "/", maxSplits: 1).map(String.init)
+            declarations.append("$o\(index): String!, $n\(index): String!, $p\(index): Int!")
+            selections.append("r\(index): repository(owner: $o\(index), name: $n\(index)) { \(activityRepositoryFields) "
+                + "pullRequest(number: $p\(index)) { ...ActivityFields } }")
+            variables["o\(index)"] = parts.first ?? ref.repo
+            variables["n\(index)"] = parts.count > 1 ? parts[1] : ""
+            variables["p\(index)"] = ref.number
+        }
+        let query = "query(\(declarations.joined(separator: ", "))) {\nviewer { login }\n\(selections.joined(separator: "\n"))\n}\n"
+            + activityFields
+        return try JSONSerialization.data(withJSONObject: ["query": query, "variables": variables])
+    }
+
+    /// A batched answer, by the refs asked in order. A PR GitHub could not
+    /// read is absent, never an empty activity; quota exhaustion throws for
+    /// the whole batch, and so does an answer with no data at all.
+    static func decodeActivityBatch(_ data: Data, refs: [ChangeRequestRef],
+                                    decoder: JSONDecoder) throws -> [ChangeRequestRef: ChangeRequestActivity] {
+        let response = try decoder.decode(ActivityBatchResponse.self, from: data)
+        let errors = response.errors ?? []
+        if errors.contains(where: { $0.type == "RATE_LIMITED" }) { throw Failure.rateLimited }
+        guard let answer = response.data else {
+            throw GitHubError.graphQL(errors.first?.message ?? "no activity answered")
+        }
+        var activities: [ChangeRequestRef: ChangeRequestActivity] = [:]
+        for (index, ref) in refs.enumerated() {
+            guard let repository = answer.repositories["r\(index)"], let pr = repository.pullRequest else { continue }
+            activities[ref] = activity(pr, repository: repository, viewer: answer.viewer.login)
+        }
+        return activities
     }
 
     /// Owner, name and number travel as variables, never spliced.
@@ -650,6 +701,35 @@ enum GitHubPRDetail {
     private struct ActivityData: Decodable {
         let viewer: Actor
         let repository: ActivityRepository?
+    }
+
+    private struct ActivityBatchResponse: Decodable {
+        let data: ActivityBatchData?
+        let errors: [GraphQLFailure]?
+    }
+
+    /// The viewer beside one aliased repository per PR (`r0`, `r1`, …); a
+    /// repository GitHub could not read is null.
+    private struct ActivityBatchData: Decodable {
+        let viewer: Actor
+        let repositories: [String: ActivityRepository]
+
+        private struct Alias: CodingKey {
+            let stringValue: String
+            var intValue: Int? { nil }
+            init(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { nil }
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Alias.self)
+            viewer = try container.decode(Actor.self, forKey: Alias(stringValue: "viewer"))
+            var repositories: [String: ActivityRepository] = [:]
+            for key in container.allKeys where key.stringValue != "viewer" {
+                repositories[key.stringValue] = try container.decodeIfPresent(ActivityRepository.self, forKey: key)
+            }
+            self.repositories = repositories
+        }
     }
 
     private struct ActivityRepository: Decodable {

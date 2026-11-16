@@ -2,9 +2,47 @@
 //! that re-fold and re-emit) and the policy that trades marks for density bins.
 
 use crate::time::{DAY_MS, MIN_MS, Ms};
+use canvas_draw::Rgba;
 
 /// The axis strip above the lanes, points.
 pub const AXIS_PT: f32 = 30.0;
+
+/// How the time after now is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Future {
+    #[default]
+    Plain,
+    /// Diagonal strokes in this colour across every lane (the days ahead).
+    Hatched(Rgba),
+}
+
+/// The chrome a host sets around the lanes: the label column's width (0 when the host draws
+/// its own lane heads), whether the axis strip is painted, and how the future is drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Chrome {
+    pub label_w: f32,
+    pub axis: bool,
+    pub future: Future,
+}
+
+impl Default for Chrome {
+    /// Both native apps': a 168 pt label column, the axis strip, a plain future.
+    fn default() -> Self {
+        Chrome {
+            label_w: crate::timeline::LABEL_W,
+            axis: true,
+            future: Future::Plain,
+        }
+    }
+}
+
+impl Chrome {
+    /// The axis strip's height: [`AXIS_PT`], or 0 when it is not painted.
+    pub fn axis_h(&self) -> f32 {
+        if self.axis { AXIS_PT } else { 0.0 }
+    }
+}
+
 /// Zoom limits: 15 min to 90 d per screen width.
 pub const MIN_SPAN_MS: Ms = 15.0 * MIN_MS;
 pub const MAX_SPAN_MS: Ms = 90.0 * DAY_MS;

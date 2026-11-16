@@ -6,7 +6,7 @@ import Foundation
 ///
 /// - Only `critical` rules notify; warnings stay rail-only.
 /// - The first answer after launch is silent: whatever already fires is
-///   history, the same idiom as eve alerts and Sentry.
+///   history, the same idiom as Sentry.
 /// - An alert is one instance — `FiringAlert.id`, rule + labels — so one
 ///   rule firing on two containers notifies twice, but more than
 ///   `burstLimit` new ones in a poll collapse into one summary.

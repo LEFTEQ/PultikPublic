@@ -46,14 +46,28 @@ final class MacHealthStore {
         timer = nil
     }
 
-    /// A few KB from the local disk — read inline on main. Every read is
-    /// Now's read of this Mac's findings too.
+    /// Read and decoded off the main thread: a decode every 15 s was a
+    /// main-thread stall in the 2026-11-16 profile. Every read is Now's read
+    /// of this Mac's findings too; a later read supersedes one still running.
     func reread() {
-        let health = read()
+        readGeneration += 1
+        let generation = readGeneration
+        let url = url
+        Task {
+            let read = await Task.detached(priority: .utility) { Self.read(url) }.value
+            guard generation == readGeneration else { return }
+            apply(read)
+        }
+    }
+
+    @ObservationIgnored private var readGeneration = 0
+
+    private func apply(_ read: (health: MacHealth?, problem: String?)) {
+        if let problem = read.problem { report(problem) } else { lastProblem = nil }
         let at = now()
-        let next = MacHealthStatus.make(health, now: at)
+        let next = MacHealthStatus.make(read.health, now: at)
         if next != status { status = next }
-        NowStore.shared.record(NowAdapters.macFindings(health.map(NowInputs.MacReport.init), machine: Self.machine,
+        NowStore.shared.record(NowAdapters.macFindings(read.health.map(NowInputs.MacReport.init), machine: Self.machine,
                                                        now: at), now: at)
     }
 
@@ -61,24 +75,19 @@ final class MacHealthStore {
     /// published them.
     private static let machine = Host.current().localizedName ?? "this-mac"
 
-    private func read() -> MacHealth? {
+    /// The report, or nil with the problem to log (a missing file is quiet).
+    nonisolated private static func read(_ url: URL) -> (health: MacHealth?, problem: String?) {
         let data: Data
         do {
             data = try Data(contentsOf: url)
         } catch CocoaError.fileReadNoSuchFile {
-            lastProblem = nil
-            return nil
+            return (nil, nil)
         } catch {
-            report("unreadable — \(error.localizedDescription)")
-            return nil
+            return (nil, "unreadable — \(error.localizedDescription)")
         }
         switch MacHealth.decode(data) {
-        case let .success(health):
-            lastProblem = nil
-            return health
-        case let .failure(problem):
-            report(problem.message)
-            return nil
+        case let .success(health): return (health, nil)
+        case let .failure(problem): return (nil, problem.message)
         }
     }
 
@@ -93,9 +102,9 @@ final class MacHealthStore {
 /// `macwatch stop` re-verifies every process itself, and its answer —
 /// stopped, or refused and why — is shown as it came back.
 enum MacHealthStop {
-    // A GUI app inherits no shell PATH, so a bare `toolkit` is looked up like
-    // the Toolkit module's (`ToolkitClient.path`): settings.json `toolkitPath`
-    // alone when set, else `ToolkitClient.installPaths` in their old order.
+    // A GUI app inherits no shell PATH, so a bare `toolkit` is looked up by
+    // `ExecutableSearch.toolkit`: settings.json `toolkitPath` alone when set,
+    // else `ExecutableSearch.toolkitInstallPaths` in their old order.
 
     enum Outcome: Equatable, Sendable {
         case stopped(String)
@@ -111,7 +120,7 @@ enum MacHealthStop {
     {
         guard let command = argv.first else { return nil }
         if command.hasPrefix("/") { return isExecutable(command) ? argv : nil }
-        guard command == "toolkit", let path = ToolkitClient.path(configured: configured, isExecutable: isExecutable)
+        guard command == "toolkit", let path = ExecutableSearch.toolkit(configured: configured, isExecutable: isExecutable)
         else { return nil }
         return [path] + argv.dropFirst()
     }

@@ -37,6 +37,8 @@ pub(crate) struct Platform {
     runs: Vec<String>,
     run_ids: HashMap<String, u32>,
     mono: String,
+    /// The UI face's CSS family list (`TextSystem::set_ui_family`).
+    ui: String,
 }
 
 impl Platform {
@@ -65,7 +67,21 @@ impl Platform {
             runs: Vec::new(),
             run_ids: HashMap::new(),
             mono: "monospace".into(),
+            ui: "sans-serif".into(),
         }
+    }
+
+    /// The UI face's CSS family list; the faces registered so far are dropped with the atlas
+    /// their ids keyed (the caller clears it).
+    pub(crate) fn set_ui_family(&mut self, family: &str) {
+        let family = family.trim();
+        self.ui = if family.is_empty() {
+            "sans-serif".into()
+        } else {
+            family.into()
+        };
+        self.faces.clear();
+        self.selected = None;
     }
 
     fn face(&mut self, spec: FontSpec) -> u16 {
@@ -73,7 +89,7 @@ impl Platform {
             family: if spec.mono {
                 self.mono.clone()
             } else {
-                "sans-serif".into()
+                self.ui.clone()
             },
             weight: spec.weight,
             italic: spec.italic,

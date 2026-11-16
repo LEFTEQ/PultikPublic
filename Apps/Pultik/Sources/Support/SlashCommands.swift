@@ -28,30 +28,19 @@ struct SlashCommand {
         action = .local(run)
     }
 
-    init(name: String, aliases: [String], usage: String, blurb: String, action: SlashCommandAction) {
-        self.name = name
-        self.aliases = aliases
-        self.usage = usage
-        self.blurb = blurb
-        self.action = action
-    }
-
     var allNames: [String] { [name] + aliases }
 
     /// Returns the line shown back to the user for locally-executed commands.
     @MainActor
     func run(_ argument: String) -> SlashResult {
-        guard case .local(let run) = action else {
-            return .failed("usage: \(usage)")
+        switch action {
+        case .local(let run): run(argument)
         }
-        return run(argument)
     }
 }
 
 enum SlashCommandAction {
     case local(@MainActor (_ argument: String) -> SlashResult)
-    /// Routed through `StatusPanelView`, which owns the Eve conversation state.
-    case askEve
 }
 
 enum SlashResult {
@@ -73,13 +62,6 @@ enum SlashResult {
 enum SlashCommands {
     @MainActor
     static let all: [SlashCommand] = [
-        SlashCommand(
-            name: "ask",
-            aliases: [],
-            usage: "/ask <prompt>",
-            blurb: "ask eve explicitly",
-            action: .askEve
-        ),
         SlashCommand(
             name: "add-link",
             aliases: ["link", "bookmark"],
@@ -162,7 +144,7 @@ enum SlashCommands {
         ) { _ in
             // Kept as a signpost for muscle memory, not a verb: the vault is
             // read-only history since 2026-09-05 (`vitrinka import pultik`).
-            .failed("the todo vault is retired — todos live in vitrinka (\(VitrinkaClient.shared.myWorkURL.absoluteString)); vitrinka me todo | schedule in a terminal")
+            .failed("the todo vault is retired — todos live in vitrinka; vitrinka me todo | schedule in a terminal")
         },
         SlashCommand(
             name: "ssh",
@@ -266,7 +248,7 @@ enum SlashCommands {
 
     /// Section keys the panel actually understands. Validated so a typo says so
     /// instead of silently hiding nothing.
-    static let sectionKeys = ["prod", "firing", "servers", "services", "ci", "runners", "devbox"]
+    static let sectionKeys = ["prod", "firing", "servers", "services", "ci", "runners"]
 
     @MainActor
     private static func setSection(_ argument: String, visible: Bool) -> SlashResult {

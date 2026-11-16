@@ -39,8 +39,11 @@ struct PRTimeline: View {
         return items
     }
 
+    /// Each event is its own child of the Overview's lazy stack, so a long
+    /// story builds only what is on screen; the caller's bottom padding
+    /// spaces every item, as the old stack's spacing did.
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        Group {
             if truncated {
                 Text("Earlier events are on GitHub — ⌘↵ opens the pull request")
                     .font(Theme.Typo.meta).foregroundStyle(Theme.ink3)
@@ -90,7 +93,7 @@ struct PRTimeline: View {
             }
             let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
-                GFMStack(blocks: GFM.blocks(text, repo: repo, resolver: resolver), spacing: 6)
+                GFMStack(blocks: PRRenderCache.shared.blocks(text, repo: repo, resolver: resolver), spacing: 6)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -246,6 +249,7 @@ struct CommentComposer: View {
                     .font(Theme.Typo.body)
                     .scrollContentBackground(.hidden)
                     .focused(focused)
+                    .stagedField()
                     .frame(minHeight: 72, maxHeight: 160)
                     .padding(6)
                     .background(Theme.canvasDeep, in: RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous))

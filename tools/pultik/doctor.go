@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 )
@@ -69,8 +68,8 @@ func doctorUsage() {
 FLAGS
   --json     print a stable machine-readable report
 
-Doctor is read-only. A missing vitrinka sign-in or fan helper is a warning;
-missing CLI integration or an invalid Claude settings file is an error.
+Doctor is read-only. A missing fan helper is a warning; missing CLI
+integration or an invalid Claude settings file is an error.
 `)
 }
 
@@ -82,7 +81,7 @@ func printJSON(v any) error {
 
 func runDoctor() doctorReport {
 	checks := []doctorCheck{
-		checkPlatform(), checkCLI(), checkApp(), checkVitrinka(),
+		checkPlatform(), checkCLI(), checkApp(),
 		checkHelper(), checkSkills(), checkHooks(), checkHammerspoon(), checkGitHubAuth(),
 	}
 	ok := true
@@ -139,60 +138,6 @@ func checkApp() doctorCheck {
 	return doctorCheck{"app", "warning", "Pultik.app is not installed"}
 }
 
-// checkVitrinka is the todo backend's diagnosis: the CLI vitrinka's
-// SessionStart hook runs must resolve and answer `--version`, and the app must have a
-// credential to read /me/ripe with. The app's ladder is `~/.config/vitrinka/
-// token`, then the CLI's own keychain item / config.json server entry — so a
-// signed-in CLI (`vitrinka login`) is enough; both absent is a warning, not
-// an error, because an off-mesh machine must still install cleanly.
-func checkVitrinka() doctorCheck {
-	binary, found := vitrinkaBinary()
-	if !found {
-		return doctorCheck{"vitrinka", "warning", "CLI not found — bun add -g @vitrinka/cli (vitrinka's session cues and the panel's todos stay silent)"}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	version, err := exec.CommandContext(ctx, binary, "--version").Output()
-	if err != nil {
-		return doctorCheck{"vitrinka", "warning", binary + " does not answer --version"}
-	}
-	summary := strings.TrimSpace(string(version))
-	home, _ := os.UserHomeDir()
-	if _, err := os.Stat(filepath.Join(home, ".config", "vitrinka", "token")); err == nil {
-		return doctorCheck{"vitrinka", "ok", summary + " · token file"}
-	}
-	if origins := vitrinkaSignedInOrigins(); len(origins) > 0 {
-		return doctorCheck{"vitrinka", "ok", summary + " · signed in to " + strings.Join(origins, ", ")}
-	}
-	return doctorCheck{"vitrinka", "warning", summary + " · not signed in — vitrinka login (the panel's todos stay hidden until then)"}
-}
-
-// vitrinkaSignedInOrigins reads only the origin KEYS of the CLI's config.json
-// (`servers`), never a token value — the credential itself lives in the
-// keychain and is the app's business at request time.
-func vitrinkaSignedInOrigins() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	raw, err := os.ReadFile(filepath.Join(home, ".config", "vitrinka", "config.json"))
-	if err != nil {
-		return nil
-	}
-	var doc struct {
-		Servers map[string]json.RawMessage `json:"servers"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil
-	}
-	origins := make([]string, 0, len(doc.Servers))
-	for origin := range doc.Servers {
-		origins = append(origins, origin)
-	}
-	sort.Strings(origins)
-	return origins
-}
-
 func checkHelper() doctorCheck {
 	binary := "/usr/local/sbin/pultik-fan-control-helper"
 	plist := "/Library/LaunchDaemons/dev.example.pultik.fan-helper.plist"
@@ -243,29 +188,6 @@ func checkHooks() doctorCheck {
 		return doctorCheck{"hooks", "warning", fmt.Sprintf("%d retired pultik SessionStart hook(s) double vitrinka's todo cue — pultik install --hooks-only removes them", len(retired))}
 	}
 	return doctorCheck{"hooks", "ok", "no retired pultik SessionStart hooks (vitrinka's own hook prints the todo and reminder cues)"}
-}
-
-// vitrinkaBinary resolves the vitrinka CLI the way the app resolves its own
-// helpers: the shim `vitrinka install` writes first, then PATH, then the usual
-// manual-build locations. Nothing here is a personal path. found is false, and
-// the bare name comes back, when nothing resolves.
-func vitrinkaBinary() (path string, found bool) {
-	home, _ := os.UserHomeDir()
-	candidates := []string{filepath.Join(home, ".local", "bin", "vitrinka")}
-	if onPath, err := exec.LookPath("vitrinka"); err == nil {
-		candidates = append(candidates, onPath)
-	}
-	candidates = append(candidates,
-		filepath.Join(home, ".bun", "bin", "vitrinka"),
-		"/opt/homebrew/bin/vitrinka",
-		"/usr/local/bin/vitrinka",
-	)
-	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate, true
-		}
-	}
-	return "vitrinka", false
 }
 
 func checkGitHubAuth() doctorCheck {

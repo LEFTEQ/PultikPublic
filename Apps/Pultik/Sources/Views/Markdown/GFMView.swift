@@ -166,9 +166,13 @@ private struct GFMTableView: View {
 private struct GFMImage: View {
     let url: URL?
     let alt: String
+    /// A detail staged off screen (focus D23) fetches nothing: the image is
+    /// asked for once its text is on screen, and kept after it leaves.
+    @Environment(\.bodyShown) private var onScreen
+    @State private var asked = false
 
     var body: some View {
-        AsyncImage(url: url) { phase in
+        AsyncImage(url: asked || onScreen ? url : nil) { phase in
             switch phase {
             case let .success(image):
                 image.resizable().scaledToFit().frame(maxHeight: 360, alignment: .leading)
@@ -182,6 +186,9 @@ private struct GFMImage: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: onScreen, initial: true) { _, shown in
+            if shown { asked = true }
+        }
     }
 }
 

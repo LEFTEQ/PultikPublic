@@ -105,12 +105,6 @@ let project = Project(
                 "CFBundleURLTypes": [
                     ["CFBundleURLName": "dev.example.pultik", "CFBundleURLSchemes": ["pultik"]],
                 ],
-                // The agent shell whose sessions Pultík opens (SessionShell): its link scheme,
-                // from the shell's brand file. The public mirror writes "" here (no shell).
-                "PultikSessionShellScheme": "",
-                // EventKit read grant (Integrations → Calendar access).
-                "NSCalendarsFullAccessUsageDescription":
-                    "Pultík shows today's events beside the schedule agenda. Read-only.",
             ]),
             // The daemon is its own target — the app must not compile its
             // top-level main.swift (two `main`s in one binary).

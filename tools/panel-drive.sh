@@ -23,16 +23,12 @@
 #   tools/panel-drive.sh metrics [/tmp/mem.json]   # footprint + summon time, also hidden
 #   tools/panel-drive.sh github-pause             # simulate a GitHub breaker pause (Debug only)
 #   tools/panel-drive.sh github-resume            # clear that Debug pause
+#   tools/panel-drive.sh stalls start|stop        # main-thread busy stretches between the two: p50/p95/max, stalls > 8.3 ms, hitches > 50 ms
 #   tools/panel-drive.sh frame                     # any build: window inside its screen? exit 1 if not
 #   tools/panel-drive.sh firing 'DiskFull,warning:Slow'  # inject firing alerts (critical unless prefixed); '' clears
-#   tools/panel-drive.sh clear-preview '<workspace>' # open the Clear this preview
-#   tools/panel-drive.sh clear-action '<action>'     # keep|backup|discard|clear|inspect|refresh|show-log|show-changes|close
 #   tools/panel-drive.sh mac-stop '<finding id>'      # open a .mac finding's Stop… confirm (never confirms it)
 #   tools/panel-drive.sh mark '<object id>|all|none'  # ⌘-click a row's mark, ⌘A, or unmark (bulk actions)
 #   tools/panel-drive.sh home-toggle '<owner/repo>'   # open/close a Home PR-tile ready line ('fold' = drafts · stale)
-#   tools/panel-drive.sh toolkit-window today|7d|30d   # the Toolkit module's window control; `state` reports toolkitWindow/Freshness
-#   PULTIK_DEVBOX_EXECUTABLE and PULTIK_TOOLKIT_EXECUTABLE can select a test CLI in Debug; a disposable
-#   PULTIK_CLEAR_FIXTURE_PATH enables the clear-fixture preview for native QA.
 #
 # Launch the app first, e.g.
 #   PULTIK_KEEP_PANEL_OPEN=1 /tmp/pultik-dd/Build/Products/Debug/Pultik.app/Contents/MacOS/Pultik &
@@ -51,7 +47,7 @@ case "$cmd" in
       if out="$(toolkit displays resolve --role qa --app pultik)"; then PD_TEXT="$out"; else printf '%s\n' "$out" >&2; fi
     fi ;;
   close|github-pause|github-resume) ;;
-  query|size|clear-preview|clear-action|mac-stop|home-toggle|mark|diff-fixture|gutter|timeline-demo|toolkit-window) PD_TEXT="${1-}" ;;
+  query|size|mac-stop|home-toggle|mark|diff-fixture|gutter|timeline-demo) PD_TEXT="${1-}" ;;
   scroll-bench) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-scroll-bench.json ;;
   timeline-bench)
     # The recorded busiest CI day (2026-10-13, build-server) unless another page is named.
@@ -60,6 +56,7 @@ case "$cmd" in
     PD_TEXT="${1:-2} $fixture"; PD_MODS="${3-}"; PD_PATH=/tmp/pultik-timeline-bench.json ;;
   timeline-scrub) PD_TEXT="${1-}"; PD_PATH=/tmp/pultik-timeline-scrub.json ;;
   pr-verb) PD_TEXT="${1:?verb}"; PD_PATH=/tmp/pultik-pr-verb.json ;;
+  stalls) PD_TEXT="${1:?start|stop}"; PD_PATH=/tmp/pultik-stalls.json ;;
   paste) ;;
   key) PD_KEY="${1:?key name}"; PD_MODS="${2-}"; PD_TEXT="${3-}" ;;
   capture) PD_PATH="${1:?png path}" ;;
@@ -67,7 +64,7 @@ case "$cmd" in
   metrics) PD_PATH="${1:-/tmp/pultik-panel-metrics.json}" ;;
   frame) ;;
   firing) PD_TEXT="${1-}" ;;
-  *) sed -n '2,35p' "$0"; exit 2 ;;
+  *) sed -n '2,36p' "$0"; exit 2 ;;
 esac
 
 post() {
@@ -91,6 +88,15 @@ case "$cmd" in
     for _ in $(seq 1 1200); do [ -s "$PD_PATH" ] && break; sleep 0.1; done
     [ -s "$PD_PATH" ] || { echo "panel-drive: no bench result at $PD_PATH" >&2; exit 1; }
     cat "$PD_PATH"
+    ;;
+  stalls)
+    rm -f "$PD_PATH"
+    post
+    if [ "$PD_TEXT" = stop ]; then
+      for _ in $(seq 1 40); do [ -s "$PD_PATH" ] && break; sleep 0.1; done
+      [ -s "$PD_PATH" ] || { echo "panel-drive: no stall report at $PD_PATH" >&2; exit 1; }
+      cat "$PD_PATH"
+    fi
     ;;
   capture|state|metrics)
     rm -f "$PD_PATH"

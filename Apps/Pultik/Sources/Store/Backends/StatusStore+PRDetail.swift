@@ -6,20 +6,25 @@ extension StatusStore {
     /// warm set keeps every change request touched in 48 h on disk, so an
     /// open answers from there; a read goes out only when the index says the
     /// request moved, or its checks are still running.
+    ///
+    /// The three a detail draws are pinned (instant PR open): the warm set
+    /// sits in memory too, filled from disk at launch (`warmPRMemory`) and
+    /// by every sync after it, so `cachedPRDetail` and `cachedPRActivity`
+    /// answer a warm PR's first frame without a disk read.
     enum PRDetailResources {
         /// Persisted and LRU-bounded (D9). Current while the index's
         /// `updatedAt` has not moved past it; a cold one revalidates after 30 s.
         static let conversation = QueryResource<ChangeRequest>(
-            name: "pr.conversation", staleAfter: 30, keep: 400)
+            name: "pr.conversation", staleAfter: 30, keep: 400, pinned: true)
         /// Files and patches never change for a key, so the snapshot is
         /// served at any age, across relaunches. Keyed by both SHAs. Schema
         /// 4: the mirror's diffs carry their blobs and its own budgets.
         static let files = QueryResource<ChangeSet>(
-            name: "pr.files", schema: 4, staleAfter: .infinity, keep: 200)
+            name: "pr.files", schema: 4, staleAfter: .infinity, keep: 100, pinned: true)
         /// The workbench's timeline, merge options and verb handles (PR
         /// workbench D4, D8): persisted, current on the conversation's rule.
         static let activity = QueryResource<ChangeRequestActivity>(
-            name: "pr.activity", staleAfter: 30, keep: 200)
+            name: "pr.activity", staleAfter: 30, keep: 400, pinned: true)
         /// The pickers' repo-wide choices: memory only, fresh five minutes.
         static let choices = QueryResource<MetadataChoices>(
             name: "pr.choices", staleAfter: 300, persists: false, keep: 16)
@@ -65,6 +70,70 @@ extension StatusStore {
         WarmSet.isCurrent(held.value, fetchedAt: held.fetchedAt, indexed: indexedUpdatedAt(held.value.ref), now: now)
     }
 
+    /// What a detail draws before any request (instant PR open): the
+    /// conversation, its exact diff and the activity as memory or disk hold
+    /// them, at any age, under the identity the index already knows — no
+    /// credential round trip. A warm PR's are in memory and `PRWorkbench`
+    /// reads them in its init; this is the one disk read of a colder one.
+    func heldPRDetail(_ ref: ChangeRequestRef) async
+        -> (conversation: ChangeRequest?, files: ChangeSet?, activity: ChangeRequestActivity?) {
+        guard let identity = prIndexIdentity else { return (nil, nil, nil) }
+        let repository = QueryRepository.shared
+        let conversation = await repository.held(PRDetailResources.conversation, key: conversationKey(ref, identity: identity))?.value
+        var files: ChangeSet?
+        if let conversation {
+            files = await repository.held(PRDetailResources.files, key: filesKey(conversation, identity: identity))?.value
+        }
+        let activity = await repository.held(PRDetailResources.activity, key: activityKey(ref, identity: identity))?.value
+        prepareRender([ref])
+        return (conversation, files, activity)
+    }
+
+    /// Whether memory answers `ref`'s open without the host: its
+    /// conversation and activity are both held and current.
+    func prDetailIsCurrent(_ ref: ChangeRequestRef) -> Bool {
+        guard let identity = prIndexIdentity,
+              let conversation = QueryRepository.shared.cached(ChangeRequest.self, key: conversationKey(ref, identity: identity)),
+              let activity = QueryRepository.shared.cached(ChangeRequestActivity.self, key: activityKey(ref, identity: identity))
+        else { return false }
+        return isCurrent(conversation) && isCurrent(activity, of: ref)
+    }
+
+    /// Hands what memory holds of `refs` to the render cache, which parses
+    /// their markdown and lays out their diffs off the main thread — only
+    /// what it does not hold yet, so calling it again costs lookups.
+    /// `diffsFor`: lay out only these refs' diffs (the warm passes keep that
+    /// to the open inbox, which ↵ lands on); nil lays out every ref's.
+    func prepareRender(_ refs: [ChangeRequestRef], resolver: (any AutolinkResolver)? = nil,
+                       diffsFor: Set<ChangeRequestRef>? = nil) {
+        guard let identity = prIndexIdentity else { return }
+        let parts = refs.compactMap { ref -> PRRenderCache.Part? in
+            let conversation = QueryRepository.shared.cached(ChangeRequest.self, key: conversationKey(ref, identity: identity))?.value
+            let activity = QueryRepository.shared.cached(ChangeRequestActivity.self, key: activityKey(ref, identity: identity))?.value
+            guard conversation != nil || activity != nil else { return nil }
+            var part = PRRenderCache.Part(repo: ref.repo)
+            if let conversation {
+                // Each text exactly as its view asks for it.
+                part.texts.append(conversation.body.trimmingCharacters(in: .whitespacesAndNewlines))
+                part.texts += conversation.threads.flatMap { $0.comments.map(\.body) }
+                let key = filesKey(conversation, identity: identity)
+                if diffsFor?.contains(ref) ?? true, let files = QueryRepository.shared.cached(ChangeSet.self, key: key)?.value {
+                    part.files = (key.scope, files)
+                }
+            }
+            for event in activity?.timeline ?? [] {
+                switch event.kind {
+                case let .comment(body), let .review(_, body, _):
+                    part.texts.append(body.trimmingCharacters(in: .whitespacesAndNewlines))
+                default: break
+                }
+            }
+            return part
+        }
+        guard !parts.isEmpty else { return }
+        PRRenderCache.shared.prepare(parts, resolver: resolver ?? autolinksSnapshot, known: prIndex.records.count)
+    }
+
     /// The conversation: held and current, or read now. `force` is the CI
     /// watch's confirm read after a transition.
     func prConversation(_ ref: ChangeRequestRef, force: Bool = false) async throws -> ChangeRequest {
@@ -79,6 +148,7 @@ extension StatusStore {
             try await host.changeRequest(ref, identity: identity)
         }
         warmUpdatedAt[ref] = request.updatedAt
+        prepareRender([ref])
         return request
     }
 
@@ -90,6 +160,7 @@ extension StatusStore {
         let identity = try await host.identity()
         let mirrored = await GitMirror.shared.hasRepo(request.ref.repo)
         if !mirrored { warmMirror([request]) }
+        defer { prepareRender([request.ref]) }
         return try await QueryRepository.shared.load(PRDetailResources.files, key: filesKey(request, identity: identity),
                                                      maxAge: .infinity) {
             if mirrored {
@@ -139,9 +210,12 @@ extension StatusStore {
            isCurrent(held, of: ref) {
             return held.value
         }
-        return try await QueryRepository.shared.load(PRDetailResources.activity, key: key, maxAge: 0) {
+        let activity = try await QueryRepository.shared.load(PRDetailResources.activity, key: key, maxAge: 0) {
             try await host.activity(ref, identity: identity)
         }
+        warmActivityAt[ref] = activity.updatedAt
+        prepareRender([ref])
+        return activity
     }
 
     /// The pickers' labels, open milestones, people and teams for `repo`,

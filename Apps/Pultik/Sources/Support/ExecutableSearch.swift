@@ -44,3 +44,25 @@ enum ExecutableSearch {
         return (trimmed as NSString).expandingTildeInPath
     }
 }
+
+extension ExecutableSearch {
+    /// A GUI app inherits no shell PATH, so `toolkit` is looked up where its
+    /// installers put it: the Homebrew cask, Intel Homebrew, then
+    /// `~/.local/bin`, the order Pultík always used.
+    static let toolkitInstallPaths = [
+        "/opt/homebrew/bin/toolkit",
+        "/usr/local/bin/toolkit",
+        NSHomeDirectory() + "/.local/bin/toolkit",
+    ]
+
+    /// Where This Mac's Stop… runs `toolkit` from; nil = not installed.
+    /// settings.json's `toolkitPath` alone when it is set (a relative, missing
+    /// or non-executable one is nil, never another copy); otherwise
+    /// `toolkitInstallPaths` in the order Pultík always used, with no PATH step
+    /// (docs/specs/2026-10-23-pultik-profiles-decisions.md P12).
+    static func toolkit(configured: String?,
+                       isExecutable: (String) -> Bool = FileManager.default.isExecutableFile(atPath:)) -> String? {
+        find("toolkit", configured: configured, fallbacks: toolkitInstallPaths,
+             environment: [:], isExecutable: isExecutable)
+    }
+}

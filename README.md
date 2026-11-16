@@ -1,7 +1,7 @@
 # Pultík (public source)
 
 A macOS menu-bar command center: GitHub activity, notes, display presets,
-calendar events, fan control, and adapters for an operator's backend services.
+fan control, and adapters for an operator's backend services.
 
 This is a **generated, sanitized mirror**. Changes are made in the private
 source repository and rendered through an explicit file allowlist, replacements,
@@ -69,8 +69,8 @@ use the named screen when it is connected, falling back to the focused screen;
 `frame` reports the monitor name and bounds.
 Ordinary hotkey and menu-bar summons continue to follow the user's screen.
 
-The Sentry and Eve tokens live only in the login keychain (`pultik-sentry`,
-`pultik-eve`); an older plaintext copy in that local JSON file moves there on
+The Sentry token lives only in the login keychain (`pultik-sentry`); an older
+plaintext copy in that local JSON file moves there on
 first read. Do not commit or share that file. The public tree contains no runtime settings.
 Fan control needs the privileged helper and explicit elevation. Build and review
 before installing it on a machine you depend on.

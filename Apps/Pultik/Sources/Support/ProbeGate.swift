@@ -5,18 +5,11 @@ import Observation
 /// Every remote thing Pultík polls, one case per HOST-and-credential.
 ///
 /// The unit a server bans is an IP, so the breaker has to trip for a whole
-/// host — not for the single query that happened to fail. `prometheus` and
-/// `devbox` are separate cases despite sharing a box: one is an HTTP port on
-/// the mesh, the other is sshd, and only the second is behind fail2ban.
-/// Each devbox guest is its own sshd behind its own fail2ban (spec
-/// 2026-09-25), so each box gets its own breaker: a silent box b never
-/// pauses box a.
+/// host — not for the single query that happened to fail.
 enum ProbeTarget: Hashable, Sendable {
     case github
     case prometheus
-    case eve
     case sentry
-    case vitrinka
     /// One per host's Semafor (2026-10-14), by its URL's host: a silent
     /// build-server-next Semafor never pauses the live one's pool.
     case semafor(host: String)
@@ -26,20 +19,15 @@ enum ProbeTarget: Hashable, Sendable {
     /// Hlídač, the prod digest API — another BuildServer host, so a Semafor or
     /// Prometheus outage never pauses the prod board, nor the reverse.
     case hlidac
-    case devbox(box: String)
 
-    /// Stable key for logs and `Pause.id`. The first box keeps today's
-    /// bare `devbox`, so a one-box Mac reads exactly as before.
+    /// Stable key for logs and `Pause.id`.
     var rawValue: String {
         switch self {
         case .github: return "github"
         case .prometheus: return "prometheus"
-        case .eve: return "eve"
         case .sentry: return "sentry"
-        case .vitrinka: return "vitrinka"
         case let .semafor(host): return host == Self.liveSemaforHost ? "semafor" : "semafor-\(host)"
         case .hlidac: return "hlidac"
-        case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox" : "devbox-\(box)"
         }
     }
 
@@ -47,12 +35,9 @@ enum ProbeTarget: Hashable, Sendable {
         switch self {
         case .github: return "github"
         case .prometheus: return "server metrics"
-        case .eve: return "eve"
         case .sentry: return "sentry"
-        case .vitrinka: return "vitrinka"
         case let .semafor(host): return host == Self.liveSemaforHost ? "CI pool (semafor)" : "CI pool (\(host))"
         case .hlidac: return "prod watch (hlídač)"
-        case let .devbox(box): return box == DevboxEndpoint.fallback.name ? "devbox (ssh)" : "devbox \(box) (ssh)"
         }
     }
 }

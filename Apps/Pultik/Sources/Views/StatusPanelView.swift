@@ -34,8 +34,8 @@ enum OverviewURL {
 /// The panel's wiring (copilot shell WP3): it owns the state and hands it to
 /// `PanelShell` — the top bar, the body and the footer in the fixed frame.
 /// The body is an entered module in its `ModuleFrame`, or the global search:
-/// Home at rest, results once typed, and the palette's pages (`.t`, `.n`,
-/// the todos tab, a project page) beside the side columns. `ModuleRouter`
+/// Home at rest, results once typed, and the palette's pages (`.n`, a
+/// project page) beside the side columns. `ModuleRouter`
 /// holds where the panel is; `KeyboardCoordinator` routes every key.
 struct StatusPanelView: View {
     let store: StatusStore
@@ -105,21 +105,7 @@ struct StatusPanelView: View {
     /// Which of `pathTarget.verbs` ↵ runs; ⇥ moves it.
     @State var pathVerbIndex = 0
 
-    @State var eveOnline: Bool?
-    @State var eveAskedPrompt: String?
-    @State var eveReply = ""
-    @State var eveDone = false
-    @State var eveError: String?
-    @State var eveExpanded = false
-    @State var askTask: Task<Void, Never>?
     @State var activeProject: ProjectSpec?
-    /// AppStorage so the tab survives panel close/reopen and app relaunch —
-    /// `panelDidDismiss` deliberately leaves it alone, matching the old
-    /// rebuilt-per-summon behavior where only this survived.
-    @AppStorage("todosTabOpen") var showTodos = false
-    var todoStore: TodoStore {
-        TodoStore.shared
-    }
 
     var resolvedStore: ResolvedStore {
         ResolvedStore.shared
@@ -156,7 +142,7 @@ struct StatusPanelView: View {
         return PaletteMode.allCases.filter { token.isEmpty || $0.rawValue.hasPrefix(token) }
     }
 
-    /// A widget opens its page pre-filtered (`.work overdue`, `.devbox pultik`)
+    /// A widget opens its page pre-filtered (`.c failed`, `.h sk`)
     /// through the same query text a typed mode uses; a module's alias
     /// enters the module with the filter in its field.
     func enterMode(_ mode: PaletteMode, filter: String = "") {
@@ -164,10 +150,6 @@ struct StatusPanelView: View {
         DispatchQueue.main.async { moveCaretToEnd() }
     }
 
-    /// Unread at the moment the panel opened — the open marks everything
-    /// seen (badge clears), but the rail keeps these visually unread for the
-    /// rest of the session, same contract as the resolved snapshot.
-    @State var unreadAlertsSnapshot: Set<Int> = []
     /// True while this panel holds a tick on FanStore — see panelDidPresent/-Dismiss.
     @State var fanTicking = false
     /// True while this panel holds MacHealthStore's re-read, the same way.
@@ -181,12 +163,12 @@ struct StatusPanelView: View {
         #if DEBUG
         // A whole-panel update (vt-7781 AC 8): `timeline-bench` tells its slow frames from the engine's.
         let _ = PanelBodyLog.mark()
+        let _ = PROpenProbe.pass("root")
         #endif
         PanelShell(current: stripModule, scope: searchScope,
                    signals: ModuleSignals.make(store: store, fanStore: FanStore.shared,
                                                macHealth: MacHealthStore.shared),
-                   chatting: eveAskedPrompt != nil,
-                   showsHints: selectedID == nil && query.isEmpty,
+                   showsHints: { selectedID == nil && query.isEmpty },
                    onSelectModule: selectModule, order: store.moduleOrder,
                    topBarHeight: $topBarHeight, footerHeight: $footerHeight) {
             palette
@@ -203,17 +185,12 @@ struct StatusPanelView: View {
                     warmBody(module) { mountedModule(module).frame(height: columnBudget) }
                 }
             }
-            .animation(Theme.Motion.swap(reduceMotion), value: warmth.displayed)
+            // A module switch is a flip, never a crossfade: the crossfade cost
+            // 180 ms per switch, and deciding when to skip it made the root
+            // read `detailOpen`, so every ↵ re-ran the whole panel.
         } footer: {
             PanelFooter(
                 store: store,
-                eveOnline: eveOnline,
-                todoCount: todoStore.openTodos.count,
-                // A module owns the body: leave it, or the tab would open unseen.
-                onTodos: {
-                    leaveModule()
-                    showTodos = true
-                },
                 onMacHealth: { enterMode(.mac) }
             )
         }
@@ -242,10 +219,6 @@ struct StatusPanelView: View {
             driveFromDebugger(note.userInfo ?? [:])
         }
         #endif
-        .onPreferenceChange(CentreChromeKey.self) { value in
-            let rounded = value.rounded()
-            if abs(rounded - centreChrome) >= 1 { centreChrome = rounded }
-        }
         .onAppear {
             // A cold summon can mark the session presented before the first
             // body appears. Warm summons use the session changes below.
@@ -270,29 +243,51 @@ struct StatusPanelView: View {
             if !presented { panelDidDismiss() }
         }
         .onChange(of: NowStore.shared.queue) { old, new in nowQueueChanged(from: old, to: new) }
-        .onChange(of: router.selection) { _, id in nowSelectionChanged(to: id) }
-        // D4: the strip's lift follows the router at once; the body follows
-        // once the keys settle (a warm body at once).
-        .onChange(of: router.place) { old, new in
-            guard old.module != new.module else {
-                if old.view != new.view { store.setVisibleModule(new.module ?? .home, view: new.view) }
-                return
-            }
-            departing = old.module.map { ($0, ModuleInputs(filter: old.filter, selection: old.selection,
-                                                           detailOpen: old.detailOpen,
-                                                           inspectorOpen: old.inspectorOpen, stack: old.stack,
-                                                           view: old.view)) }
-            warmth.request(new.module ?? .home)
-            store.setVisibleModule(new.module ?? .home, view: new.view)
-        }
-        // D1: a place rested on for 1.5 s while up is where a summon returns.
-        .task(id: router.place) {
-            let since = Date()
-            try? await Task.sleep(for: .seconds(PanelPlace.dwell))
-            guard !Task.isCancelled, session.isPresented else { return }
-            place.rested(on: router.place, since: since)
-        }
+        // In its own view: read here, the selection re-ran the whole panel on every arrow key.
+        .background(SelectionWatch(router: router) { nowSelectionChanged(to: $0) })
+        // The place (which carries the selection) is heard in a view of its
+        // own too, for the same reason as the selection above.
+        .background(PlaceWatch(router: router, changed: placeChanged) { rested, since in
+            guard session.isPresented else { return }
+            place.rested(on: rested, since: since)
+        })
         .onDisappear { panelDidDismiss() }
+    }
+
+    /// D4: the strip's lift follows the router at once; the body follows
+    /// once the keys settle (a warm body at once).
+    func placeChanged(from old: ModuleRouter.Place, to new: ModuleRouter.Place) {
+        guard old.module != new.module else {
+            if old.view != new.view { store.setVisibleModule(new.module ?? .home, view: new.view) }
+            return
+        }
+        departing = old.module.map { ($0, ModuleInputs(filter: old.filter, selection: old.selection,
+                                                       detailOpen: old.detailOpen,
+                                                       inspectorOpen: old.inspectorOpen, stack: old.stack,
+                                                       view: old.view)) }
+        // Entering with a detail open is an explicit open, not a walk
+        // along the strip: nothing to coalesce, so the body shows at once.
+        warmth.request(new.module ?? .home, immediate: new.detailOpen)
+        store.setVisibleModule(new.module ?? .home, view: new.view)
+    }
+
+    /// Hears the router's place: its changes, and D1's dwell (a place rested
+    /// on for 1.5 s while up is where a summon returns).
+    struct PlaceWatch: View {
+        let router: ModuleRouter
+        let changed: (ModuleRouter.Place, ModuleRouter.Place) -> Void
+        let rested: (ModuleRouter.Place, Date) -> Void
+
+        var body: some View {
+            Color.clear
+                .onChange(of: router.place) { old, new in changed(old, new) }
+                .task(id: router.place) {
+                    let since = Date()
+                    try? await Task.sleep(for: .seconds(PanelPlace.dwell))
+                    guard !Task.isCancelled else { return }
+                    rested(router.place, since)
+                }
+        }
     }
 
     /// Per-open work — what lived in `onAppear` back when every summon built a
@@ -319,12 +314,7 @@ struct StatusPanelView: View {
         // Triage snapshot: what was resolved before THIS open stays
         // hidden; what gets resolved during it only dims.
         hiddenResolved = resolvedStore.snapshot()
-        // Opening the panel is the read receipt: snapshot what was unread
-        // (the rail keeps styling it), then clear the badge.
-        if store.isSectionVisible("alerts") {
-            unreadAlertsSnapshot = store.unreadAlertIds
-            store.markAlertsSeen()
-        }
+        // Opening the panel is the read receipt: the badge clears.
         if store.isSectionVisible("firing") { store.markFiringSeen() }
         // The board shows every red deployment: their menu-bar dots stop pulsing.
         if store.isSectionVisible("prod") { store.markProdSeen() }
@@ -345,29 +335,6 @@ struct StatusPanelView: View {
             guard session.isPresented, session.generation == generation else { return }
             paletteFocused = true
         }
-        // Every panel open is another request; while eve's breaker is open
-        // the honest answer is "offline" without asking again — and an
-        // answered probe reports its outcome, so repeated panel opens
-        // can open the breaker (or close it on a half-open trial) instead
-        // of knocking outside its books forever.
-        Task {
-            let gate = ProbeGate.shared
-            switch gate.verdict(.eve) {
-            case .hold:
-                if isCurrentOpen(generation) { eveOnline = false }
-            case .trial, .go:
-                let failure = await EveClient.shared.probeHealth(settingsToken: store.eveToken)
-                // The gate is told either way — a half-open trial that is not
-                // reported never closes the breaker — but only the open that
-                // asked may paint the answer.
-                if let failure {
-                    gate.failed(.eve, failure)
-                } else {
-                    gate.succeeded(.eve)
-                }
-                if isCurrentOpen(generation) { eveOnline = failure == nil }
-            }
-        }
         KeyboardCoordinator.claim(keyToken, context: { keyContext() }, perform: { perform($0, $1) })
         // Local SMC reads are cheap but pointless off-screen — tick only
         // while the panel is up. (The fan keep-alive runs independently.)
@@ -379,27 +346,16 @@ struct StatusPanelView: View {
             fanTicking = true
         }
         // toolkit republishes once a minute; read on open, re-read while up.
-        // Its fleet snapshot (Sessions, WP7) rides the same hold.
         if !macHealthWatching {
             MacHealthStore.shared.startWatching()
-            FleetStore.shared.startWatching()
             macHealthWatching = true
         }
-    }
-
-    /// Is `generation` still the open on screen? Async work started by a
-    /// present writes view state only while this holds — the tree is never
-    /// torn down, so nothing else stops a stale completion.
-    func isCurrentOpen(_ generation: Int) -> Bool {
-        session.isPresented && session.generation == generation
     }
 
     /// Per-dismiss teardown AND state reset: the tree stays mounted between
     /// summons, so everything deallocation used to reset for free is reset
     /// here by hand — each ⌥Space still opens a fresh palette.
     func panelDidDismiss() {
-        askTask?.cancel()
-        askTask = nil
         KeyboardCoordinator.resign(keyToken)
         // Balanced with the conditional start above — an unmatched stop
         // would cancel someone else's hold on the tick (Settings' chart).
@@ -409,7 +365,6 @@ struct StatusPanelView: View {
         }
         if macHealthWatching {
             MacHealthStore.shared.stopWatching()
-            FleetStore.shared.stopWatching()
             macHealthWatching = false
         }
         paletteFocused = false
@@ -424,16 +379,6 @@ struct StatusPanelView: View {
         pathVerbIndex = 0
         expandedNoteID = nil
         editingNoteID = nil
-        unreadAlertsSnapshot = []
-        // The eve conversation does not survive a dismiss (it never did) —
-        // and dropping the reply text is also what keeps the hidden tree's
-        // diffing and memory at panel-at-rest size.
-        eveOnline = nil
-        eveAskedPrompt = nil
-        eveReply = ""
-        eveDone = false
-        eveError = nil
-        eveExpanded = false
     }
 
     /// Esc from the field's own cancel: the same ladder the key monitor peels.
@@ -459,8 +404,6 @@ struct StatusPanelView: View {
     /// ⌘1–9 or a strip click. Home is the global search at rest; picking the
     /// module already entered keeps its filter and selection.
     func selectModule(_ module: PanelModule) {
-        if eveAskedPrompt != nil { dismissEve() }
-        showTodos = false
         activeProject = nil
         guard module != router.module else { return }
         router.enter(module)
@@ -535,13 +478,6 @@ struct StatusPanelView: View {
             }
         case .prod:
             return ProdMatrixPage(store: store, filter: filter, selectedID: selected, onOpen: open)
-        case .devbox:
-            return DevboxPage(store: store, filter: filter, selectedID: selected, onOpen: open)
-        case .work:
-            return WorkPage(store: store, filter: filter, selectedID: selected, onOpen: open)
-        case .sessions:
-            return SessionsPage(fleet: FleetStore.shared, store: store, listeners: modeVit(filter), filter: filter,
-                                selectedID: selected, onOpen: open)
         case .estate:
             if inputs.view == .backups {
                 // Its timeline sits above the live table (vt-7781 WP7).
@@ -555,10 +491,6 @@ struct StatusPanelView: View {
             return MachinesPage(store: store, filter: filter, selectedID: selected,
                                 firing: estateFiring, renewals: ExpiryRadarStore.shared.watched, mac: mac,
                                 view: inputs.view, onView: { router.showView($0) }, onOpen: open)
-        case .toolkit:
-            // Its window rides the store (`toolkitPeriod`), which the memo observes.
-            return ToolkitPage(store: store, filter: filter, selectedID: selected, view: inputs.view ?? .overview,
-                              onView: { router.showView($0) }, onOpen: open)
         }
     }
 
@@ -593,15 +525,16 @@ struct StatusPanelView: View {
             : nil
         return AnyView(ModuleHost(page: page, objects: objects, selection: inputs.selection,
                                   detailOpen: inputs.detailOpen, inspectorOpen: inputs.inspectorOpen, stack: inputs.stack,
-                                  onPop: { popCard() }, card: { cardView($0) }, bulk: bulk)
+                                  onPop: { popCard() }, card: { cardView($0) }, bulk: bulk,
+                                  onDetailLeft: { releaseDetailKeys() })
                 .environment(\.rowMarks, marks))
     }
 
     /// One warm body in the content stack: drawn and hit-testable only while
     /// displayed. Its appearance is one build (`state.moduleBuilds`, AC 12).
-    func warmBody(_ module: PanelModule, @ViewBuilder _ content: () -> some View) -> some View {
+    func warmBody<Content: View>(_ module: PanelModule, @ViewBuilder _ content: @escaping () -> Content) -> some View {
         let shown = warmth.displayed == module
-        return content()
+        return WarmBody(shown: shown, content: content).equatable()
             // A hidden body's pulses and spinners stop: they would re-render the panel every frame.
             .environment(\.bodyShown, shown)
             .opacity(shown ? 1 : 0)
@@ -609,6 +542,31 @@ struct StatusPanelView: View {
             .accessibilityHidden(!shown)
             .zIndex(shown ? 1 : 0)
             .onAppear { warmth.built(module) }
+    }
+
+    /// A warm body that stays hidden skips the root's passes (every key and
+    /// every lane landing re-runs the root): it keeps drawing what it drew
+    /// when it was last shown, its frozen inputs. Its content still
+    /// follows the stores it read, so it is current when it shows again.
+    struct WarmBody<Content: View>: View, Equatable {
+        let shown: Bool
+        let content: () -> Content
+
+        static func == (lhs: Self, rhs: Self) -> Bool { !lhs.shown && !rhs.shown }
+
+        var body: some View { content() }
+    }
+
+    /// Hears the router's selection in a body of its own, so the panel root
+    /// never reads it: an arrow key re-runs this empty view and the module
+    /// that draws the selection, not the whole panel.
+    struct SelectionWatch: View {
+        let router: ModuleRouter
+        let changed: (String?) -> Void
+
+        var body: some View {
+            Color.clear.onChange(of: router.selection) { _, id in changed(id) }
+        }
     }
 
     /// A card on the detail stack (D2).
@@ -726,8 +684,7 @@ struct StatusPanelView: View {
             pathCard: global && pathTarget != nil,
             completion: global && (!slashMatches.isEmpty || !modePickerMatches.isEmpty),
             notesDraft: activeMode.map { $0.mode == .notes && !$0.filter.isEmpty } ?? false,
-            page: global && (showTodos || activeProject != nil),
-            eve: eveAskedPrompt != nil,
+            page: global && activeProject != nil,
             noteEditing: global && editingNoteID != nil,
             noteExpanded: global && expandedNoteID != nil,
             focusTargets: shown || bulk ? router.focusTargets : [],
@@ -926,8 +883,6 @@ struct StatusPanelView: View {
             focusPalette()
         case .foldNote:
             withAnimation(.easeOut(duration: 0.16)) { expandedNoteID = nil }
-        case .dismissEve:
-            dismissEve()
         case .clearFocus:
             withAnimation(Theme.Motion.focus(reduceMotion)) { router.clearFocus() }
         case .popCard:
@@ -950,7 +905,7 @@ struct StatusPanelView: View {
             selectedID = nil
             moveCaretToEnd()
         case .closePage:
-            if showTodos { showTodos = false } else { activeProject = nil }
+            activeProject = nil
         case .leaveModule:
             leaveModule()
         case .close:
@@ -962,6 +917,16 @@ struct StatusPanelView: View {
     func focusPalette() {
         NSApp.keyWindow?.makeFirstResponder(nil)
         paletteFocused = true
+    }
+
+    /// A staged detail left the screen but stays built (focus D23): while the
+    /// search field does not hold the keys, a field of that detail may, and
+    /// what is typed must reach the detail now on screen. Only in the
+    /// presented, key panel: a hidden one is never focused
+    /// (`panelDidPresent`), and another window keeps its own field.
+    func releaseDetailKeys() {
+        guard session.isPresented, !paletteFocused, NSApp.keyWindow is StatusPanel else { return }
+        focusPalette()
     }
 }
 
